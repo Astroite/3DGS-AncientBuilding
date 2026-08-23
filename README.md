@@ -2,12 +2,15 @@
 
 这个仓库按“地点 → 场景 → 采集 → 运行 → 产物”管理全景视频重建。地点是资料目录，场景才是一次 COLMAP/Splatfacto 可以独立处理的空间单元；长距离古镇素材应拆成有连续视觉重叠的院落、街段或走廊，不能把几十分钟视频直接塞进一个模型。
 
-首个试点：
+当前试点：
 
 - 地点：`yanguan-ancient-town-20260822`（盐官古镇）
-- 场景：`night-pilot-8k`
-- 原始素材：`E:\Photo\PhotosRaw\2026\2026-08-23\Insta360\VID_20260822_202312_00_004.insv`
+- 场景：`night-walk-4k`
+- 原始素材：`E:\Photo\PhotosRaw\2026\2026-08-23\Insta360\VID_20260822_211338_00_009.insv`
+- 选段：完整素材约 293.86 秒，首跑使用前 90 秒
 - 目标：证明处理闭环可行；当前夜景素材不是正式质量标杆
+
+原先的 `night-pilot-8k` / `capture-004-8k` 清单继续保留，作为另一条独立采集血缘，不被 009 覆盖。
 
 ## 数据边界
 
@@ -18,18 +21,19 @@
 
 ## 1. 在 Insta360 Studio 导出试点输入
 
-不要使用目前项目时间线右上角的 16:9“项目导出”。从原始 360 媒体入口选择 `VID_20260822_202312_00_004.insv`，导出：
+不要使用目前项目时间线右上角的 16:9“项目导出”。从原始 360 媒体入口选择 `VID_20260822_211338_00_009.insv`，导出：
 
-- 2:1 等距柱状全景
-- 7680×3840，29.97 fps
-- H.265、高码率、Rec.709
+- 导出为“全景视频”；Studio 不单独显示宽高比，但 `3840×1920` 本身就是 2:1 等距柱状全景
+- 分辨率选择“匹配原素材 - 3840×1920”，不要上采样到 5.7K 或 8K
+- 匹配原素材帧率 29.97 fps
+- H.265、原件码率约 62 Mbps、Rec.709 10bit
 - 保留正常拼接/防抖
 - 不做视角重构、关键帧、AI 降噪、锐化或 16:9 裁切
 
 输出文件必须保存为：
 
 ```text
-D:\Project\3DGS\locations\yanguan-ancient-town-20260822\scenes\night-pilot-8k\inputs\stitched\capture-004-8k-equirect.mp4
+D:\Project\3DGS\locations\yanguan-ancient-town-20260822\scenes\night-walk-4k\inputs\stitched\capture-009-4k-equirect.mp4
 ```
 
 没有这个标准 MP4 时，`ingest` 会明确失败；它不会尝试把双鱼眼 `.insv` 当成拼接全景。
@@ -81,10 +85,10 @@ conda-lock lock --conda "$(command -v conda)" \
 .\gsdb.ps1 doctor
 
 .\gsdb.ps1 ingest `
-  yanguan-ancient-town-20260822 night-pilot-8k capture-004-8k
+  yanguan-ancient-town-20260822 night-walk-4k capture-009-4k
 
 .\gsdb.ps1 preprocess `
-  yanguan-ancient-town-20260822 night-pilot-8k capture-004-8k
+  yanguan-ancient-town-20260822 night-walk-4k capture-009-4k
 ```
 
 `preprocess` 会打印新运行 ID，例如 `20260823T120000Z-1a2b3c4d`。后续命令均使用该 ID：
@@ -92,19 +96,19 @@ conda-lock lock --conda "$(command -v conda)" \
 ```powershell
 $RunId = '<上一步输出的运行 ID>'
 
-.\gsdb.ps1 reconstruct yanguan-ancient-town-20260822 night-pilot-8k $RunId
-.\gsdb.ps1 train       yanguan-ancient-town-20260822 night-pilot-8k $RunId
-.\gsdb.ps1 export      yanguan-ancient-town-20260822 night-pilot-8k $RunId --version v001
-.\gsdb.ps1 qa report   yanguan-ancient-town-20260822 night-pilot-8k $RunId
+.\gsdb.ps1 reconstruct yanguan-ancient-town-20260822 night-walk-4k $RunId
+.\gsdb.ps1 train       yanguan-ancient-town-20260822 night-walk-4k $RunId
+.\gsdb.ps1 export      yanguan-ancient-town-20260822 night-walk-4k $RunId --version v001
+.\gsdb.ps1 qa report   yanguan-ancient-town-20260822 night-walk-4k $RunId
 .\gsdb.ps1 catalog build
 ```
 
 人工查看 PLY、预览和 QA 清单后：
 
 ```powershell
-.\gsdb.ps1 qa approve yanguan-ancient-town-20260822 night-pilot-8k $RunId --notes '人工检查通过'
+.\gsdb.ps1 qa approve yanguan-ancient-town-20260822 night-walk-4k $RunId --notes '人工检查通过'
 # 或
-.\gsdb.ps1 qa reject  yanguan-ancient-town-20260822 night-pilot-8k $RunId --notes '说明拒绝原因'
+.\gsdb.ps1 qa reject  yanguan-ancient-town-20260822 night-walk-4k $RunId --notes '说明拒绝原因'
 ```
 
 ## 阶段行为
@@ -117,9 +121,18 @@ $RunId = '<上一步输出的运行 ID>'
 
 创建不可静默覆盖的运行清单；均匀抽取 270 个全景 JPEG，记录时间戳、拉普拉斯模糊度、平均亮度、黑位占比和高光裁切占比。预处理前要求保留 20 GiB 余量，并额外估算中间文件空间。
 
+当前 009 试点只选择 0–90 秒，因此 270 帧仍约等于每秒 3 帧。完整 293.86 秒素材后续应按空间连续的街段或走廊拆成多个场景，而不是降低抽帧密度后硬塞进一个模型。
+
 ### reconstruct
 
 首跑使用 270×8 个透视视图、20% 底部裁剪、sequential matching、两个下采样层级。如果注册率或最大连通模型覆盖低于 70%，只进行一次确定性的降级尝试：每个时间桶选相对清晰帧，共 180 帧，转换为 180×14 个视图并裁底 15%。第二次仍失败就停止，不继续无限调参。
+
+### 入镜人物与拍摄者
+
+- 底部裁剪先去掉自拍杆、手臂和大部分位于天底的拍摄者身体；如果身体仍伸出裁剪区，则给全部透视视图增加固定天底遮罩。
+- 游客属于随时间移动的瞬态物体。正式流程应在透视视图生成后做人像分割，适度扩张遮罩边缘，并为每张图保存同尺寸黑白遮罩。
+- 同一组遮罩必须同时用于 COLMAP 特征提取和 Nerfstudio 训练：黑色人物区域不提特征、也不参与像素监督，避免错误相机匹配和 3DGS 漂浮人影。
+- 首次 009 流程验证可以先运行无动态遮罩基线；若注册失败、人物重影或漂浮噪点明显，再启用人物遮罩形成新的配置哈希和运行 ID，禁止覆盖基线结果。
 
 ### train
 

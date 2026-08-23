@@ -1,0 +1,46 @@
+schema_version: 1
+id: capture-009-4k
+location_id: yanguan-ancient-town-20260822
+scene_id: night-walk-4k
+status: draft
+raw_source:
+  windows_path: E:\Photo\PhotosRaw\2026\2026-08-23\Insta360\VID_20260822_211338_00_009.insv
+  immutable: true
+  byte_size: 2344272323
+  sha256: df4787046ff6deb4e233cd189ac4ad4b0c1adcf557bcfee5739b98a53f6c312d
+stitched_video:
+  relative_path: inputs/stitched/capture-009-4k-equirect.mp4
+  sha256: null
+  byte_size: null
+  width: null
+  height: null
+  fps: null
+  duration_seconds: null
+  codec: null
+camera:
+  make: Insta360
+  model: X6
+  firmware: v1.0.20
+source_characteristics:
+  lens_streams: 2
+  lens_resolution: 1920x1920
+  stitched_resolution: 3840x1920
+  fps: 29.97
+  duration_seconds: 293.860233
+  codec: hvc1
+  approximate_bitrate_mbps: 63.82
+selection:
+  start_seconds: 0.0
+  end_seconds: 90.0
+export_settings:
+  projection: equirectangular
+  aspect_ratio: "2:1"
+  resolution: 3840x1920
+  codec: h265
+  color_space: Rec.709 10bit
+  bitrate: original-62-mbps
+  reframing: false
+  ai_denoise: false
+  sharpening: false
+  stabilization: standard
+notes: Studio 中选择“全景视频”和“匹配原素材 - 3840×1920”；5.7K 与 8K 都是无新增细节的上采样。

@@ -43,6 +43,15 @@ def test_repository_manifests_validate() -> None:
     root = Path(__file__).resolve().parents[1]
     location = root / "locations" / "yanguan-ancient-town-20260822"
     load_model(location / "location.yaml", LocationManifest)
-    scene = location / "scenes" / "night-pilot-8k"
-    load_model(scene / "scene.yaml", SceneManifest)
-    load_model(scene / "captures" / "capture-004-8k.yaml", CaptureManifest)
+    scenes = {
+        "night-pilot-8k": "capture-004-8k",
+        "night-walk-4k": "capture-009-4k",
+    }
+    for scene_id, capture_id in scenes.items():
+        scene = location / "scenes" / scene_id
+        scene_manifest = load_model(scene / "scene.yaml", SceneManifest)
+        capture_manifest = load_model(
+            scene / "captures" / f"{capture_id}.yaml", CaptureManifest
+        )
+        assert scene_manifest.default_capture_id == capture_id
+        assert capture_manifest.scene_id == scene_id
