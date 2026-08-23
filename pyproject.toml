@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gsdb"
+version = "0.1.0"
+description = "Location-oriented 360 video to Gaussian Splatting workflow and catalog"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "opencv-python-headless==4.10.0.84",
+  "pydantic>=2.8,<3",
+  "PyYAML>=6.0.2,<7",
+  "typer>=0.12,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-cov>=5,<7",
+]
+
+[project.scripts]
+gsdb = "gsdb.cli:app"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]

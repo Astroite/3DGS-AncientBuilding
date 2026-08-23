@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+condaenv.*.requirements.txt
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Generated catalog
+catalog/*.sqlite
+catalog/*.sqlite-*
+catalog/*.db
+
+# Heavy scene data. Manifests, QA summaries, and placeholder files remain tracked.
+locations/*/scenes/*/inputs/stitched/*
+!locations/*/scenes/*/inputs/stitched/.gitkeep
+locations/*/scenes/*/work/*
+!locations/*/scenes/*/work/.gitkeep
+locations/*/scenes/*/exports/**
+!locations/*/scenes/*/exports/.gitkeep
+!locations/*/scenes/*/exports/*/
+!locations/*/scenes/*/exports/*/artifact.yaml
+
+# Common reconstruction/training artifacts if created elsewhere
+*.mp4
+*.mov
+*.insv
+*.lrv
+*.ply
+*.splat
+*.ksplat
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.db-shm
+*.db-wal

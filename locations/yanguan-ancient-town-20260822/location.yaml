@@ -1,0 +1,17 @@
+schema_version: 1
+id: yanguan-ancient-town-20260822
+display_name: 盐官古镇
+status: draft
+capture_date: 2026-08-22
+region:
+  country_code: CN
+  province: 浙江省
+  city: 海宁市
+tags:
+  - 古建筑
+  - 古镇
+  - 夜景
+rights:
+  status: needs_review
+  notes: 在进入游戏项目参考库前确认拍摄、人物与场地使用权限。
+notes: 首期流程验证地点；一个地点可拆分为多个空间连续的独立 3DGS 场景。

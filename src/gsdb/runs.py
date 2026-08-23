@@ -1,0 +1,124 @@
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+
+from .manifests import canonical_hash, load_model, save_yaml
+from .models import (
+    RunConfig,
+    RunManifest,
+    RunStatus,
+    StageRecord,
+    StageStatus,
+    utc_now,
+)
+
+
+STAGE_ORDER = ("preprocess", "reconstruct", "train", "export", "qa")
+
+
+def run_manifest_path(scene_path: Path, run_id: str) -> Path:
+    return scene_path / "runs" / f"{run_id}.yaml"
+
+
+def load_run(scene_path: Path, run_id: str) -> RunManifest:
+    run = load_model(run_manifest_path(scene_path, run_id), RunManifest)
+    current_hash = canonical_hash(run.config)
+    if current_hash != run.config_hash:
+        raise RuntimeError(
+            f"Run config hash mismatch for {run_id}; configuration changes require a new run"
+        )
+    return run
+
+
+def save_run(scene_path: Path, run: RunManifest) -> None:
+    run.updated_at = utc_now()
+    save_yaml(run_manifest_path(scene_path, run.id), run)
+
+
+def create_run(
+    scene_path: Path,
+    location_id: str,
+    scene_id: str,
+    config: RunConfig,
+    now: datetime | None = None,
+) -> RunManifest:
+    created_at = now or utc_now()
+    digest = canonical_hash(config)
+    run_id = f"{created_at.strftime('%Y%m%dT%H%M%SZ')}-{digest[:8]}"
+    path = run_manifest_path(scene_path, run_id)
+    if path.exists():
+        raise FileExistsError(
+            f"Run already exists: {run_id}. Wait one second or use --run-id with --resume."
+        )
+    run = RunManifest(
+        id=run_id,
+        location_id=location_id,
+        scene_id=scene_id,
+        config_hash=digest,
+        config=config,
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    save_run(scene_path, run)
+    (scene_path / "work" / run_id).mkdir(parents=True, exist_ok=False)
+    return run
+
+
+def require_previous_stages(run: RunManifest, stage: str) -> None:
+    index = STAGE_ORDER.index(stage)
+    for previous in STAGE_ORDER[:index]:
+        if previous == "qa":
+            continue
+        status = run.stages[previous].status
+        if status != StageStatus.SUCCEEDED:
+            raise RuntimeError(
+                f"Stage {stage} requires {previous}=succeeded; current status is {status.value}"
+            )
+
+
+def begin_stage(run: RunManifest, stage: str, resume: bool = False) -> bool:
+    if stage not in STAGE_ORDER:
+        raise ValueError(f"Unknown stage: {stage}")
+    if stage not in ("preprocess", "qa"):
+        require_previous_stages(run, stage)
+    current = run.stages.get(stage, StageRecord())
+    if current.status == StageStatus.SUCCEEDED:
+        if resume:
+            return False
+        raise RuntimeError(f"Stage {stage} already succeeded; use --resume to reuse it")
+    if current.status in (StageStatus.PROCESSING, StageStatus.FAILED) and not resume:
+        raise RuntimeError(f"Stage {stage} was already attempted; use --resume or create a new run")
+    run.stages[stage] = StageRecord(status=StageStatus.PROCESSING, started_at=utc_now())
+    run.status = RunStatus.PROCESSING
+    run.active_stage = stage
+    return True
+
+
+def complete_stage(
+    run: RunManifest, stage: str, message: str | None = None, log_path: str | None = None
+) -> None:
+    record = run.stages[stage]
+    record.status = StageStatus.SUCCEEDED
+    record.completed_at = utc_now()
+    if record.started_at:
+        record.elapsed_seconds = (record.completed_at - record.started_at).total_seconds()
+    record.message = message
+    record.log_path = log_path
+    run.active_stage = None
+    if stage == "qa":
+        run.status = RunStatus.NEEDS_REVIEW
+
+
+def fail_stage(
+    run: RunManifest, stage: str, message: str, log_path: str | None = None
+) -> None:
+    record = run.stages[stage]
+    record.status = StageStatus.FAILED
+    record.completed_at = utc_now()
+    if record.started_at:
+        record.elapsed_seconds = (record.completed_at - record.started_at).total_seconds()
+    record.message = message
+    record.log_path = log_path
+    run.status = RunStatus.FAILED
+    run.active_stage = None

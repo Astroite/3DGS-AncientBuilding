@@ -1,0 +1,46 @@
+schema_version: 1
+id: capture-004-8k
+location_id: yanguan-ancient-town-20260822
+scene_id: night-pilot-8k
+status: draft
+raw_source:
+  windows_path: E:\Photo\PhotosRaw\2026\2026-08-23\Insta360\VID_20260822_202312_00_004.insv
+  immutable: true
+  byte_size: 1442235090
+  sha256: d1b94958e5be1f9c6a7f72b56eb99f503e5c4019020d8ec642aae577dcdc50ed
+stitched_video:
+  relative_path: inputs/stitched/capture-004-8k-equirect.mp4
+  sha256: null
+  byte_size: null
+  width: null
+  height: null
+  fps: null
+  duration_seconds: null
+  codec: null
+camera:
+  make: Insta360
+  model: X6
+  firmware: v1.0.20
+source_characteristics:
+  lens_streams: 2
+  lens_resolution: 3840x3840
+  stitched_resolution: 7680x3840
+  fps: 29.97
+  duration_seconds: 90.7
+  codec: hvc1
+  approximate_bitrate_mbps: 123.9
+selection:
+  start_seconds: 0.0
+  end_seconds: 90.7
+export_settings:
+  projection: equirectangular
+  aspect_ratio: "2:1"
+  resolution: 7680x3840
+  codec: h265
+  color_space: Rec.709
+  bitrate: high
+  reframing: false
+  ai_denoise: false
+  sharpening: false
+  stabilization: standard
+notes: 必须从原始 360 媒体入口导出；不要使用 Studio 项目时间线的 16:9 导出。

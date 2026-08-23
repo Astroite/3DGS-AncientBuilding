@@ -1,0 +1,23 @@
+name: 3dgs
+channels:
+  - pytorch
+  - nvidia/label/cuda-11.8.0
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10.12
+  - pip=24.2
+  - setuptools=69.5.1
+  - numpy=1.26.4
+  - git
+  - ninja
+  - ffmpeg=6.1
+  - colmap=3.8=cpu*
+  - pytorch=2.1.2
+  - torchvision=0.16.2
+  - pytorch-cuda=11.8
+  - cuda-toolkit=11.8
+  - pip:
+      - gsplat==1.4.0
+      - git+https://github.com/nerfstudio-project/nerfstudio.git@758ea1918e082aa44776009d8e755c2f3a88d2ee
+      - -e .[dev]
