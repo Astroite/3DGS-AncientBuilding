@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -37,7 +38,7 @@ def collect_tool_versions() -> dict[str, str]:
     }.items():
         ok, detail = _version(command)
         versions[name] = detail if ok else "unavailable"
-    for distribution in ("gsplat", "nerfstudio"):
+    for distribution in ("gsplat", "nerfstudio", "torchvision"):
         try:
             versions[distribution] = importlib.metadata.version(distribution)
         except importlib.metadata.PackageNotFoundError:
@@ -68,6 +69,16 @@ def run_doctor(project_root: Path, minimum_free_gib: float = 20.0) -> dict[str, 
     checks["ns_process_data"] = _version(["ns-process-data", "--help"])
     checks["ns_train"] = _version(["ns-train", "--help"])
 
+    mimo_key_present = bool(os.environ.get("MIMO_API_KEY"))
+    mimo_base_present = bool(os.environ.get("MIMO_BASE_URL"))
+    if mimo_key_present or mimo_base_present:
+        checks["mimo_environment"] = (
+            mimo_key_present and mimo_base_present,
+            "MIMO_API_KEY and MIMO_BASE_URL are both present"
+            if mimo_key_present and mimo_base_present
+            else "MiMo environment is incomplete; both variables are required",
+        )
+
     try:
         import torch
 
@@ -80,6 +91,18 @@ def run_doctor(project_root: Path, minimum_free_gib: float = 20.0) -> dict[str, 
         checks["torch_cuda"] = (cuda_ok, detail)
     except Exception as error:
         checks["torch_cuda"] = (False, str(error))
+
+    try:
+        from torchvision.models.detection import MaskRCNN_ResNet50_FPN_V2_Weights
+
+        weights = MaskRCNN_ResNet50_FPN_V2_Weights.DEFAULT
+        checks["person_segmenter"] = (
+            True,
+            f"torchvision Mask R-CNN available; weights={weights.name} "
+            "(download/cache is deferred until gsdb mask)",
+        )
+    except Exception as error:
+        checks["person_segmenter"] = (False, str(error))
 
     try:
         import gsplat

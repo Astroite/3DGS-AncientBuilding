@@ -160,6 +160,40 @@ class PreprocessConfig(StrictModel):
     minimum_free_gib: float = Field(default=20.0, ge=1)
 
 
+class MaskingConfig(StrictModel):
+    enabled: bool = True
+    model: Literal["maskrcnn_resnet50_fpn_v2"] = "maskrcnn_resnet50_fpn_v2"
+    weights: Literal["DEFAULT"] = "DEFAULT"
+    device: Literal["cuda", "cpu"] = "cuda"
+    person_class_id: int = 1
+    score_threshold: float = Field(default=0.25, ge=0, le=1)
+    probability_threshold: float = Field(default=0.50, ge=0, le=1)
+    inference_gamma: float = Field(default=0.75, gt=0, le=2)
+    dilation_pixels: int = Field(default=24, ge=0, le=256)
+    closing_pixels: int = Field(default=7, ge=0, le=255)
+    max_masked_fraction: float = Field(default=0.45, gt=0, lt=1)
+    qa_sample_count: int = Field(default=32, ge=1, le=256)
+
+    @field_validator("closing_pixels")
+    @classmethod
+    def validate_closing_kernel(cls, value: int) -> int:
+        if value not in (0, 1) and value % 2 == 0:
+            raise ValueError("closing_pixels must be odd (or 0/1 to disable closing)")
+        return value
+
+
+class VisionQAConfig(StrictModel):
+    enabled: bool = False
+    provider: Literal["mimo"] = "mimo"
+    model: Literal["mimo-v2.5"] = "mimo-v2.5"
+    api_key_env: str = "MIMO_API_KEY"
+    base_url_env: str = "MIMO_BASE_URL"
+    endpoint_path: str = "/chat/completions"
+    timeout_seconds: int = Field(default=120, ge=10, le=600)
+    max_contact_sheets: int = Field(default=4, ge=1, le=16)
+    minimum_confidence: float = Field(default=0.80, ge=0, le=1)
+
+
 class ReconstructionAttempt(StrictModel):
     frame_count: int
     images_per_equirect: Literal[8, 14]
@@ -192,6 +226,8 @@ class RunConfig(StrictModel):
     capture_id: str = Field(pattern=SLUG_PATTERN)
     input_sha256: str
     preprocess: PreprocessConfig = Field(default_factory=PreprocessConfig)
+    masking: MaskingConfig = Field(default_factory=MaskingConfig)
+    vision_qa: VisionQAConfig = Field(default_factory=VisionQAConfig)
     reconstruction: ReconstructionConfig = Field(default_factory=ReconstructionConfig)
     train: TrainConfig = Field(default_factory=TrainConfig)
 
@@ -216,7 +252,7 @@ class ArtifactRecord(StrictModel):
 def default_stages() -> dict[str, StageRecord]:
     return {
         name: StageRecord()
-        for name in ("preprocess", "reconstruct", "train", "export", "qa")
+        for name in ("preprocess", "mask", "reconstruct", "train", "export", "qa")
     }
 
 

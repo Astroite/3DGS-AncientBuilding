@@ -79,7 +79,18 @@ conda-lock lock --conda "$(command -v conda)" \
 
 ## 3. 执行试点
 
-所有 Windows 命令通过 `gsdb.ps1` 进入固定 WSL 环境：
+所有 Windows 命令通过 `gsdb.ps1` 进入固定 WSL 环境。当前只完成准备，**不要在导出完成并确认电脑可长时间运行之前执行下列处理命令**。
+
+明早从 PowerShell 启动整条 009 遮罩试跑：
+
+```powershell
+Set-Location D:\Project\3DGS
+.\scripts\run-009-demo.ps1
+```
+
+这个脚本依次运行环境检查、输入校验、90 秒抽帧、透视投影、人物分割、带遮罩 COLMAP、Splatfacto、导出、QA 报告和目录重建。它不会删除中间文件，也不会自动把最终资产标为 `accepted`。更完整的启动和恢复说明见 [009 遮罩试跑手册](docs/RUNBOOK-009-MASKED.md)。
+
+需要逐阶段观察时，先执行：
 
 ```powershell
 .\gsdb.ps1 doctor
@@ -96,6 +107,7 @@ conda-lock lock --conda "$(command -v conda)" \
 ```powershell
 $RunId = '<上一步输出的运行 ID>'
 
+.\gsdb.ps1 mask        yanguan-ancient-town-20260822 night-walk-4k $RunId
 .\gsdb.ps1 reconstruct yanguan-ancient-town-20260822 night-walk-4k $RunId
 .\gsdb.ps1 train       yanguan-ancient-town-20260822 night-walk-4k $RunId
 .\gsdb.ps1 export      yanguan-ancient-town-20260822 night-walk-4k $RunId --version v001
@@ -123,16 +135,26 @@ $RunId = '<上一步输出的运行 ID>'
 
 当前 009 试点只选择 0–90 秒，因此 270 帧仍约等于每秒 3 帧。完整 293.86 秒素材后续应按空间连续的街段或走廊拆成多个场景，而不是降低抽帧密度后硬塞进一个模型。
 
+### mask
+
+将 270 张全景投影为 270×8 张透视图，然后使用 Torchvision Mask R-CNN 在本地识别人像。人物概率遮罩经过闭运算和 24 px 边缘扩张，保存为与图像同尺寸的二值 PNG：白色可用、黑色忽略。`images_2/images_4` 与 `masks_2/masks_4` 使用相同文件名和最近邻遮罩缩放。
+
+确定性 QA 会核对图片/遮罩一一对应、尺寸、二值范围和最大遮挡比例，并生成抽样联系表。首次调用会下载并缓存官方 Mask R-CNN 权重；代码导入和 `doctor` 不会提前下载。
+
+可选的 MiMo v2.5 多模态门禁默认关闭。只有在服务方确认所用套餐/端点允许该自动化用途，并确认抽样画面中游客人像的外发与留存边界后，才应在新运行中传入 `--vision-qa`；API key 与 base URL 只通过 `MIMO_API_KEY`、`MIMO_BASE_URL` 环境变量提供，不写入清单或日志。MiMo 只审核人物遮罩，不接管本地处理任务，也不替代最终 3DGS 资产审核。
+
 ### reconstruct
 
-首跑使用 270×8 个透视视图、20% 底部裁剪、sequential matching、两个下采样层级。如果注册率或最大连通模型覆盖低于 70%，只进行一次确定性的降级尝试：每个时间桶选相对清晰帧，共 180 帧，转换为 180×14 个视图并裁底 15%。第二次仍失败就停止，不继续无限调参。
+COLMAP 3.8 以 CPU 模式运行，逐图读取 `mask_path`；人物黑区既不产生 SIFT 特征，也不会进入后续训练像素监督。透视图使用与投影 FOV 对应的 PINHOLE 初始内参，而不是依赖缺失 EXIF 的默认焦距。转换后，每个注册帧的 `mask_path` 被写入 Nerfstudio `transforms.json`。
+
+首跑使用 270×8 个透视视图、20% 底部裁剪、sequential matching、两个下采样层级。如果注册率或最大连通模型覆盖低于 70%，只进行一次确定性的降级尝试：每个时间桶选相对清晰帧，共 180 帧，转换为 180×14 个视图、裁底 15%，并生成自己的完整遮罩集。第二次仍失败就停止，不继续无限调参。
 
 ### 入镜人物与拍摄者
 
 - 底部裁剪先去掉自拍杆、手臂和大部分位于天底的拍摄者身体；如果身体仍伸出裁剪区，则给全部透视视图增加固定天底遮罩。
 - 游客属于随时间移动的瞬态物体。正式流程应在透视视图生成后做人像分割，适度扩张遮罩边缘，并为每张图保存同尺寸黑白遮罩。
 - 同一组遮罩必须同时用于 COLMAP 特征提取和 Nerfstudio 训练：黑色人物区域不提特征、也不参与像素监督，避免错误相机匹配和 3DGS 漂浮人影。
-- 首次 009 流程验证可以先运行无动态遮罩基线；若注册失败、人物重影或漂浮噪点明显，再启用人物遮罩形成新的配置哈希和运行 ID，禁止覆盖基线结果。
+- 当前 009 试跑默认就是动态人像遮罩版本；关闭遮罩或改变阈值会形成不同配置哈希和运行 ID，禁止覆盖既有运行。
 
 ### train
 
@@ -142,9 +164,14 @@ $RunId = '<上一步输出的运行 ID>'
 
 导出 Gaussian PLY、3 秒 3DGS 预览、缩略图和坐标变换。QA 先进入 `needs_review`，只有人工命令可以改为 `accepted` 或 `rejected`。SQLite 使用临时数据库构建并原子替换，随时可从 YAML 重建。
 
+## 90 秒试跑耗时预估
+
+按本机 Ryzen 9 5950X（16 核）、RTX 4070 Ti SUPER 和 CPU COLMAP 做无人值守规划，主流程保守按 **5–15 小时**；如果触发唯一一次 180×14 降级重建，整体按 **10–24 小时**。夜景特征不足时 COLMAP 波动最大，这不是进度承诺。建议出门前接通电源、关闭自动睡眠；当前 D 盘约 294 GiB 可用，足够按 30–100 GiB 峰值规划并保留 20 GiB 硬余量。脚本不会主动删除中间数据。
+
 ## 断点和清理
 
 - 已成功阶段再次执行会拒绝覆盖；`--resume` 只复用同一配置和已完成文件。
+- 人像遮罩可逐文件续作；COLMAP 外部命令若中途失败，`--resume` 会创建新的 `attempt-NNN`，保留失败数据库和日志，不猜测或覆盖半成品。
 - 配置变化必须创建新运行，失败运行不会覆盖历史成功产物。
 - `gsdb clean <location> <scene>` 只显示可清理容量，v1 永远不删除文件。
 

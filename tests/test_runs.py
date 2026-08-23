@@ -68,3 +68,22 @@ def test_changed_configuration_cannot_resume_existing_run(tmp_path: Path) -> Non
     save_run(scene, run)
     with pytest.raises(RuntimeError, match="configuration changes require a new run"):
         load_run(scene, run.id)
+
+
+def test_reconstruction_requires_successful_mask_stage(tmp_path: Path) -> None:
+    scene = tmp_path / "scene"
+    (scene / "runs").mkdir(parents=True)
+    (scene / "work").mkdir()
+    run = create_run(
+        scene,
+        "site-001",
+        "scene-001",
+        RunConfig(capture_id="capture-001", input_sha256="e" * 64),
+    )
+    begin_stage(run, "preprocess")
+    complete_stage(run, "preprocess")
+    with pytest.raises(RuntimeError, match="requires mask=succeeded"):
+        begin_stage(run, "reconstruct")
+    begin_stage(run, "mask")
+    complete_stage(run, "mask")
+    assert begin_stage(run, "reconstruct") is True

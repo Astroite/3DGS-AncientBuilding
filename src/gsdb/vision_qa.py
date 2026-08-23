@@ -1,0 +1,158 @@
+from __future__ import annotations
+
+import base64
+import json
+import os
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any, Literal
+
+from pydantic import Field
+
+from .models import StrictModel, VisionQAConfig
+
+
+class VisionQAVerdict(StrictModel):
+    decision: Literal["pass", "fail"]
+    confidence: float = Field(ge=0, le=1)
+    false_negative_views: list[str] = Field(default_factory=list)
+    false_positive_views: list[str] = Field(default_factory=list)
+    rationale: str
+
+
+SYSTEM_PROMPT = """You are a strict QA gate for person masks in architectural reconstruction images.
+Each contact sheet shows perspective views. Red overlay is the region excluded from both COLMAP and
+3DGS training. Pass only when visible people, the camera operator, limbs, and selfie-stick-adjacent
+human pixels are covered with reasonable margins, while permanent architecture is not broadly
+removed. Do not judge photographic beauty. Return only one JSON object with keys: decision
+(pass/fail), confidence (0..1), false_negative_views (filenames), false_positive_views (filenames),
+and rationale. If text is too small to name a view, describe its tile position in the list."""
+
+
+class _RejectRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never forward the Bearer credential to a redirected URL."""
+
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+def _data_url(path: Path) -> str:
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+def build_mimo_request(
+    contact_sheets: list[Path], config: VisionQAConfig
+) -> dict[str, Any]:
+    content: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": (
+                "Inspect every tile in these contact sheets. Red is the ignored mask. "
+                "Judge only person-mask false negatives and destructive false positives."
+            ),
+        }
+    ]
+    content.extend(
+        {"type": "image_url", "image_url": {"url": _data_url(path)}}
+        for path in contact_sheets[: config.max_contact_sheets]
+    )
+    return {
+        "model": config.model,
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": content},
+        ],
+        "temperature": 0,
+        "max_tokens": 1200,
+        "response_format": {"type": "json_object"},
+    }
+
+
+def parse_mimo_verdict(response: dict[str, Any]) -> VisionQAVerdict:
+    try:
+        content = response["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as error:
+        raise RuntimeError("MiMo response does not contain choices[0].message.content") from error
+    if isinstance(content, list):
+        content = "".join(
+            str(item.get("text", "")) if isinstance(item, dict) else str(item)
+            for item in content
+        )
+    text = str(content).strip()
+    if text.startswith("```"):
+        text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    try:
+        return VisionQAVerdict.model_validate_json(text)
+    except Exception as error:
+        raise RuntimeError("MiMo returned invalid mask-QA JSON") from error
+
+
+def validate_mimo_gate(
+    verdict: VisionQAVerdict, config: VisionQAConfig
+) -> VisionQAVerdict:
+    reasons: list[str] = []
+    if verdict.decision != "pass":
+        reasons.append("decision is fail")
+    if verdict.confidence < config.minimum_confidence:
+        reasons.append(
+            f"confidence {verdict.confidence:.2f} is below {config.minimum_confidence:.2f}"
+        )
+    if verdict.false_negative_views:
+        reasons.append(f"reported false negatives: {verdict.false_negative_views}")
+    if verdict.false_positive_views:
+        reasons.append(f"reported false positives: {verdict.false_positive_views}")
+    if reasons:
+        raise RuntimeError("MiMo mask QA did not pass the fail-closed gate: " + "; ".join(reasons))
+    return verdict
+
+
+def resolve_mimo_endpoint(base_url: str, endpoint_path: str) -> str:
+    parsed = urllib.parse.urlparse(base_url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise RuntimeError("MIMO_BASE_URL must be an absolute HTTPS URL")
+    if parsed.query or parsed.fragment:
+        raise RuntimeError("MIMO_BASE_URL must not contain a query string or fragment")
+    return base_url.rstrip("/") + "/" + endpoint_path.lstrip("/")
+
+
+def run_mimo_mask_qa(
+    contact_sheets: list[Path], config: VisionQAConfig
+) -> VisionQAVerdict:
+    if not config.enabled:
+        raise RuntimeError("MiMo vision QA is disabled in this run configuration")
+    api_key = os.environ.get(config.api_key_env)
+    base_url = os.environ.get(config.base_url_env)
+    if not api_key or not base_url:
+        raise RuntimeError(
+            f"Vision QA requires {config.api_key_env} and {config.base_url_env}; "
+            "credentials are never stored in YAML or logs"
+        )
+    if not contact_sheets:
+        raise RuntimeError("Vision QA requires at least one contact sheet")
+    url = resolve_mimo_endpoint(base_url, config.endpoint_path)
+    payload = json.dumps(build_mimo_request(contact_sheets, config)).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        opener = urllib.request.build_opener(_RejectRedirectHandler())
+        with opener.open(request, timeout=config.timeout_seconds) as response:
+            raw = response.read(1_000_001)
+            if len(raw) > 1_000_000:
+                raise RuntimeError("MiMo mask QA response exceeded 1 MB")
+            result = json.loads(raw.decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        detail = error.read(1000).decode("utf-8", errors="replace")
+        raise RuntimeError(f"MiMo mask QA HTTP {error.code}: {detail}") from error
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"MiMo mask QA request failed: {error}") from error
+    return validate_mimo_gate(parse_mimo_verdict(result), config)

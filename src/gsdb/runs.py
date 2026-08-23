@@ -14,7 +14,7 @@ from .models import (
 )
 
 
-STAGE_ORDER = ("preprocess", "reconstruct", "train", "export", "qa")
+STAGE_ORDER = ("preprocess", "mask", "reconstruct", "train", "export", "qa")
 
 
 def run_manifest_path(scene_path: Path, run_id: str) -> Path:

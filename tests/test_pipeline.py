@@ -1,7 +1,10 @@
 from pathlib import Path
 
-from gsdb.models import RunConfig, RunManifest, utc_now
-from gsdb.pipeline import _train_command
+import pytest
+
+from gsdb.models import RunConfig, RunManifest, StageStatus, utc_now
+from gsdb.pipeline import _train_command, preprocess_run
+from gsdb.runs import create_run, load_run
 
 
 def test_train_retry_uses_nerfstudio_dataparser_downscale() -> None:
@@ -25,3 +28,27 @@ def test_train_retry_uses_nerfstudio_dataparser_downscale() -> None:
         "--downscale-factor",
         "2",
     ]
+
+
+def test_stage_start_is_saved_before_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scene = tmp_path / "scene"
+    (scene / "runs").mkdir(parents=True)
+    (scene / "work").mkdir()
+    run = create_run(
+        scene,
+        "site-001",
+        "scene-001",
+        RunConfig(capture_id="capture-001", input_sha256="f" * 64),
+    )
+
+    def interrupt() -> dict[str, str]:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("gsdb.pipeline.collect_tool_versions", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        preprocess_run(scene, run)
+    persisted = load_run(scene, run.id)
+    assert persisted.active_stage == "preprocess"
+    assert persisted.stages["preprocess"].status == StageStatus.PROCESSING

@@ -19,5 +19,14 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Miniforge/Conda was not found in WSL. Run scripts/bootstrap-wsl.sh first.'
 }
 
+$ForwardedNames = @(
+    'MIMO_API_KEY',
+    'MIMO_BASE_URL'
+) | Where-Object { Test-Path -LiteralPath "Env:$_" }
+if ($ForwardedNames.Count -gt 0) {
+    $ExistingForwarded = @($env:WSLENV -split ':' | Where-Object { $_ })
+    $env:WSLENV = (@($ExistingForwarded + $ForwardedNames) | Select-Object -Unique) -join ':'
+}
+
 & wsl.exe -d Ubuntu-22.04 --cd $WslRoot -- $CondaExe run -n 3dgs --no-capture-output gsdb @GsdbArgs
 exit $LASTEXITCODE

@@ -3,14 +3,17 @@ from __future__ import annotations
 import json
 import re
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
-import cv2
-
 from .doctor import collect_tool_versions
 from .manifests import load_model, save_yaml
+from .masking import (
+    create_mask_contact_sheets,
+    generate_person_masks,
+    summarize_detection_records,
+    validate_mask_set,
+)
 from .media import (
     analyze_frames,
     check_disk_budget,
@@ -33,7 +36,13 @@ from .models import (
 )
 from .paths import ensure_within, host_path
 from .processes import CommandError, run_logged
+from .reconstruction import (
+    build_image_pyramid,
+    project_equirectangular_frames,
+    run_masked_colmap,
+)
 from .runs import begin_stage, complete_stage, fail_stage, save_run
+from .vision_qa import run_mimo_mask_qa
 
 
 VERSION_PATTERN = re.compile(r"^v\d{3}$")
@@ -125,6 +134,7 @@ def ingest_capture(
 def preprocess_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunManifest:
     if not begin_stage(run, "preprocess", resume=resume):
         return run
+    save_run(scene_path, run)
     work = scene_path / "work" / run.id
     log_path = work / "logs" / "preprocess.log"
     try:
@@ -182,59 +192,111 @@ def preprocess_run(scene_path: Path, run: RunManifest, resume: bool = False) -> 
     return run
 
 
-def _run_ns_process_data(
+def _prepare_masked_dataset(
+    scene_path: Path,
+    work: Path,
     source: Path,
-    output: Path,
+    dataset: Path,
     attempt: ReconstructionAttempt,
-    log_path: Path,
-) -> None:
-    run_logged(
-        [
-            "ns-process-data",
-            "images",
-            "--data",
-            str(source),
-            "--output-dir",
-            str(output),
-            "--camera-type",
-            "equirectangular",
-            "--images-per-equirect",
-            str(attempt.images_per_equirect),
-            "--crop-bottom",
-            str(attempt.crop_bottom),
-            "--matching-method",
-            attempt.matching_method,
-            "--num-downscales",
-            str(attempt.num_downscales),
-        ],
-        log_path,
+    run: RunManifest,
+    label: str,
+) -> dict[str, Any]:
+    images = project_equirectangular_frames(source, dataset, attempt)
+    build_image_pyramid(
+        dataset / "images", dataset, "images", attempt.num_downscales, is_mask=False
     )
-
-
-def reconstruction_metrics(output: Path, attempt: ReconstructionAttempt) -> dict[str, Any]:
-    transforms_path = output / "transforms.json"
-    if not transforms_path.is_file():
-        raise RuntimeError(f"Nerfstudio did not create {transforms_path}")
-    transforms = json.loads(transforms_path.read_text(encoding="utf-8"))
-    registered = len(transforms.get("frames", []))
-    expected = attempt.frame_count * attempt.images_per_equirect
-    images = len(list((output / "images").glob("*"))) if (output / "images").is_dir() else 0
-    sparse_root = output / "colmap" / "sparse"
-    components = len([item for item in sparse_root.iterdir() if item.is_dir()]) if sparse_root.is_dir() else 1
-    ratio = registered / expected if expected else 0.0
+    records = generate_person_masks(
+        dataset / "images",
+        dataset / "masks",
+        run.config.masking,
+        work / f"mask-metrics-{label}.jsonl",
+    )
+    deterministic = validate_mask_set(
+        dataset / "images",
+        dataset / "masks",
+        run.config.masking.max_masked_fraction,
+    )
+    build_image_pyramid(
+        dataset / "masks", dataset, "masks", attempt.num_downscales, is_mask=True
+    )
+    sheets = create_mask_contact_sheets(
+        dataset / "images",
+        dataset / "masks",
+        records,
+        dataset / "mask-qa",
+        run.config.masking.qa_sample_count,
+        run.config.vision_qa.max_contact_sheets,
+    )
+    vision: dict[str, Any]
+    if run.config.vision_qa.enabled:
+        verdict = run_mimo_mask_qa(sheets, run.config.vision_qa)
+        vision = verdict.model_dump(mode="json")
+        if verdict.decision != "pass":
+            raise RuntimeError(
+                f"MiMo mask QA rejected {label}: {verdict.rationale}; "
+                f"false negatives={verdict.false_negative_views}"
+            )
+    else:
+        vision = {
+            "status": "disabled",
+            "reason": (
+                "Set vision_qa.enabled=true in a new run only after confirming an authorized "
+                "MiMo multimodal endpoint"
+            ),
+        }
     return {
-        "expected_planar_images": expected,
-        "written_planar_images": images,
-        "registered_images": registered,
-        "registration_ratio": ratio,
-        "largest_component_coverage": ratio,
-        "component_count": components,
+        "planar_images": len(images),
+        "model": run.config.masking.model if run.config.masking.enabled else "disabled-all-white",
+        "detection": summarize_detection_records(records),
+        "validation": deterministic,
+        "contact_sheets": [path.relative_to(scene_path).as_posix() for path in sheets],
+        "vision_qa": vision,
     }
+
+
+def mask_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunManifest:
+    if not begin_stage(run, "mask", resume=resume):
+        return run
+    save_run(scene_path, run)
+    work = scene_path / "work" / run.id
+    log_path = work / "logs" / "mask.log"
+    try:
+        primary = _prepare_masked_dataset(
+            scene_path,
+            work,
+            work / "equirect-primary",
+            work / "reconstruction-primary",
+            run.config.reconstruction.primary,
+            run,
+            "primary",
+        )
+        run.metrics.setdefault("masking", {})["primary"] = primary
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(
+            json.dumps(primary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        _record_resources(run, work)
+        complete_stage(
+            run,
+            "mask",
+            message=(
+                f"Projected and masked {primary['planar_images']} primary perspective views; "
+                f"deterministic QA passed"
+            ),
+            log_path=log_path.relative_to(scene_path).as_posix(),
+        )
+    except Exception as error:
+        fail_stage(run, "mask", str(error), log_path.relative_to(scene_path).as_posix())
+        save_run(scene_path, run)
+        raise
+    save_run(scene_path, run)
+    return run
 
 
 def reconstruct_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunManifest:
     if not begin_stage(run, "reconstruct", resume=resume):
         return run
+    save_run(scene_path, run)
     work = scene_path / "work" / run.id
     metrics_records = [
         json.loads(line)
@@ -244,15 +306,11 @@ def reconstruct_run(scene_path: Path, run: RunManifest, resume: bool = False) ->
     attempts: dict[str, Any] = {}
     try:
         primary_output = work / "reconstruction-primary"
-        primary_log = work / "logs" / "reconstruct-primary.log"
-        if not (primary_output / "transforms.json").is_file():
-            _run_ns_process_data(
-                work / "equirect-primary",
-                primary_output,
-                run.config.reconstruction.primary,
-                primary_log,
-            )
-        primary_metrics = reconstruction_metrics(primary_output, run.config.reconstruction.primary)
+        primary_metrics = run_masked_colmap(
+            primary_output,
+            run.config.reconstruction.primary,
+            work / "logs" / "reconstruct-primary",
+        )
         attempts["primary"] = primary_metrics
         threshold = run.config.reconstruction.registration_threshold
         selected = primary_output
@@ -270,16 +328,20 @@ def reconstruct_run(scene_path: Path, run: RunManifest, resume: bool = False) ->
                 run.config.reconstruction.fallback.frame_count,
             )
             fallback_output = work / "reconstruction-fallback"
-            fallback_log = work / "logs" / "reconstruct-fallback.log"
-            if not (fallback_output / "transforms.json").is_file():
-                _run_ns_process_data(
-                    fallback_frames,
-                    fallback_output,
-                    run.config.reconstruction.fallback,
-                    fallback_log,
-                )
-            fallback_metrics = reconstruction_metrics(
-                fallback_output, run.config.reconstruction.fallback
+            fallback_masking = _prepare_masked_dataset(
+                scene_path,
+                work,
+                fallback_frames,
+                fallback_output,
+                run.config.reconstruction.fallback,
+                run,
+                "fallback",
+            )
+            run.metrics.setdefault("masking", {})["fallback"] = fallback_masking
+            fallback_metrics = run_masked_colmap(
+                fallback_output,
+                run.config.reconstruction.fallback,
+                work / "logs" / "reconstruct-fallback",
             )
             attempts["fallback"] = fallback_metrics
             selected = fallback_output
@@ -337,6 +399,7 @@ def _train_command(run: RunManifest, dataset: Path, output: Path, downscale: int
 def train_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunManifest:
     if not begin_stage(run, "train", resume=resume):
         return run
+    save_run(scene_path, run)
     assert run.selected_dataset is not None
     dataset = ensure_within(scene_path / run.selected_dataset, scene_path)
     work = scene_path / "work" / run.id
@@ -419,6 +482,7 @@ def export_run(
         raise ValueError("Artifact version must look like v001")
     if not begin_stage(run, "export", resume=resume):
         return run
+    save_run(scene_path, run)
     export_dir = scene_path / "exports" / version
     manifest_path = export_dir / "artifact.yaml"
     work = scene_path / "work" / run.id
@@ -531,12 +595,16 @@ def export_run(
 def write_qa_report(scene_path: Path, run: RunManifest, resume: bool = False) -> Path:
     if not begin_stage(run, "qa", resume=resume):
         return scene_path / "qa" / f"{run.id}.md"
+    save_run(scene_path, run)
     report_path = scene_path / "qa" / f"{run.id}.md"
     try:
         reconstruction = run.metrics.get("reconstruction", {})
         resources = run.metrics.get("resources", {})
         selected_name = "fallback" if run.fallback_attempted else "primary"
         selected = reconstruction.get(selected_name, {})
+        masking = run.metrics.get("masking", {}).get(selected_name, {})
+        mask_validation = masking.get("validation", {})
+        mask_vision = masking.get("vision_qa", {})
         lines = [
             f"# QA: {run.id}",
             "",
@@ -545,12 +613,16 @@ def write_qa_report(scene_path: Path, run: RunManifest, resume: bool = False) ->
             f"- 选中数据集：`{run.selected_dataset}`",
             f"- 注册率：{float(selected.get('registration_ratio', 0)):.2%}",
             f"- 最大连通模型覆盖：{float(selected.get('largest_component_coverage', 0)):.2%}",
+            f"- 人像遮罩数：{int(mask_validation.get('mask_count', 0))}",
+            f"- 遮罩最大像素占比：{float(mask_validation.get('max_masked_fraction', 0)):.2%}",
+            f"- 遮罩确定性 QA：`{mask_validation.get('deterministic_qa', 'missing')}`",
+            f"- MiMo 遮罩 QA：`{mask_vision.get('decision', mask_vision.get('status', 'missing'))}`",
             f"- 使用降级重建：{'是' if run.fallback_attempted else '否'}",
             f"- 使用 OOM 降采样重试：{'是' if run.metrics.get('train', {}).get('oom_retry') else '否'}",
             f"- 观测磁盘峰值：{float(resources.get('disk_observed_peak_bytes', 0)) / 1024**3:.2f} GiB",
             f"- 观测显存峰值：{float(resources.get('gpu_memory_observed_peak_mib', 0)):.0f} MiB",
             "",
-            "## 人工检查清单",
+            "## 最终资产人工检查清单（人物遮罩已在 mask 阶段门禁）",
             "",
             "- [ ] PLY 可在兼容查看器中打开",
             "- [ ] 预览视频不存在明显相机轨迹断裂",

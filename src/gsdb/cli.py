@@ -25,6 +25,7 @@ from .paths import find_project_root, host_path, location_dir, scene_dir
 from .pipeline import (
     export_run,
     ingest_capture,
+    mask_run,
     preprocess_run,
     reconstruct_run,
     review_run,
@@ -185,6 +186,29 @@ def preprocess(
     run_id: Annotated[str | None, typer.Option(help="Existing run ID when resuming")] = None,
     resume: Annotated[bool, typer.Option(help="Reuse completed work in the same run")] = False,
     target_frames: Annotated[int, typer.Option()] = 270,
+    mask_device: Annotated[str, typer.Option(help="Person segmenter device: cuda or cpu")] = "cuda",
+    mask_score_threshold: Annotated[
+        float, typer.Option(help="Mask R-CNN person confidence threshold")
+    ] = 0.25,
+    mask_probability_threshold: Annotated[
+        float, typer.Option(help="Per-pixel probability threshold inside a person instance")
+    ] = 0.50,
+    mask_gamma: Annotated[
+        float, typer.Option(help="Gamma used only for night-time segmentation inference")
+    ] = 0.75,
+    mask_dilation_pixels: Annotated[
+        int, typer.Option(help="Pixel radius added around detected people")
+    ] = 24,
+    max_masked_fraction: Annotated[
+        float, typer.Option(help="Reject a view when its ignored fraction exceeds this value")
+    ] = 0.45,
+    vision_qa: Annotated[
+        bool,
+        typer.Option(
+            "--vision-qa/--no-vision-qa",
+            help="Gate masks through an authorized MiMo v2.5 endpoint",
+        ),
+    ] = False,
 ) -> None:
     """Create a run, extract uniform panorama frames, and measure input quality."""
     try:
@@ -195,12 +219,45 @@ def preprocess(
             capture = load_model(path / "captures" / f"{capture_id}.yaml", CaptureManifest)
             if not capture.stitched_video.sha256:
                 raise RuntimeError("Capture has not been ingested; run gsdb ingest first")
-            config = RunConfig(capture_id=capture_id, input_sha256=capture.stitched_video.sha256)
+            config = RunConfig(
+                capture_id=capture_id,
+                input_sha256=capture.stitched_video.sha256,
+                masking={
+                    "device": mask_device,
+                    "score_threshold": mask_score_threshold,
+                    "probability_threshold": mask_probability_threshold,
+                    "inference_gamma": mask_gamma,
+                    "dilation_pixels": mask_dilation_pixels,
+                    "max_masked_fraction": max_masked_fraction,
+                },
+                vision_qa={"enabled": vision_qa},
+            )
             config.preprocess.target_frames = target_frames
             config.reconstruction.primary.frame_count = target_frames
             run = create_run(path, location_id, scene_id, config)
         run = preprocess_run(path, run, resume=resume)
         console.print(f"Run [green]{run.id}[/green]: preprocess={run.stages['preprocess'].status.value}")
+        console.print(f"RUN_ID={run.id}", markup=False)
+    except Exception as error:
+        _fatal(error)
+
+
+@app.command("mask")
+def mask_command(
+    location_id: Annotated[str, typer.Argument()],
+    scene_id: Annotated[str, typer.Argument()],
+    run_id: Annotated[str, typer.Argument()],
+    resume: Annotated[bool, typer.Option()] = False,
+) -> None:
+    """Project panoramas, segment people, and create COLMAP/Nerfstudio masks."""
+    try:
+        path = _scene(location_id, scene_id)
+        run = mask_run(path, load_run(path, run_id), resume=resume)
+        metrics = run.metrics.get("masking", {}).get("primary", {})
+        console.print(
+            f"Run [green]{run.id}[/green]: mask={run.stages['mask'].status.value}; "
+            f"views={metrics.get('planar_images', 0)}"
+        )
     except Exception as error:
         _fatal(error)
 
@@ -212,7 +269,7 @@ def reconstruct(
     run_id: Annotated[str, typer.Argument()],
     resume: Annotated[bool, typer.Option()] = False,
 ) -> None:
-    """Project panoramas, run COLMAP, and apply the single bounded fallback."""
+    """Run masked COLMAP and apply the single bounded fallback when required."""
     try:
         path = _scene(location_id, scene_id)
         run = reconstruct_run(path, load_run(path, run_id), resume=resume)
