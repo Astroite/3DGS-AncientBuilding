@@ -42,7 +42,7 @@ from .reconstruction import (
     run_masked_colmap,
 )
 from .runs import begin_stage, complete_stage, fail_stage, save_run
-from .vision_qa import run_mimo_mask_qa
+from .vision_qa import run_deepseek_mask_qa
 
 
 VERSION_PATTERN = re.compile(r"^v\d{3}$")
@@ -229,11 +229,11 @@ def _prepare_masked_dataset(
     )
     vision: dict[str, Any]
     if run.config.vision_qa.enabled:
-        verdict = run_mimo_mask_qa(sheets, run.config.vision_qa)
+        verdict = run_deepseek_mask_qa(sheets, run.config.vision_qa)
         vision = verdict.model_dump(mode="json")
         if verdict.decision != "pass":
             raise RuntimeError(
-                f"MiMo mask QA rejected {label}: {verdict.rationale}; "
+                f"DeepSeek mask QA rejected {label}: {verdict.rationale}; "
                 f"false negatives={verdict.false_negative_views}"
             )
     else:
@@ -241,7 +241,7 @@ def _prepare_masked_dataset(
             "status": "disabled",
             "reason": (
                 "Set vision_qa.enabled=true in a new run only after confirming an authorized "
-                "MiMo multimodal endpoint"
+                "DeepSeek multimodal endpoint"
             ),
         }
     return {
@@ -616,7 +616,7 @@ def write_qa_report(scene_path: Path, run: RunManifest, resume: bool = False) ->
             f"- 人像遮罩数：{int(mask_validation.get('mask_count', 0))}",
             f"- 遮罩最大像素占比：{float(mask_validation.get('max_masked_fraction', 0)):.2%}",
             f"- 遮罩确定性 QA：`{mask_validation.get('deterministic_qa', 'missing')}`",
-            f"- MiMo 遮罩 QA：`{mask_vision.get('decision', mask_vision.get('status', 'missing'))}`",
+            f"- DeepSeek 遮罩 QA：`{mask_vision.get('decision', mask_vision.get('status', 'missing'))}`",
             f"- 使用降级重建：{'是' if run.fallback_attempted else '否'}",
             f"- 使用 OOM 降采样重试：{'是' if run.metrics.get('train', {}).get('oom_retry') else '否'}",
             f"- 观测磁盘峰值：{float(resources.get('disk_observed_peak_bytes', 0)) / 1024**3:.2f} GiB",

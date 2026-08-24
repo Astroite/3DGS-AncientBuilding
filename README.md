@@ -141,7 +141,7 @@ $RunId = '<上一步输出的运行 ID>'
 
 确定性 QA 会核对图片/遮罩一一对应、尺寸、二值范围和最大遮挡比例，并生成抽样联系表。首次调用会下载并缓存官方 Mask R-CNN 权重；代码导入和 `doctor` 不会提前下载。
 
-可选的 MiMo v2.5 多模态门禁默认关闭。只有在服务方确认所用套餐/端点允许该自动化用途，并确认抽样画面中游客人像的外发与留存边界后，才应在新运行中传入 `--vision-qa`；API key 与 base URL 只通过 `MIMO_API_KEY`、`MIMO_BASE_URL` 环境变量提供，不写入清单或日志。MiMo 只审核人物遮罩，不接管本地处理任务，也不替代最终 3DGS 资产审核。
+可选的 DeepSeek `deepseek-v4-flash-vision-exp` 多模态门禁默认关闭。决定把抽样画面发送到 DeepSeek 后，可在新运行中传入 `--vision-qa`；API key 只通过 `DEEPSEEK_API_KEY` 环境变量提供，不写入清单或日志，Base URL 固定为官方 `https://api.deepseek.com`。联系表以 Base64 JPEG、`detail: original` 发送，并在本地预检官方的 32 MiB 单图与 48 MiB 请求体限制。DeepSeek 只审核人物遮罩，不接管本地处理任务，也不替代最终 3DGS 资产审核。接口格式见 [DeepSeek 图像理解文档](https://api-docs.deepseek.com/zh-cn/guides/vision/)。
 
 ### reconstruct
 

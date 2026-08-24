@@ -31,9 +31,10 @@ masking:
   closing_pixels: 7
   max_masked_fraction: 0.45
 vision_qa:
-  enabled: false            # 获正式授权后才用 --vision-qa 新建运行
-  provider: mimo
-  model: mimo-v2.5
+  enabled: false            # 设置 DEEPSEEK_API_KEY 后用 --vision-qa 新建运行
+  provider: deepseek
+  model: deepseek-v4-flash-vision-exp
+  image_detail: original
   minimum_confidence: 0.80
 reconstruction:
   registration_threshold: 0.70
@@ -68,7 +69,7 @@ train:
 
 4. 确认 Windows 接通电源，暂停系统休眠、自动更新重启和计划关机。显示器可以关闭，但 Windows 与 WSL 不能休眠。保持散热通畅。
 
-5. 首次人物分割可能需要联网下载 Torchvision 的模型权重。MiMo 默认关闭，因此本地遮罩流程本身不需要 MiMo API。
+5. 首次人物分割可能需要联网下载 Torchvision 的模型权重。DeepSeek 默认关闭，因此本地遮罩流程本身不需要 API key。
 
 6. 先运行环境检查；只有所有关键项通过后才继续：
 
@@ -84,8 +85,11 @@ train:
 
 ```powershell
 Set-Location D:\Project\3DGS
-.\scripts\run-009-demo.ps1
+# 已按下文设置 DEEPSEEK_API_KEY 时，使用远程遮罩 QA：
+.\scripts\run-009-demo.ps1 -EnableVisionQa
 ```
+
+如果临时决定不把联系表发送到外部服务，则去掉 `-EnableVisionQa`；本地 Mask R-CNN 与确定性遮罩检查仍会执行。
 
 一键脚本会依次执行：
 
@@ -157,7 +161,7 @@ locations\yanguan-ancient-town-20260822\scenes\night-walk-4k\runs\<RunId>.yaml
 locations\yanguan-ancient-town-20260822\scenes\night-walk-4k\work\<RunId>\
 ```
 
-修改人物置信度、是否启用 MiMo、抽帧数量或其他运行配置，都会改变配置哈希，必须从 `preprocess` 创建新 RunId。不要直接编辑已有运行 YAML；加载时会校验哈希并拒绝被篡改的配置。
+修改人物置信度、是否启用 DeepSeek、抽帧数量或其他运行配置，都会改变配置哈希，必须从 `preprocess` 创建新 RunId。不要直接编辑已有运行 YAML；加载时会校验哈希并拒绝被篡改的配置。
 
 ## 遮罩阶段实际做什么
 
@@ -167,40 +171,39 @@ locations\yanguan-ancient-town-20260822\scenes\night-walk-4k\work\<RunId>\
 2. 用 `maskrcnn_resnet50_fpn_v2` 检测和分割人物；夜景推理使用固定 gamma，人物边缘执行闭合和 24 px 扩张。
 3. 为每张透视图保存同尺寸二值遮罩：白色为可用建筑像素，黑色为人物等忽略区域。
 4. 校验图片/遮罩一一对应、尺寸一致、只包含 0/255，并拒绝单张遮掉超过 45% 的异常结果。
-5. 生成抽样联系表。MiMo 未启用时只记录“远程 QA 已禁用”，不会发送图片到外部服务。
+5. 生成抽样联系表。DeepSeek 未启用时只记录“远程 QA 已禁用”，不会发送图片到外部服务。
 
 随后 `reconstruct` 把同一组遮罩通过 COLMAP 的 `ImageReader.mask_path` 排除出特征提取，并把 `mask_path` 写进 Nerfstudio 的 `transforms.json`，训练时继续排除这些像素。
 
-## MiMo：默认禁用，获授权后才启用
+## DeepSeek：默认禁用，设置 Key 后显式启用
 
-明早建议先使用默认的 `--no-vision-qa`。这只关闭远程多模态判定，不会关闭本地人物分割和确定性遮罩检查。
+不传 `-EnableVisionQa` 时使用默认的 `--no-vision-qa`。这只关闭远程多模态判定，不会关闭本地人物分割和确定性遮罩检查。
 
-只有在小米客服明确确认你的账号、套餐和目标接口允许“自动化调用 MiMo v2.5 对人物遮罩联系表做多模态 QA”之后，才启用远程闸门。不要猜 Token Plan 的接口地址，也不要把编码工具的非公开接口当作通用推理 API。
+启用远程闸门会把最多 4 张抽样遮罩联系表发送到 DeepSeek。联系表可能包含可识别的游客或拍摄者，应把它视为对第三方服务的数据外发；确认可以接受后再启用。
 
-获授权后，从客服或正式控制台取得 OpenAI 兼容的 Base URL，在**当前 PowerShell 进程**临时设置环境变量：
+从 DeepSeek 控制台取得 API Key，在**当前 PowerShell 进程**临时设置环境变量：
 
 ```powershell
-$MiMoCredential = Get-Credential -UserName 'mimo-token' -Message '输入 MIMO_API_KEY'
-$env:MIMO_API_KEY = $MiMoCredential.GetNetworkCredential().Password
-$env:MIMO_BASE_URL = 'https://<客服确认的正式地址>/v1'
+$DeepSeekCredential = Get-Credential -UserName 'deepseek-api-key' -Message '输入 DEEPSEEK_API_KEY'
+$env:DEEPSEEK_API_KEY = $DeepSeekCredential.GetNetworkCredential().Password
 
 .\scripts\run-009-demo.ps1 -EnableVisionQa
 ```
 
-`gsdb.ps1` 和一键脚本只通过 Windows 的 `WSLENV` 转发这两个变量名；密钥值不会成为命令行参数。Base URL 必须是服务方给出的最终 HTTPS 地址，客户端拒绝 HTTP 和重定向，避免 Bearer key 被转发到其他地址。
+`gsdb.ps1` 和一键脚本只通过 Windows 的 `WSLENV` 转发 `DEEPSEEK_API_KEY` 变量名；密钥值不会成为命令行参数。Base URL 固定为官方 `https://api.deepseek.com`，客户端拒绝 HTTP 和重定向，避免 Bearer key 被转发到其他地址。
 
-远程 QA 会调用 `mimo-v2.5`，只发送抽样遮罩联系表，不会发送 `.insv` 或完整视频；但联系表仍可能包含可识别的游客或拍摄者人像，应按外发数据处理并确认服务方的传输、留存和删除条款。模型必须返回结构化的 `pass/fail`；只有 `pass`、置信度不低于 0.80、且未报告漏遮或误遮视图时才放行。API 缺少凭据、超时、返回无效 JSON 或其他任一条件不满足时，遮罩阶段直接失败，COLMAP 不会继续。
+远程 QA 会调用 `deepseek-v4-flash-vision-exp`，只发送抽样遮罩联系表，不会发送 `.insv` 或完整视频。图片使用 OpenAI 兼容的 Base64 `image_url` 内容块并设置 `detail: original`；服务端仍会把大图按比例缩放到约 `800×800` 的总像素规模，因此联系表使用大字号标签和高对比度红色遮罩。模型必须返回结构化的 `pass/fail`；只有 `pass`、置信度不低于 0.80、且未报告漏遮或误遮视图时才放行。API 缺少凭据、超时、返回无效 JSON 或其他任一条件不满足时，遮罩阶段直接失败，COLMAP 不会继续。具体输入和限制见 [DeepSeek 官方图像理解文档](https://api-docs.deepseek.com/zh-cn/guides/vision/)。
 
 结束或失败后清除当前会话中的秘密：
 
 ```powershell
-Remove-Item Env:MIMO_API_KEY, Env:MIMO_BASE_URL -ErrorAction SilentlyContinue
-$MiMoCredential = $null
+Remove-Item Env:DEEPSEEK_API_KEY -ErrorAction SilentlyContinue
+$DeepSeekCredential = $null
 ```
 
-API Key 不得写入 Git、README、脚本、YAML、`.env`、命令参数或日志。仓库只保存环境变量名 `MIMO_API_KEY` / `MIMO_BASE_URL`，不会保存变量值。
+API Key 不得写入 Git、README、脚本、YAML、`.env`、命令参数或日志。仓库只保存环境变量名 `DEEPSEEK_API_KEY`，不会保存变量值。
 
-启用 MiMo 会改变运行配置和 RunId。不能给已经以 `--no-vision-qa` 创建的 RunId“中途加开”远程 QA；应新建运行。
+启用 DeepSeek 会改变运行配置和 RunId。不能给已经以 `--no-vision-qa` 创建的 RunId“中途加开”远程 QA；应新建运行。
 
 ## 中断与恢复
 
@@ -239,7 +242,7 @@ $RunId = '<上次打印的 RunId>'
 
 - `doctor`、输入 2:1/解码/哈希或空间检查失败：在预处理前停止。
 - 本地遮罩缺失、尺寸错误、非二值或单图遮挡超过 45%：在 COLMAP 前停止。
-- 启用 MiMo 后远程调用失败或判定 `fail`：在 COLMAP 前停止。
+- 启用 DeepSeek 后远程调用失败或判定 `fail`：在 COLMAP 前停止。
 - 主 COLMAP 的注册率或最大连通模型覆盖低于 70%：只运行一次 180 × 14 降级流程。
 - 降级 COLMAP 仍低于 70%：停止，不启动训练，并保留失败分析数据。
 - Splatfacto 首次明确 CUDA OOM：只降低一级训练分辨率重试一次；第二次 OOM 或其他训练错误直接停止。
@@ -277,4 +280,4 @@ Completed <RunId>. Artifacts remain needs_review; no automatic approval was perf
 - `runs\<RunId>.yaml` 中完整的遮罩、重建、训练、资源和产物记录；
 - 从 YAML 原子重建的 `catalog\catalog.sqlite` 记录。
 
-此时运行状态必须保持 `needs_review`。不要在无人值守脚本中追加 `qa approve`。即使后续由 MiMo 完成人物遮罩 QA，它也只负责遮罩闸门，不等于对最终几何、漂浮噪点、夜景曝光伪影、权限或游戏参考价值作最终批准。
+此时运行状态必须保持 `needs_review`。不要在无人值守脚本中追加 `qa approve`。即使由 DeepSeek 完成人物遮罩 QA，它也只负责遮罩闸门，不等于对最终几何、漂浮噪点、夜景曝光伪影、权限或游戏参考价值作最终批准。

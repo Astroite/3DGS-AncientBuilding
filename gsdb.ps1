@@ -20,8 +20,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $ForwardedNames = @(
-    'MIMO_API_KEY',
-    'MIMO_BASE_URL'
+    'DEEPSEEK_API_KEY'
 ) | Where-Object { Test-Path -LiteralPath "Env:$_" }
 if ($ForwardedNames.Count -gt 0) {
     $ExistingForwarded = @($env:WSLENV -split ':' | Where-Object { $_ })

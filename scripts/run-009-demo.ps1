@@ -25,10 +25,10 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 if ($EnableVisionQa) {
-    if (-not $env:MIMO_API_KEY -or -not $env:MIMO_BASE_URL) {
-        throw 'EnableVisionQa requires MIMO_API_KEY and MIMO_BASE_URL in this PowerShell session.'
+    if (-not $env:DEEPSEEK_API_KEY) {
+        throw 'EnableVisionQa requires DEEPSEEK_API_KEY in this PowerShell session.'
     }
-    $Forwarded = @('MIMO_API_KEY', 'MIMO_BASE_URL')
+    $Forwarded = @('DEEPSEEK_API_KEY')
     $ExistingForwarded = @($env:WSLENV -split ':' | Where-Object { $_ })
     $env:WSLENV = (@($ExistingForwarded + $Forwarded) | Select-Object -Unique) -join ':'
 }

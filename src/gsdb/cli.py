@@ -206,7 +206,7 @@ def preprocess(
         bool,
         typer.Option(
             "--vision-qa/--no-vision-qa",
-            help="Gate masks through an authorized MiMo v2.5 endpoint",
+            help="Gate masks through DeepSeek V4 Flash Vision",
         ),
     ] = False,
 ) -> None:

@@ -69,14 +69,11 @@ def run_doctor(project_root: Path, minimum_free_gib: float = 20.0) -> dict[str, 
     checks["ns_process_data"] = _version(["ns-process-data", "--help"])
     checks["ns_train"] = _version(["ns-train", "--help"])
 
-    mimo_key_present = bool(os.environ.get("MIMO_API_KEY"))
-    mimo_base_present = bool(os.environ.get("MIMO_BASE_URL"))
-    if mimo_key_present or mimo_base_present:
-        checks["mimo_environment"] = (
-            mimo_key_present and mimo_base_present,
-            "MIMO_API_KEY and MIMO_BASE_URL are both present"
-            if mimo_key_present and mimo_base_present
-            else "MiMo environment is incomplete; both variables are required",
+    deepseek_key_present = bool(os.environ.get("DEEPSEEK_API_KEY"))
+    if deepseek_key_present:
+        checks["deepseek_environment"] = (
+            True,
+            "DEEPSEEK_API_KEY is present; value was not inspected or logged",
         )
 
     try:

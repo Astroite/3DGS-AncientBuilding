@@ -43,7 +43,11 @@ def _data_url(path: Path) -> str:
     return f"data:image/jpeg;base64,{encoded}"
 
 
-def build_mimo_request(
+MAX_INLINE_IMAGE_BYTES = 32 * 1024 * 1024
+MAX_REQUEST_BODY_BYTES = 48 * 1024 * 1024
+
+
+def build_deepseek_request(
     contact_sheets: list[Path], config: VisionQAConfig
 ) -> dict[str, Any]:
     content: list[dict[str, Any]] = [
@@ -55,10 +59,20 @@ def build_mimo_request(
             ),
         }
     ]
-    content.extend(
-        {"type": "image_url", "image_url": {"url": _data_url(path)}}
-        for path in contact_sheets[: config.max_contact_sheets]
-    )
+    for path in contact_sheets[: config.max_contact_sheets]:
+        if path.stat().st_size > MAX_INLINE_IMAGE_BYTES:
+            raise RuntimeError(
+                f"DeepSeek contact sheet exceeds the 32 MiB inline-image limit: {path}"
+            )
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": _data_url(path),
+                    "detail": config.image_detail,
+                },
+            }
+        )
     return {
         "model": config.model,
         "messages": [
@@ -71,11 +85,13 @@ def build_mimo_request(
     }
 
 
-def parse_mimo_verdict(response: dict[str, Any]) -> VisionQAVerdict:
+def parse_deepseek_verdict(response: dict[str, Any]) -> VisionQAVerdict:
     try:
         content = response["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as error:
-        raise RuntimeError("MiMo response does not contain choices[0].message.content") from error
+        raise RuntimeError(
+            "DeepSeek response does not contain choices[0].message.content"
+        ) from error
     if isinstance(content, list):
         content = "".join(
             str(item.get("text", "")) if isinstance(item, dict) else str(item)
@@ -87,10 +103,10 @@ def parse_mimo_verdict(response: dict[str, Any]) -> VisionQAVerdict:
     try:
         return VisionQAVerdict.model_validate_json(text)
     except Exception as error:
-        raise RuntimeError("MiMo returned invalid mask-QA JSON") from error
+        raise RuntimeError("DeepSeek returned invalid mask-QA JSON") from error
 
 
-def validate_mimo_gate(
+def validate_deepseek_gate(
     verdict: VisionQAVerdict, config: VisionQAConfig
 ) -> VisionQAVerdict:
     reasons: list[str] = []
@@ -105,35 +121,37 @@ def validate_mimo_gate(
     if verdict.false_positive_views:
         reasons.append(f"reported false positives: {verdict.false_positive_views}")
     if reasons:
-        raise RuntimeError("MiMo mask QA did not pass the fail-closed gate: " + "; ".join(reasons))
+        raise RuntimeError(
+            "DeepSeek mask QA did not pass the fail-closed gate: " + "; ".join(reasons)
+        )
     return verdict
 
 
-def resolve_mimo_endpoint(base_url: str, endpoint_path: str) -> str:
+def resolve_deepseek_endpoint(base_url: str, endpoint_path: str) -> str:
     parsed = urllib.parse.urlparse(base_url)
     if parsed.scheme != "https" or not parsed.netloc:
-        raise RuntimeError("MIMO_BASE_URL must be an absolute HTTPS URL")
+        raise RuntimeError("DeepSeek base URL must be an absolute HTTPS URL")
     if parsed.query or parsed.fragment:
-        raise RuntimeError("MIMO_BASE_URL must not contain a query string or fragment")
+        raise RuntimeError("DeepSeek base URL must not contain a query string or fragment")
     return base_url.rstrip("/") + "/" + endpoint_path.lstrip("/")
 
 
-def run_mimo_mask_qa(
+def run_deepseek_mask_qa(
     contact_sheets: list[Path], config: VisionQAConfig
 ) -> VisionQAVerdict:
     if not config.enabled:
-        raise RuntimeError("MiMo vision QA is disabled in this run configuration")
+        raise RuntimeError("DeepSeek vision QA is disabled in this run configuration")
     api_key = os.environ.get(config.api_key_env)
-    base_url = os.environ.get(config.base_url_env)
-    if not api_key or not base_url:
+    if not api_key:
         raise RuntimeError(
-            f"Vision QA requires {config.api_key_env} and {config.base_url_env}; "
-            "credentials are never stored in YAML or logs"
+            f"Vision QA requires {config.api_key_env}; credentials are never stored in YAML or logs"
         )
     if not contact_sheets:
         raise RuntimeError("Vision QA requires at least one contact sheet")
-    url = resolve_mimo_endpoint(base_url, config.endpoint_path)
-    payload = json.dumps(build_mimo_request(contact_sheets, config)).encode("utf-8")
+    url = resolve_deepseek_endpoint(config.base_url, config.endpoint_path)
+    payload = json.dumps(build_deepseek_request(contact_sheets, config)).encode("utf-8")
+    if len(payload) > MAX_REQUEST_BODY_BYTES:
+        raise RuntimeError("DeepSeek vision-QA request exceeds the 48 MiB request-body limit")
     request = urllib.request.Request(
         url,
         data=payload,
@@ -148,11 +166,11 @@ def run_mimo_mask_qa(
         with opener.open(request, timeout=config.timeout_seconds) as response:
             raw = response.read(1_000_001)
             if len(raw) > 1_000_000:
-                raise RuntimeError("MiMo mask QA response exceeded 1 MB")
+                raise RuntimeError("DeepSeek mask QA response exceeded 1 MB")
             result = json.loads(raw.decode("utf-8"))
     except urllib.error.HTTPError as error:
         detail = error.read(1000).decode("utf-8", errors="replace")
-        raise RuntimeError(f"MiMo mask QA HTTP {error.code}: {detail}") from error
+        raise RuntimeError(f"DeepSeek mask QA HTTP {error.code}: {detail}") from error
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
-        raise RuntimeError(f"MiMo mask QA request failed: {error}") from error
-    return validate_mimo_gate(parse_mimo_verdict(result), config)
+        raise RuntimeError(f"DeepSeek mask QA request failed: {error}") from error
+    return validate_deepseek_gate(parse_deepseek_verdict(result), config)

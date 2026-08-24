@@ -184,11 +184,12 @@ class MaskingConfig(StrictModel):
 
 class VisionQAConfig(StrictModel):
     enabled: bool = False
-    provider: Literal["mimo"] = "mimo"
-    model: Literal["mimo-v2.5"] = "mimo-v2.5"
-    api_key_env: str = "MIMO_API_KEY"
-    base_url_env: str = "MIMO_BASE_URL"
+    provider: Literal["deepseek"] = "deepseek"
+    model: Literal["deepseek-v4-flash-vision-exp"] = "deepseek-v4-flash-vision-exp"
+    api_key_env: str = "DEEPSEEK_API_KEY"
+    base_url: Literal["https://api.deepseek.com"] = "https://api.deepseek.com"
     endpoint_path: str = "/chat/completions"
+    image_detail: Literal["original"] = "original"
     timeout_seconds: int = Field(default=120, ge=10, le=600)
     max_contact_sheets: int = Field(default=4, ge=1, le=16)
     minimum_confidence: float = Field(default=0.80, ge=0, le=1)
