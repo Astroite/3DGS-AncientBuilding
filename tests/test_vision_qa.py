@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import pytest
 from gsdb.models import VisionQAConfig
 from gsdb.vision_qa import (
     build_deepseek_request,
+    load_local_mask_qa_review,
     parse_deepseek_verdict,
     resolve_deepseek_endpoint,
     validate_deepseek_gate,
@@ -99,3 +101,39 @@ def test_deepseek_gate_is_fail_closed() -> None:
     )
     with pytest.raises(RuntimeError, match="false negatives"):
         validate_deepseek_gate(reported_miss, config)
+
+
+def test_local_llm_review_is_bound_to_exact_contact_sheet_bytes(tmp_path: Path) -> None:
+    sheet = tmp_path / "mask-contact-01.jpg"
+    sheet.write_bytes(b"contact-sheet")
+    review_path = tmp_path / "codex-local-review.json"
+    review_path.write_text(
+        json.dumps(
+            {
+                "reviewer": "codex-local-llm",
+                "contact_sheet_sha256": {
+                    sheet.name: hashlib.sha256(sheet.read_bytes()).hexdigest()
+                },
+                "verdict": {
+                    "decision": "pass",
+                    "confidence": 0.95,
+                    "false_negative_views": [],
+                    "false_positive_views": [],
+                    "rationale": "All visible people are covered.",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    review, verdict = load_local_mask_qa_review(
+        review_path, [sheet], VisionQAConfig(enabled=True)
+    )
+
+    assert review.reviewer == "codex-local-llm"
+    assert verdict.decision == "pass"
+    sheet.write_bytes(b"changed")
+    with pytest.raises(RuntimeError, match="does not match"):
+        load_local_mask_qa_review(
+            review_path, [sheet], VisionQAConfig(enabled=True)
+        )

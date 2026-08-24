@@ -18,6 +18,7 @@ from gsdb.reconstruction import (
     select_colmap_attempt,
     projection_view_specs,
     reorder_database_image_ids,
+    validate_existing_projection_set,
     validate_folder_camera_ids,
     validate_frame_masks,
 )
@@ -93,16 +94,46 @@ def test_projection_specs_match_nerfstudio_orientation_counts_and_crop_math() ->
     ]
 
 
+def test_partial_projection_set_is_validated_for_resume(tmp_path: Path) -> None:
+    target = tmp_path / "images"
+    first = target / "view_00" / "frame_000001.jpg"
+    second = target / "view_01" / "frame_000001.jpg"
+    first.parent.mkdir(parents=True)
+    second.parent.mkdir(parents=True)
+    image = np.zeros((32, 32, 3), dtype=np.uint8)
+    assert cv2.imwrite(str(first), image)
+    assert cv2.imwrite(str(second), image)
+
+    reusable = validate_existing_projection_set(target, 2, 2, 32)
+
+    assert reusable == {
+        Path("view_00/frame_000001.jpg"),
+        Path("view_01/frame_000001.jpg"),
+    }
+
+
 def test_rig_config_has_distinct_cameras_zero_centers_and_unit_quaternions() -> None:
     camera_ids = {f"view_{index:02d}/": index + 1 for index in range(8)}
     payload = build_rig_config(camera_ids, _attempt())
     rig = payload[0]
     assert rig["ref_camera_id"] == 1
     assert len(rig["cameras"]) == 8
-    assert "cam_from_rig_translation" not in rig["cameras"][0]
-    for camera in rig["cameras"][1:]:
-        assert camera["cam_from_rig_translation"] == [0.0, 0.0, 0.0]
-        assert np.linalg.norm(camera["cam_from_rig_rotation"]) == pytest.approx(1.0)
+    assert rig["cameras"][0]["rel_qvec"] == [1.0, 0.0, 0.0, 0.0]
+    for camera in rig["cameras"]:
+        assert camera["rel_tvec"] == [0.0, 0.0, 0.0]
+        assert np.linalg.norm(camera["rel_qvec"]) == pytest.approx(1.0)
+
+
+def test_rig_config_accepts_sparse_component_camera_subset() -> None:
+    camera_ids = {"view_02/": 3, "view_03/": 4}
+
+    payload = build_rig_config(camera_ids, _attempt())
+
+    rig = payload[0]
+    assert rig["ref_camera_id"] == 3
+    assert [camera["camera_id"] for camera in rig["cameras"]] == [3, 4]
+    assert rig["cameras"][0]["rel_qvec"] == [1.0, 0.0, 0.0, 0.0]
+    assert np.linalg.norm(rig["cameras"][1]["rel_qvec"]) == pytest.approx(1.0)
 
 
 def test_database_camera_ids_are_one_per_view_folder(tmp_path: Path) -> None:
@@ -170,6 +201,23 @@ def test_center_spread_gate_metric_is_zero_for_coincident_rig_views() -> None:
     assert metrics["center_spread_p95"] == pytest.approx(0.0)
     assert metrics["median_interframe_baseline"] == pytest.approx(1.0)
     assert metrics["p95_spread_to_baseline"] == pytest.approx(0.0)
+
+
+def test_center_spread_gate_excludes_frames_without_reference_camera() -> None:
+    centers = [
+        ("view_00/frame_000001.jpg", np.array((0.0, 0.0, 0.0))),
+        ("view_01/frame_000001.jpg", np.array((0.0, 0.0, 0.0))),
+        ("view_00/frame_000002.jpg", np.array((1.0, 0.0, 0.0))),
+        ("view_01/frame_000002.jpg", np.array((1.0, 0.0, 0.0))),
+        ("view_01/frame_000003.jpg", np.array((2.0, 0.0, 0.0))),
+        ("view_02/frame_000003.jpg", np.array((9.0, 0.0, 0.0))),
+    ]
+
+    metrics = center_spread_metrics(centers, required_prefix="view_00/")
+
+    assert metrics["frame_count"] == 2
+    assert metrics["center_spread_p95"] == pytest.approx(0.0)
+    assert metrics["median_interframe_baseline"] == pytest.approx(1.0)
 
 
 def test_colmap_mapper_retry_reuses_completed_database_single_threaded(

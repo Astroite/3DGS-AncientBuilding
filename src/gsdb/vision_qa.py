@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import urllib.error
@@ -20,6 +21,12 @@ class VisionQAVerdict(StrictModel):
     false_negative_views: list[str] = Field(default_factory=list)
     false_positive_views: list[str] = Field(default_factory=list)
     rationale: str
+
+
+class LocalVisionQAReview(StrictModel):
+    reviewer: Literal["codex-local-llm"]
+    contact_sheet_sha256: dict[str, str]
+    verdict: VisionQAVerdict
 
 
 SYSTEM_PROMPT = """You are a strict QA gate for person masks in architectural reconstruction images.
@@ -144,6 +151,27 @@ def validate_deepseek_gate(
             "DeepSeek mask QA did not pass the fail-closed gate: " + "; ".join(reasons)
         )
     return verdict
+
+
+def load_local_mask_qa_review(
+    path: Path,
+    contact_sheets: list[Path],
+    config: VisionQAConfig,
+) -> tuple[LocalVisionQAReview, VisionQAVerdict]:
+    """Load a fail-closed local LLM review bound to exact contact-sheet bytes."""
+    try:
+        review = LocalVisionQAReview.model_validate_json(path.read_text(encoding="utf-8"))
+    except Exception as error:
+        raise RuntimeError(f"Local mask-QA review is invalid: {path}") from error
+    expected = {
+        sheet.name: hashlib.sha256(sheet.read_bytes()).hexdigest()
+        for sheet in contact_sheets
+    }
+    if review.contact_sheet_sha256 != expected:
+        raise RuntimeError(
+            "Local mask-QA review does not match the current contact sheets"
+        )
+    return review, validate_deepseek_gate(review.verdict, config)
 
 
 def resolve_deepseek_endpoint(base_url: str, endpoint_path: str) -> str:

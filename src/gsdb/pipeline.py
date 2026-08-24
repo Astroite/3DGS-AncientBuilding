@@ -47,7 +47,7 @@ from .reconstruction import (
     run_masked_colmap,
 )
 from .runs import begin_stage, complete_stage, fail_stage, save_run
-from .vision_qa import run_deepseek_mask_qa
+from .vision_qa import load_local_mask_qa_review, run_deepseek_mask_qa
 
 
 VERSION_PATTERN = re.compile(r"^v\d{3}$")
@@ -264,11 +264,23 @@ def _prepare_masked_dataset(
     )
     vision: dict[str, Any]
     if run.config.vision_qa.enabled:
-        verdict = run_deepseek_mask_qa(sheets, run.config.vision_qa)
-        vision = verdict.model_dump(mode="json")
+        local_review_path = dataset / "mask-qa" / "codex-local-review.json"
+        if local_review_path.is_file():
+            local_review, verdict = load_local_mask_qa_review(
+                local_review_path, sheets, run.config.vision_qa
+            )
+            vision = {
+                "provider": local_review.reviewer,
+                "review_file": local_review_path.relative_to(scene_path).as_posix(),
+                "contact_sheet_sha256": local_review.contact_sheet_sha256,
+                **verdict.model_dump(mode="json"),
+            }
+        else:
+            verdict = run_deepseek_mask_qa(sheets, run.config.vision_qa)
+            vision = {"provider": "deepseek", **verdict.model_dump(mode="json")}
         if verdict.decision != "pass":
             raise RuntimeError(
-                f"DeepSeek mask QA rejected {label}: {verdict.rationale}; "
+                f"LLM mask QA rejected {label}: {verdict.rationale}; "
                 f"false negatives={verdict.false_negative_views}"
             )
     else:
@@ -747,7 +759,12 @@ def quality_snapshot(scene_path: Path, run: RunManifest) -> dict[str, Any]:
                     [float(matrix[index][3]) for index in range(3)],
                 )
             )
-    spread = center_spread_metrics(frame_centers) if frame_centers else {}
+    recorded_rig = reconstruction.get("rig", {}).get("post_bundle_adjustment", {})
+    spread = (
+        recorded_rig
+        if recorded_rig
+        else (center_spread_metrics(frame_centers) if frame_centers else {})
+    )
     ply_path = _artifact_path(run, scene_path, "gaussian_ply")
     count = (
         int(run.metrics.get("export", {}).get("gaussian_count", 0))

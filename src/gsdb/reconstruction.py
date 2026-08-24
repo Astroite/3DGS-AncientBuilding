@@ -82,6 +82,39 @@ def projection_view_specs(attempt: AttemptConfig) -> list[tuple[float, float]]:
     return pairs
 
 
+def validate_existing_projection_set(
+    target: Path,
+    frame_count: int,
+    view_count: int,
+    projection_size: int,
+) -> set[Path]:
+    """Validate and return reusable relative paths from a partial v2 projection."""
+    if not target.exists():
+        return set()
+    if not target.is_dir():
+        raise RuntimeError(f"Planar image target is not a directory: {target}")
+    expected = {
+        Path(f"view_{view_index:02d}") / f"frame_{frame_index:06d}.jpg"
+        for frame_index in range(1, frame_count + 1)
+        for view_index in range(view_count)
+    }
+    actual = {path.relative_to(target) for path in image_files(target)}
+    unexpected = sorted(actual - expected)
+    if unexpected:
+        raise RuntimeError(
+            "Existing planar projection contains unexpected images: "
+            + ", ".join(path.as_posix() for path in unexpected[:5])
+        )
+    for relative in sorted(actual):
+        image = cv2.imread(str(target / relative), cv2.IMREAD_GRAYSCALE)
+        if image is None or image.shape != (projection_size, projection_size):
+            raise RuntimeError(
+                f"Existing planar projection is invalid: {relative.as_posix()}; "
+                f"expected {projection_size}x{projection_size}"
+            )
+    return actual
+
+
 def project_equirectangular_frames(
     source: Path,
     dataset: Path,
@@ -91,14 +124,16 @@ def project_equirectangular_frames(
     target = dataset / "images"
     if target.is_dir():
         existing = image_files(target)
-        if len(existing) != expected:
+        if len(existing) == expected:
+            return existing
+        if isinstance(attempt, LegacyReconstructionAttemptV1):
             raise RuntimeError(
                 f"Existing planar image set is incomplete ({len(existing)}/{expected}); "
                 "create a new run instead of overwriting partial projection output"
             )
-        return existing
     if target.exists():
-        raise RuntimeError(f"Planar image target is not a directory: {target}")
+        if not target.is_dir():
+            raise RuntimeError(f"Planar image target is not a directory: {target}")
 
     if isinstance(attempt, LegacyReconstructionAttemptV1):
         from nerfstudio.process_data.equirect_utils import (
@@ -141,19 +176,35 @@ def project_equirectangular_frames(
         raise RuntimeError(
             f"Projection source has {len(frames)} frames; expected {attempt.frame_count}"
         )
-    target.mkdir(parents=True, exist_ok=False)
     device = torch.device("cuda")
     size = attempt.projection_size
     specs = projection_view_specs(attempt)
+    reusable = validate_existing_projection_set(
+        target, attempt.frame_count, len(specs), size
+    )
+    target.mkdir(parents=True, exist_ok=True)
     for view_index in range(len(specs)):
-        (target / f"view_{view_index:02d}").mkdir(parents=True, exist_ok=False)
+        (target / f"view_{view_index:02d}").mkdir(parents=True, exist_ok=True)
     for frame_index, frame in enumerate(frames, start=1):
+        frame_targets = [
+            Path(f"view_{view_index:02d}") / f"frame_{frame_index:06d}.jpg"
+            for view_index in range(len(specs))
+        ]
+        if all(relative in reusable for relative in frame_targets):
+            print(
+                f"Planar projection: {frame_index}/{len(frames)} (reused)",
+                flush=True,
+            )
+            continue
         image = cv2.imread(str(frame), cv2.IMREAD_COLOR)
         if image is None:
             raise RuntimeError(f"Cannot decode equirectangular frame: {frame}")
         tensor = torch.tensor(image, dtype=torch.float32, device=device)
         tensor = tensor.permute(2, 0, 1).unsqueeze(0) / 255.0
         for view_index, (yaw, pitch) in enumerate(specs):
+            relative = frame_targets[view_index]
+            if relative in reusable:
+                continue
             perspective = equirect2persp(
                 tensor,
                 attempt.projection_fov_degrees,
@@ -172,7 +223,7 @@ def project_equirectangular_frames(
                 .numpy()
             )
             atomic_imwrite(
-                target / f"view_{view_index:02d}" / f"frame_{frame_index:06d}.jpg",
+                target / relative,
                 output,
                 [cv2.IMWRITE_JPEG_QUALITY, 95],
             )
@@ -492,24 +543,56 @@ def build_rig_config(
     camera_ids: dict[str, int], attempt: ReconstructionAttempt
 ) -> list[dict[str, Any]]:
     specs = projection_view_specs(attempt)
-    reference_prefix = "view_00/"
-    reference_world_from_camera = projection_world_from_camera(*specs[0])
+    available = [
+        (index, spec, f"view_{index:02d}/")
+        for index, spec in enumerate(specs)
+        if f"view_{index:02d}/" in camera_ids
+    ]
+    if not available:
+        raise RuntimeError("Cannot build a rig config without model cameras")
+    _, reference_spec, reference_prefix = available[0]
+    reference_world_from_camera = projection_world_from_camera(*reference_spec)
     cameras: list[dict[str, Any]] = []
-    for index, spec in enumerate(specs):
-        prefix = f"view_{index:02d}/"
+    for _, spec, prefix in available:
         entry: dict[str, Any] = {
             "camera_id": camera_ids[prefix],
             "image_prefix": prefix,
+            # COLMAP 3.8 flips estimate_rig_relative_poses back on when either
+            # field is missing from any camera, including the reference camera.
+            "rel_qvec": [1.0, 0.0, 0.0, 0.0],
+            "rel_tvec": [0.0, 0.0, 0.0],
         }
         if prefix != reference_prefix:
             world_from_camera = projection_world_from_camera(*spec)
             camera_from_rig = world_from_camera.T @ reference_world_from_camera
-            entry["cam_from_rig_rotation"] = rotation_matrix_to_quaternion_wxyz(
+            # COLMAP 3.8's rig JSON schema uses rel_qvec/rel_tvec. Newer
+            # cam_from_rig_* names are silently ignored by the locked binary.
+            entry["rel_qvec"] = rotation_matrix_to_quaternion_wxyz(
                 camera_from_rig
             )
-            entry["cam_from_rig_translation"] = [0.0, 0.0, 0.0]
         cameras.append(entry)
     return [{"ref_camera_id": camera_ids[reference_prefix], "cameras": cameras}]
+
+
+def camera_ids_for_model(
+    model_dir: Path, database_camera_ids: dict[str, int]
+) -> dict[str, int]:
+    """Return only database camera folders present in a sparse component."""
+    from nerfstudio.process_data.colmap_utils import read_cameras_binary
+
+    model_camera_ids = set(read_cameras_binary(model_dir / "cameras.bin"))
+    selected = {
+        prefix: camera_id
+        for prefix, camera_id in database_camera_ids.items()
+        if camera_id in model_camera_ids
+    }
+    if set(selected.values()) != model_camera_ids:
+        raise RuntimeError(
+            "Sparse model cameras do not match the database folder-camera mapping"
+        )
+    if not selected:
+        raise RuntimeError("Selected sparse model does not contain a rig camera")
+    return selected
 
 
 def write_rig_config(
@@ -662,15 +745,25 @@ def _frame_number(name: str) -> int:
 
 
 def center_spread_metrics(
-    named_centers: list[tuple[str, np.ndarray]]
+    named_centers: list[tuple[str, np.ndarray]],
+    required_prefix: str | None = None,
 ) -> dict[str, float | int]:
-    grouped: dict[int, list[np.ndarray]] = {}
+    grouped: dict[int, list[tuple[str, np.ndarray]]] = {}
     for name, center in named_centers:
-        grouped.setdefault(_frame_number(name), []).append(np.asarray(center, dtype=np.float64))
+        grouped.setdefault(_frame_number(name), []).append(
+            (name.replace("\\", "/"), np.asarray(center, dtype=np.float64))
+        )
     centroids: list[tuple[int, np.ndarray]] = []
     spreads: list[float] = []
-    for frame, centers in grouped.items():
-        matrix = np.vstack(centers)
+    for frame, named_group in grouped.items():
+        if required_prefix is not None:
+            if len(named_group) < 2 or not any(
+                name.startswith(required_prefix) for name, _ in named_group
+            ):
+                # COLMAP 3.8 leaves frames without the rig's reference camera
+                # as independent poses, so they are outside the rig gate.
+                continue
+        matrix = np.vstack([center for _, center in named_group])
         centroid = matrix.mean(axis=0)
         centroids.append((frame, centroid))
         spreads.extend(float(value) for value in np.linalg.norm(matrix - centroid, axis=1))
@@ -682,7 +775,7 @@ def center_spread_metrics(
     median_baseline = float(np.median(baselines)) if baselines else 0.0
     p95_spread = float(np.percentile(spreads, 95)) if spreads else 0.0
     return {
-        "frame_count": len(grouped),
+        "frame_count": len(centroids),
         "center_spread_median": float(np.median(spreads)) if spreads else 0.0,
         "center_spread_p95": p95_spread,
         "center_spread_max": max(spreads, default=0.0),
@@ -691,7 +784,9 @@ def center_spread_metrics(
     }
 
 
-def sparse_model_metrics(model_dir: Path) -> dict[str, Any]:
+def sparse_model_metrics(
+    model_dir: Path, required_prefix: str | None = None
+) -> dict[str, Any]:
     from nerfstudio.process_data.colmap_utils import (
         read_cameras_binary,
         read_images_binary,
@@ -713,7 +808,10 @@ def sparse_model_metrics(model_dir: Path) -> dict[str, Any]:
         }
         for camera_id, camera in sorted(cameras.items())
     }
-    return {**center_spread_metrics(named_centers), "intrinsics": intrinsics}
+    return {
+        **center_spread_metrics(named_centers, required_prefix=required_prefix),
+        "intrinsics": intrinsics,
+    }
 
 
 def reconstruction_metrics(
@@ -807,10 +905,9 @@ def run_masked_colmap(
         matching_marker.write_text("complete\n", encoding="utf-8")
 
     if rig_enabled:
-        camera_ids = validate_folder_camera_ids(
+        database_camera_ids = validate_folder_camera_ids(
             colmap_attempt / "database.db", attempt.images_per_equirect
         )
-        write_rig_config(rig_config_path, camera_ids, attempt)
 
     mapping_marker = colmap_attempt / ".mapping-complete"
     if not mapping_marker.is_file():
@@ -824,7 +921,12 @@ def run_masked_colmap(
     selected_model = selected_dir
     rig_metrics: dict[str, Any] = {"enabled": False}
     if rig_enabled:
-        pre_rig = sparse_model_metrics(selected_dir)
+        model_camera_ids = camera_ids_for_model(selected_dir, database_camera_ids)
+        write_rig_config(rig_config_path, model_camera_ids, attempt)
+        reference_prefix = next(iter(model_camera_ids))
+        pre_rig = sparse_model_metrics(
+            selected_dir, required_prefix=reference_prefix
+        )
         rig_marker = colmap_attempt / ".rig-complete"
         if rig_marker.is_file():
             rig_output_name = rig_marker.read_text(encoding="utf-8").strip() or "rig-sparse"
@@ -864,18 +966,20 @@ def run_masked_colmap(
             required = [rig_output / name for name in ("cameras.bin", "images.bin", "points3D.bin")]
             if not all(path.is_file() for path in required):
                 raise RuntimeError("COLMAP rig bundle adjustment produced an incomplete model")
-            rig_marker.write_text(rig_output.name + "\n", encoding="utf-8")
         required = [rig_output / name for name in ("cameras.bin", "images.bin", "points3D.bin")]
         if not all(path.is_file() for path in required):
             raise RuntimeError(f"Recorded rig model is incomplete: {rig_output}")
         selected_model = rig_output
-        post_rig = sparse_model_metrics(selected_model)
+        post_rig = sparse_model_metrics(
+            selected_model, required_prefix=reference_prefix
+        )
         limit = float(getattr(settings, "rig_center_spread_ratio_limit", 0.001))
         observed = float(post_rig["p95_spread_to_baseline"])
         if observed > limit:
             raise RuntimeError(
                 f"Rig center-spread gate failed: {observed:.6f} > {limit:.6f}"
             )
+        rig_marker.write_text(rig_output.name + "\n", encoding="utf-8")
         rig_metrics = {
             "enabled": True,
             "config_path": rig_config_path.relative_to(dataset).as_posix(),
