@@ -354,6 +354,58 @@ def interleaved_image_names(images_dir: Path) -> list[str]:
     return sorted(names, key=_image_order_key)
 
 
+def reorder_database_image_ids(database: Path, ordered_names: list[str]) -> bool:
+    """Transactionally enforce frame-major IDs before sequential matching.
+
+    COLMAP 3.8 sorts ``image_list_path`` lexically before inserting rows, so a
+    per-folder camera layout otherwise becomes view-major despite an interleaved
+    list. Feature tables can be safely re-keyed before any matches exist.
+    """
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute("SELECT image_id, name FROM images").fetchall()
+        actual_names = {str(name) for _, name in rows}
+        if actual_names != set(ordered_names) or len(rows) != len(ordered_names):
+            raise RuntimeError(
+                f"COLMAP database image set differs from image-list.txt: "
+                f"database={len(rows)}, expected={len(ordered_names)}"
+            )
+        for table in ("matches", "two_view_geometries"):
+            count = int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            if count:
+                raise RuntimeError(
+                    f"Refusing to reorder COLMAP image IDs after {table} has rows"
+                )
+        desired = {name: index for index, name in enumerate(ordered_names, start=1)}
+        current = {str(name): int(image_id) for image_id, name in rows}
+        if current == desired:
+            return False
+        offset = max(current.values()) + len(current) + 1000
+        connection.execute("BEGIN IMMEDIATE")
+        for table in ("images", "keypoints", "descriptors"):
+            connection.execute(f"UPDATE {table} SET image_id = image_id + ?", (offset,))
+        for name, new_id in desired.items():
+            temporary_id = current[name] + offset
+            for table in ("images", "keypoints", "descriptors"):
+                connection.execute(
+                    f"UPDATE {table} SET image_id = ? WHERE image_id = ?",
+                    (new_id, temporary_id),
+                )
+        if connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'"
+        ).fetchone():
+            connection.execute(
+                "UPDATE sqlite_sequence SET seq = ? WHERE name = 'images'",
+                (len(ordered_names),),
+            )
+        connection.commit()
+        verified = connection.execute(
+            "SELECT name FROM images ORDER BY image_id"
+        ).fetchall()
+    if [str(row[0]) for row in verified] != ordered_names:
+        raise RuntimeError("COLMAP database image-ID reordering verification failed")
+    return True
+
+
 def validate_folder_camera_ids(
     database: Path, expected_view_count: int
 ) -> dict[str, int]:
@@ -736,12 +788,23 @@ def run_masked_colmap(
     )
     rig_enabled = isinstance(attempt, ReconstructionAttempt) and attempt.use_rig
     rig_config_path = colmap_attempt / "rig-config.json"
-    for name, command in (("features", commands[0]), ("matching", commands[1])):
-        marker = colmap_attempt / f".{name}-complete"
-        if marker.is_file():
-            continue
-        run_logged(command, log_dir / colmap_attempt.name / f"colmap-{name}.log")
-        marker.write_text("complete\n", encoding="utf-8")
+    feature_marker = colmap_attempt / ".features-complete"
+    if not feature_marker.is_file():
+        run_logged(
+            commands[0], log_dir / colmap_attempt.name / "colmap-features.log"
+        )
+        if isinstance(attempt, ReconstructionAttempt):
+            reorder_database_image_ids(
+                colmap_attempt / "database.db", interleaved_image_names(dataset / "images")
+            )
+        feature_marker.write_text("complete\n", encoding="utf-8")
+
+    matching_marker = colmap_attempt / ".matching-complete"
+    if not matching_marker.is_file():
+        run_logged(
+            commands[1], log_dir / colmap_attempt.name / "colmap-matching.log"
+        )
+        matching_marker.write_text("complete\n", encoding="utf-8")
 
     if rig_enabled:
         camera_ids = validate_folder_camera_ids(

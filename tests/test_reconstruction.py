@@ -17,6 +17,7 @@ from gsdb.reconstruction import (
     pinhole_camera_parameters,
     select_colmap_attempt,
     projection_view_specs,
+    reorder_database_image_ids,
     validate_folder_camera_ids,
     validate_frame_masks,
 )
@@ -117,6 +118,46 @@ def test_database_camera_ids_are_one_per_view_folder(tmp_path: Path) -> None:
     mapping = validate_folder_camera_ids(database, 8)
     assert mapping["view_00/"] == 11
     assert len(set(mapping.values())) == 8
+
+
+def test_database_image_ids_are_transactionally_reordered_frame_major(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "database.db"
+    lexical_names = [
+        "view_00/frame_000001.jpg",
+        "view_00/frame_000002.jpg",
+        "view_01/frame_000001.jpg",
+        "view_01/frame_000002.jpg",
+    ]
+    desired = [
+        "view_00/frame_000001.jpg",
+        "view_01/frame_000001.jpg",
+        "view_00/frame_000002.jpg",
+        "view_01/frame_000002.jpg",
+    ]
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE images (image_id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, camera_id INTEGER)"
+        )
+        connection.execute("CREATE TABLE keypoints (image_id INTEGER PRIMARY KEY, rows INTEGER)")
+        connection.execute("CREATE TABLE descriptors (image_id INTEGER PRIMARY KEY, rows INTEGER)")
+        connection.execute("CREATE TABLE matches (pair_id INTEGER)")
+        connection.execute("CREATE TABLE two_view_geometries (pair_id INTEGER)")
+        for image_id, name in enumerate(lexical_names, start=1):
+            connection.execute("INSERT INTO images VALUES (?, ?, ?)", (image_id, name, 1))
+            connection.execute("INSERT INTO keypoints VALUES (?, ?)", (image_id, image_id * 10))
+            connection.execute("INSERT INTO descriptors VALUES (?, ?)", (image_id, image_id * 10))
+
+    assert reorder_database_image_ids(database, desired) is True
+    with sqlite3.connect(database) as connection:
+        names = [row[0] for row in connection.execute("SELECT name FROM images ORDER BY image_id")]
+        keypoint_rows = [
+            row[0] for row in connection.execute("SELECT rows FROM keypoints ORDER BY image_id")
+        ]
+    assert names == desired
+    assert keypoint_rows == [10, 30, 20, 40]
+    assert reorder_database_image_ids(database, desired) is False
 
 
 def test_center_spread_gate_metric_is_zero_for_coincident_rig_views() -> None:
