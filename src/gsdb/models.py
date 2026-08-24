@@ -154,10 +154,14 @@ class CaptureManifest(StrictModel):
         return value
 
 
-class PreprocessConfig(StrictModel):
+class LegacyPreprocessConfigV1(StrictModel):
     target_frames: int = Field(default=270, ge=2, le=5000)
     jpeg_quality: int = Field(default=2, ge=1, le=31)
     minimum_free_gib: float = Field(default=20.0, ge=1)
+
+
+class PreprocessConfig(LegacyPreprocessConfigV1):
+    """Candidate-frame extraction settings for schema v2 runs."""
 
 
 class MaskingConfig(StrictModel):
@@ -195,7 +199,7 @@ class VisionQAConfig(StrictModel):
     minimum_confidence: float = Field(default=0.80, ge=0, le=1)
 
 
-class ReconstructionAttempt(StrictModel):
+class LegacyReconstructionAttemptV1(StrictModel):
     frame_count: int
     images_per_equirect: Literal[8, 14]
     crop_bottom: float = Field(ge=0, lt=0.5)
@@ -203,34 +207,123 @@ class ReconstructionAttempt(StrictModel):
     num_downscales: int = Field(default=2, ge=0, le=4)
 
 
-class ReconstructionConfig(StrictModel):
+class LegacyReconstructionConfigV1(StrictModel):
     registration_threshold: float = Field(default=0.70, gt=0, le=1)
-    primary: ReconstructionAttempt = Field(
-        default_factory=lambda: ReconstructionAttempt(
+    primary: LegacyReconstructionAttemptV1 = Field(
+        default_factory=lambda: LegacyReconstructionAttemptV1(
             frame_count=270, images_per_equirect=8, crop_bottom=0.20
         )
     )
-    fallback: ReconstructionAttempt = Field(
-        default_factory=lambda: ReconstructionAttempt(
+    fallback: LegacyReconstructionAttemptV1 = Field(
+        default_factory=lambda: LegacyReconstructionAttemptV1(
             frame_count=180, images_per_equirect=14, crop_bottom=0.15
         )
     )
 
 
-class TrainConfig(StrictModel):
+class LegacyTrainConfigV1(StrictModel):
     method: Literal["splatfacto"] = "splatfacto"
     max_iterations: int = Field(default=30_000, ge=1000)
     oom_retry_downscale: int = Field(default=2, ge=2, le=8)
 
 
+class LegacyRunConfigV1(StrictModel):
+    """Exact schema used by existing runs; intentionally has no version field.
+
+    Keeping this shape separate prevents v2 defaults from entering a historical
+    run's canonical serialization and changing its immutable config hash.
+    """
+
+    capture_id: str = Field(pattern=SLUG_PATTERN)
+    input_sha256: str
+    preprocess: LegacyPreprocessConfigV1 = Field(default_factory=LegacyPreprocessConfigV1)
+    masking: MaskingConfig = Field(default_factory=MaskingConfig)
+    vision_qa: VisionQAConfig = Field(default_factory=VisionQAConfig)
+    reconstruction: LegacyReconstructionConfigV1 = Field(
+        default_factory=LegacyReconstructionConfigV1
+    )
+    train: LegacyTrainConfigV1 = Field(default_factory=LegacyTrainConfigV1)
+
+
+class ReconstructionAttempt(StrictModel):
+    frame_count: int = Field(ge=2, le=5000)
+    images_per_equirect: Literal[8, 14]
+    projection_fov_degrees: float = Field(gt=0, lt=180)
+    projection_size: int = Field(ge=256, le=8192)
+    crop_bottom: float = Field(ge=0, lt=0.5)
+    use_rig: bool = True
+    matching_method: Literal["sequential"] = "sequential"
+    num_downscales: int = Field(default=2, ge=0, le=4)
+
+
+class ReconstructionConfig(StrictModel):
+    use_gpu_sift: bool = True
+    gpu_index: int = Field(default=0, ge=0)
+    fix_intrinsics: bool = True
+    registration_threshold: float = Field(default=0.70, gt=0, le=1)
+    rig_center_spread_ratio_limit: float = Field(default=0.001, gt=0, le=0.1)
+    primary: ReconstructionAttempt = Field(
+        default_factory=lambda: ReconstructionAttempt(
+            frame_count=135,
+            images_per_equirect=8,
+            projection_fov_degrees=120.0,
+            projection_size=2048,
+            crop_bottom=0.20,
+        )
+    )
+    fallback: ReconstructionAttempt = Field(
+        default_factory=lambda: ReconstructionAttempt(
+            frame_count=180,
+            images_per_equirect=14,
+            projection_fov_degrees=110.0,
+            projection_size=1746,
+            crop_bottom=0.15,
+        )
+    )
+
+
+class TrainConfig(StrictModel):
+    method: Literal["splatfacto-big"] = "splatfacto-big"
+    max_iterations: int = Field(default=100_000, ge=1000)
+    downscale_factor: int = Field(default=1, ge=1, le=8)
+    oom_retry_downscale: int = Field(default=2, ge=2, le=8)
+    cache_images: Literal["cpu"] = "cpu"
+    cache_images_type: Literal["uint8"] = "uint8"
+    use_scale_regularization: bool = True
+    rasterize_mode: Literal["classic"] = "classic"
+    camera_optimizer_mode: Literal["SO3xR3"] = "SO3xR3"
+    use_bilateral_grid: bool = True
+
+
+class RunExportConfig(StrictModel):
+    ply_axis: Literal["y_up"] = "y_up"
+
+
 class RunConfig(StrictModel):
+    schema_version: Literal[2] = 2
     capture_id: str = Field(pattern=SLUG_PATTERN)
     input_sha256: str
     preprocess: PreprocessConfig = Field(default_factory=PreprocessConfig)
-    masking: MaskingConfig = Field(default_factory=MaskingConfig)
+    masking: MaskingConfig = Field(
+        default_factory=lambda: MaskingConfig(qa_sample_count=16)
+    )
     vision_qa: VisionQAConfig = Field(default_factory=VisionQAConfig)
     reconstruction: ReconstructionConfig = Field(default_factory=ReconstructionConfig)
     train: TrainConfig = Field(default_factory=TrainConfig)
+    export: RunExportConfig = Field(default_factory=RunExportConfig)
+
+    @model_validator(mode="after")
+    def validate_reconstruction_subsets(self) -> "RunConfig":
+        for label, attempt in (
+            ("primary", self.reconstruction.primary),
+            ("fallback", self.reconstruction.fallback),
+        ):
+            if attempt.frame_count > self.preprocess.target_frames:
+                raise ValueError(
+                    f"reconstruction.{label}.frame_count cannot exceed "
+                    "preprocess.target_frames"
+                )
+        return self
 
 
 class StageRecord(StrictModel):
@@ -264,7 +357,7 @@ class RunManifest(StrictModel):
     scene_id: str = Field(pattern=SLUG_PATTERN)
     status: RunStatus = RunStatus.DRAFT
     config_hash: str
-    config: RunConfig
+    config: LegacyRunConfigV1 | RunConfig
     created_at: datetime
     updated_at: datetime
     active_stage: str | None = None

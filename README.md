@@ -17,7 +17,7 @@
 - E 盘原始 `.insv` 永远按只读来源处理，CLI 不解码、不复制、不修改它。
 - Insta360 Studio 手工拼接得到的标准 2:1 MP4 和全部派生数据放在地点子项目内，由 Git 忽略。
 - YAML 是权威数据源；`catalog/catalog.sqlite` 只能通过 `gsdb catalog build` 重建。
-- PLY、检查点、视频、COLMAP 数据库、帧和 SQLite 都不进入 Git，也不使用 Git LFS。
+- 帧、检查点、COLMAP 数据库、训练输出和 Z-up 中间 PLY 不进入 Git；人工预览用的版本化 Y-up PLY 与 MP4 才通过 Git LFS 发布。
 
 ## 1. 在 Insta360 Studio 导出试点输入
 
@@ -54,12 +54,12 @@ wsl.exe -d Ubuntu-22.04 -- bash /mnt/d/Project/3DGS/scripts/bootstrap-wsl.sh
 - PyTorch 2.1.2 / Torchvision 0.16.2 / CUDA 11.8
 - gsplat 1.4.0
 - FFmpeg 6.1
-- CPU COLMAP 3.8
+- CUDA COLMAP `3.8=gpuhe53869c_110`（同时锁定 `cudatoolkit=11.8`）
 - Nerfstudio `758ea1918e082aa44776009d8e755c2f3a88d2ee`
 
 `conda-lock.yml` 以 Ubuntu 22.04 的 glibc 2.35、linux-64 和 CUDA 11.8
 虚拟平台生成；`virtual-packages.yml` 是这组平台边界的可审计输入。首次
-`doctor` 会编译 gsplat CUDA 扩展，可能需要数分钟，后续运行会命中缓存。
+`doctor` 会实际运行 CUDA SIFT 和 gsplat 反向传播，并要求 WSL 至少 28 GiB 内存；首次编译可能需要数分钟，后续运行会命中缓存。
 
 重新生成锁时使用 conda-lock 4.0.2，并先运行
 `python scripts/patch-conda-lock-manylinux.py`。这个受文本校验保护的小补丁只补充
@@ -79,7 +79,7 @@ conda-lock lock --conda "$(command -v conda)" \
 
 ## 3. 执行试点
 
-所有 Windows 命令通过 `gsdb.ps1` 进入固定 WSL 环境。当前只完成准备，**不要在导出完成并确认电脑可长时间运行之前执行下列处理命令**。
+所有 Windows 命令通过 `gsdb.ps1` 进入固定 WSL 环境。
 
 明早从 PowerShell 启动整条 009 遮罩试跑：
 
@@ -110,8 +110,8 @@ $RunId = '<上一步输出的运行 ID>'
 .\gsdb.ps1 mask        yanguan-ancient-town-20260822 night-walk-4k $RunId
 .\gsdb.ps1 reconstruct yanguan-ancient-town-20260822 night-walk-4k $RunId
 .\gsdb.ps1 train       yanguan-ancient-town-20260822 night-walk-4k $RunId
-.\gsdb.ps1 export      yanguan-ancient-town-20260822 night-walk-4k $RunId --version v001
-.\gsdb.ps1 qa report   yanguan-ancient-town-20260822 night-walk-4k $RunId
+.\gsdb.ps1 export      yanguan-ancient-town-20260822 night-walk-4k $RunId --version v002
+.\gsdb.ps1 qa report   yanguan-ancient-town-20260822 night-walk-4k $RunId --baseline-run-id 20260824T022046Z-5679786b
 .\gsdb.ps1 catalog build
 ```
 
@@ -131,23 +131,23 @@ $RunId = '<上一步输出的运行 ID>'
 
 ### preprocess
 
-创建不可静默覆盖的运行清单；均匀抽取 270 个全景 JPEG，记录时间戳、拉普拉斯模糊度、平均亮度、黑位占比和高光裁切占比。预处理前要求保留 20 GiB 余量，并额外估算中间文件空间。
+创建 schema v2、不可静默覆盖的运行清单；均匀抽取并分析 270 个候选全景 JPEG，再按 135 个时间桶各取最清晰的一帧作为主重建输入。候选数、选中数和清晰度提升都会进入指标。历史 schema v1 仍按原形加载和验哈希。
 
 当前 009 试点只选择 0–90 秒，因此 270 帧仍约等于每秒 3 帧。完整 293.86 秒素材后续应按空间连续的街段或走廊拆成多个场景，而不是降低抽帧密度后硬塞进一个模型。
 
 ### mask
 
-将 270 张全景投影为 270×8 张透视图，然后使用 Torchvision Mask R-CNN 在本地识别人像。人物概率遮罩经过闭运算和 24 px 边缘扩张，保存为与图像同尺寸的二值 PNG：白色可用、黑色忽略。`images_2/images_4` 与 `masks_2/masks_4` 使用相同文件名和最近邻遮罩缩放。
+将 135 张清晰度优选全景显式投影为 135×8 张 `2048×2048`、120° 透视图，然后使用 Torchvision Mask R-CNN 在本地识别人像。图像按 `view_XX/frame_NNNNNN.jpg` 分相机目录，遮罩与金字塔完整镜像相对路径；白色可用、黑色忽略。
 
-确定性 QA 会核对图片/遮罩一一对应、尺寸、二值范围和最大遮挡比例，并生成抽样联系表。首次调用会下载并缓存官方 Mask R-CNN 权重；代码导入和 `doctor` 不会提前下载。
+确定性 QA 会核对图片/遮罩一一对应、尺寸、二值范围和最大遮挡比例，并从 16 个透视视图生成两张联系表。首次调用会下载并缓存官方 Mask R-CNN 权重；代码导入和 `doctor` 不会提前下载。
 
 可选的 DeepSeek `deepseek-v4-flash-vision-exp` 多模态门禁默认关闭。决定把抽样画面发送到 DeepSeek 后，可在新运行中传入 `--vision-qa`；API key 只通过 `DEEPSEEK_API_KEY` 环境变量提供，不写入清单或日志，Base URL 固定为官方 `https://api.deepseek.com`。联系表以 Base64 JPEG、`detail: original` 发送，并在本地预检官方的 32 MiB 单图与 48 MiB 请求体限制。DeepSeek 只审核人物遮罩，不接管本地处理任务，也不替代最终 3DGS 资产审核。接口格式见 [DeepSeek 图像理解文档](https://api-docs.deepseek.com/zh-cn/guides/vision/)。
 
 ### reconstruct
 
-COLMAP 3.8 以 CPU 模式运行，逐图读取 `mask_path`；人物黑区既不产生 SIFT 特征，也不会进入后续训练像素监督。透视图使用与投影 FOV 对应的 PINHOLE 初始内参，而不是依赖缺失 EXIF 的默认焦距。转换后，每个注册帧的 `mask_path` 被写入 Nerfstudio `transforms.json`。
+COLMAP 3.8 使用 GPU SIFT，`doctor` 不允许静默退回 CPU。每个 `view_XX/` 固定为独立 PINHOLE 相机，焦距/主点在 mapper 与 rig BA 中全部锁定；frame-major 图像列表保持 sequential matching 的时间顺序。同一全景的 8 个视图再通过已知纯旋转、零平移的 rig 约束合并光心，后验 p95 光心散布不得超过中位帧间基线的 0.1%。
 
-首跑使用 270×8 个透视视图、20% 底部裁剪、sequential matching、两个下采样层级。如果注册率或最大连通模型覆盖低于 70%，只进行一次确定性的降级尝试：每个时间桶选相对清晰帧，共 180 帧，转换为 180×14 个视图、裁底 15%，并生成自己的完整遮罩集。第二次仍失败就停止，不继续无限调参。
+主流程使用 135×8 个 2048²/120° 透视视图、20% 底部裁剪和两个下采样层级。如果注册率或最大连通模型覆盖低于 70%，只进行一次确定性的降级尝试：从原始 270 候选帧按桶选 180 帧，转换为 180×14 个 1746²/110° 视图、裁底 15%，并生成自己的完整遮罩与 rig。第二次仍失败就停止。
 
 ### 入镜人物与拍摄者
 
@@ -158,20 +158,20 @@ COLMAP 3.8 以 CPU 模式运行，逐图读取 `mask_path`；人物黑区既不�
 
 ### train
 
-运行 Splatfacto 30,000 步。首次日志明确出现 CUDA OOM 时只用 `downscale-factor=2` 重试一次；其他错误不自动换算法或吞掉。
+运行 `splatfacto-big` 100,000 步，CPU/uint8 图像缓存、scale regularization、classic rasterizer、bilateral grid、`SO3xR3` 相机优化和 `downscale-factor=1` 均显式入配置。首次日志明确出现 CUDA OOM 时只用 `downscale-factor=2` 重试一次；不启用当前版本未暴露的 MCMC 参数。
 
 ### export / qa / catalog
 
-导出 Gaussian PLY、3 秒 3DGS 预览、缩略图和坐标变换。QA 先进入 `needs_review`，只有人工命令可以改为 `accepted` 或 `rejected`。SQLite 使用临时数据库构建并原子替换，随时可从 YAML 重建。
+Nerfstudio 的 Z-up PLY 只留在忽略的工作区；发布目录只包含旋转位置、法线、wxyz 四元数与 1–3 阶实 SH 后的 `splat-yup.ply`、预览、缩略图、`transforms.json` 和清单。QA 对比 v001/v002 指标；低于 2M 高斯只告警，不自动追加训练，状态始终先进入 `needs_review`。
 
 ## 90 秒试跑耗时预估
 
-按本机 Ryzen 9 5950X（16 核）、RTX 4070 Ti SUPER 和 CPU COLMAP 做无人值守规划，主流程保守按 **5–15 小时**；如果触发唯一一次 180×14 降级重建，整体按 **10–24 小时**。夜景特征不足时 COLMAP 波动最大，这不是进度承诺。建议出门前接通电源、关闭自动睡眠；当前 D 盘约 294 GiB 可用，足够按 30–100 GiB 峰值规划并保留 20 GiB 硬余量。脚本不会主动删除中间数据。
+按本机 RTX 4070 Ti SUPER 16 GiB、135×8 @2048² 与 CUDA COLMAP 做无人值守规划，主流程先按 **3–10 小时**，触发 180×14 降级时按 **6–18 小时**；夜景匹配与 100k 训练仍可能波动。这不是进度承诺。建议接通电源并关闭休眠；程序保留 20 GiB 硬余量，脚本不会主动删除中间数据。
 
 ## 断点和清理
 
 - 已成功阶段再次执行会拒绝覆盖；`--resume` 只复用同一配置和已完成文件。
-- 人像遮罩可逐文件续作；COLMAP 外部命令若中途失败，`--resume` 会创建新的 `attempt-NNN`，保留失败数据库和日志，不猜测或覆盖半成品。
+- 人像遮罩可逐文件续作；COLMAP feature/matching/mapping/rig 各有完成标记，安全前置结果会复用；不完整 sparse/rig 输出不会被覆盖。
 - 配置变化必须创建新运行，失败运行不会覆盖历史成功产物。
 - `gsdb clean <location> <scene>` 只显示可清理容量，v1 永远不删除文件。
 

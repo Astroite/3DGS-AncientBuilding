@@ -5,6 +5,7 @@ import json
 import os
 import platform
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 from pathlib import Path
@@ -38,6 +39,8 @@ def collect_tool_versions() -> dict[str, str]:
     }.items():
         ok, detail = _version(command)
         versions[name] = detail if ok else "unavailable"
+    colmap_cuda_ok, _ = _colmap_cuda_build()
+    versions["colmap_cuda"] = "enabled" if colmap_cuda_ok else "unavailable"
     for distribution in ("gsplat", "nerfstudio", "torchvision"):
         try:
             versions[distribution] = importlib.metadata.version(distribution)
@@ -61,13 +64,110 @@ def collect_tool_versions() -> dict[str, str]:
     return versions
 
 
+def _colmap_cuda_build() -> tuple[bool, str]:
+    executable = shutil.which("colmap")
+    if executable is None:
+        return False, "missing"
+    try:
+        result = subprocess.run(
+            ["colmap", "-h"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+        output = "\n".join((result.stdout, result.stderr)).strip()
+        first_line = output.splitlines()[0] if output else executable
+        cuda_enabled = " with CUDA" in output and " without CUDA" not in output
+        return result.returncode == 0 and cuda_enabled, first_line
+    except Exception as error:
+        return False, str(error)
+
+
+def _colmap_gpu_sift_smoke(project_root: Path, gpu_index: int = 0) -> tuple[bool, str]:
+    try:
+        import cv2
+        import numpy as np
+
+        with tempfile.TemporaryDirectory(dir=project_root, prefix=".gsdb-colmap-gpu-") as name:
+            root = Path(name)
+            images = root / "images" / "view_00"
+            images.mkdir(parents=True)
+            generator = np.random.default_rng(42)
+            texture = generator.integers(0, 256, (256, 256), dtype=np.uint8)
+            image = cv2.cvtColor(texture, cv2.COLOR_GRAY2BGR)
+            cv2.circle(image, (128, 128), 64, (255, 255, 255), 3)
+            if not cv2.imwrite(str(images / "frame_000001.jpg"), image):
+                raise RuntimeError("Failed to write COLMAP smoke image")
+            database = root / "database.db"
+            result = subprocess.run(
+                [
+                    "colmap",
+                    "feature_extractor",
+                    "--database_path",
+                    str(database),
+                    "--image_path",
+                    str(root / "images"),
+                    "--ImageReader.camera_model",
+                    "PINHOLE",
+                    "--ImageReader.single_camera_per_folder",
+                    "1",
+                    "--ImageReader.camera_params",
+                    "128,128,128,128",
+                    "--SiftExtraction.use_gpu",
+                    "1",
+                    "--SiftExtraction.gpu_index",
+                    str(gpu_index),
+                    "--SiftExtraction.max_num_features",
+                    "512",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+            )
+            if result.returncode != 0:
+                detail = (result.stderr or result.stdout).strip().splitlines()
+                return False, detail[-1] if detail else "feature_extractor failed"
+            with sqlite3.connect(database) as connection:
+                rows = connection.execute("SELECT rows FROM keypoints").fetchall()
+            keypoints = sum(int(row[0]) for row in rows)
+            return keypoints > 0, f"CUDA SIFT extracted {keypoints} keypoints on GPU {gpu_index}"
+    except Exception as error:
+        return False, str(error)
+
+
+def _wsl_memory_check(minimum_gib: float = 28.0) -> tuple[bool, str]:
+    try:
+        version = Path("/proc/version").read_text(encoding="utf-8", errors="replace")
+        if "microsoft" not in version.lower():
+            return True, "not running under WSL; WSL memory gate not applicable"
+        meminfo = Path("/proc/meminfo").read_text(encoding="utf-8")
+        line = next(item for item in meminfo.splitlines() if item.startswith("MemTotal:"))
+        total_gib = int(line.split()[1]) * 1024 / 1024**3
+        return (
+            total_gib >= minimum_gib,
+            f"WSL memory {total_gib:.1f} GiB; minimum {minimum_gib:.1f} GiB",
+        )
+    except Exception as error:
+        return False, str(error)
+
+
 def run_doctor(project_root: Path, minimum_free_gib: float = 20.0) -> dict[str, Any]:
     checks: dict[str, Any] = {}
     checks["ffmpeg"] = _version(["ffmpeg", "-version"])
     checks["ffprobe"] = _version(["ffprobe", "-version"])
-    checks["colmap"] = _version(["colmap", "-h"])
+    checks["colmap_cuda_build"] = _colmap_cuda_build()
+    checks["colmap_gpu_sift"] = (
+        _colmap_gpu_sift_smoke(project_root)
+        if checks["colmap_cuda_build"][0]
+        else (False, "CUDA COLMAP build is required before the GPU SIFT smoke test")
+    )
     checks["ns_process_data"] = _version(["ns-process-data", "--help"])
     checks["ns_train"] = _version(["ns-train", "--help"])
+    checks["wsl_memory"] = _wsl_memory_check()
 
     deepseek_key_present = bool(os.environ.get("DEEPSEEK_API_KEY"))
     if deepseek_key_present:

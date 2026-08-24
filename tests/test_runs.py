@@ -3,7 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from gsdb.models import RunConfig, RunStatus, StageStatus
+from gsdb.manifests import canonical_hash
+from gsdb.models import LegacyRunConfigV1, RunConfig, RunStatus, StageStatus
 from gsdb.runs import (
     begin_stage,
     complete_stage,
@@ -87,3 +88,20 @@ def test_reconstruction_requires_successful_mask_stage(tmp_path: Path) -> None:
     begin_stage(run, "mask")
     complete_stage(run, "mask")
     assert begin_stage(run, "reconstruct") is True
+
+
+def test_historical_v1_hash_loads_unchanged_and_v2_fields_enter_hash() -> None:
+    root = Path(__file__).resolve().parents[1]
+    scene = root / "locations/yanguan-ancient-town-20260822/scenes/night-walk-4k"
+    historical = load_run(scene, "20260824T022046Z-5679786b")
+    assert isinstance(historical.config, LegacyRunConfigV1)
+    assert historical.config_hash == (
+        "5679786b71621b06191101aaa50fe27dd83d215193b6532ba7cad6eb12d62323"
+    )
+    assert "schema_version" not in historical.config.model_dump(mode="json")
+
+    first = RunConfig(capture_id="capture-001", input_sha256="1" * 64)
+    second = first.model_copy(deep=True)
+    second.reconstruction.primary.projection_size = 2049
+    assert first.schema_version == 2
+    assert canonical_hash(first) != canonical_hash(second)

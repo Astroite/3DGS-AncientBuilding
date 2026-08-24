@@ -200,20 +200,14 @@ def summarize_frame_metrics(records: list[dict[str, Any]]) -> dict[str, float]:
     }
 
 
-def create_blur_aware_subset(
-    source_dir: Path,
-    metrics: list[dict[str, Any]],
-    output_dir: Path,
-    target_frames: int,
-) -> list[Path]:
+def select_blur_aware_records(
+    metrics: list[dict[str, Any]], target_frames: int
+) -> list[dict[str, Any]]:
+    """Pick the sharpest frame in each of ``target_frames`` temporal buckets."""
     if target_frames > len(metrics):
-        raise ValueError("Fallback target cannot exceed the primary frame count")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    existing = sorted(output_dir.glob("frame_*.jpg"))
-    if len(existing) == target_frames:
-        return existing
-    if existing:
-        raise RuntimeError("Partial fallback frame directory exists; create a new run")
+        raise ValueError("Subset target cannot exceed the candidate frame count")
+    if target_frames < 2:
+        raise ValueError("Subset target must contain at least two frames")
     selected: list[dict[str, Any]] = []
     total = len(metrics)
     for index in range(target_frames):
@@ -221,6 +215,22 @@ def create_blur_aware_subset(
         end = max(start + 1, math.floor((index + 1) * total / target_frames))
         bucket = metrics[start:end]
         selected.append(max(bucket, key=lambda item: float(item["blur_laplacian_variance"])))
+    return selected
+
+
+def create_blur_aware_subset(
+    source_dir: Path,
+    metrics: list[dict[str, Any]],
+    output_dir: Path,
+    target_frames: int,
+) -> list[Path]:
+    selected = select_blur_aware_records(metrics, target_frames)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    existing = sorted(output_dir.glob("frame_*.jpg"))
+    if len(existing) == target_frames:
+        return existing
+    if existing:
+        raise RuntimeError("Partial fallback frame directory exists; create a new run")
     outputs: list[Path] = []
     for index, item in enumerate(selected, start=1):
         source = source_dir / item["file"]

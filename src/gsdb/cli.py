@@ -186,6 +186,18 @@ def preprocess(
     run_id: Annotated[str | None, typer.Option(help="Existing run ID when resuming")] = None,
     resume: Annotated[bool, typer.Option(help="Reuse completed work in the same run")] = False,
     target_frames: Annotated[int, typer.Option()] = 270,
+    primary_frames: Annotated[
+        int, typer.Option(help="Blur-aware frames selected for the primary reconstruction")
+    ] = 135,
+    primary_fov: Annotated[
+        float, typer.Option(help="Primary perspective horizontal FOV in degrees")
+    ] = 120.0,
+    primary_projection_size: Annotated[
+        int, typer.Option(help="Primary square perspective image size")
+    ] = 2048,
+    fallback_frames: Annotated[int, typer.Option()] = 180,
+    fallback_fov: Annotated[float, typer.Option()] = 110.0,
+    fallback_projection_size: Annotated[int, typer.Option()] = 1746,
     mask_device: Annotated[str, typer.Option(help="Person segmenter device: cuda or cpu")] = "cuda",
     mask_score_threshold: Annotated[
         float, typer.Option(help="Mask R-CNN person confidence threshold")
@@ -204,7 +216,7 @@ def preprocess(
     ] = 0.45,
     mask_qa_sample_count: Annotated[
         int, typer.Option(help="Perspective views sampled for person-mask QA")
-    ] = 32,
+    ] = 16,
     vision_qa: Annotated[
         bool,
         typer.Option(
@@ -235,9 +247,26 @@ def preprocess(
                     "qa_sample_count": mask_qa_sample_count,
                 },
                 vision_qa={"enabled": vision_qa},
+                reconstruction={
+                    "primary": {
+                        "frame_count": primary_frames,
+                        "images_per_equirect": 8,
+                        "projection_fov_degrees": primary_fov,
+                        "projection_size": primary_projection_size,
+                        "crop_bottom": 0.20,
+                        "use_rig": True,
+                    },
+                    "fallback": {
+                        "frame_count": fallback_frames,
+                        "images_per_equirect": 14,
+                        "projection_fov_degrees": fallback_fov,
+                        "projection_size": fallback_projection_size,
+                        "crop_bottom": 0.15,
+                        "use_rig": True,
+                    },
+                },
             )
             config.preprocess.target_frames = target_frames
-            config.reconstruction.primary.frame_count = target_frames
             run = create_run(path, location_id, scene_id, config)
         run = preprocess_run(path, run, resume=resume)
         console.print(f"Run [green]{run.id}[/green]: preprocess={run.stages['preprocess'].status.value}")
@@ -320,12 +349,18 @@ def qa_report(
     location_id: Annotated[str, typer.Argument()],
     scene_id: Annotated[str, typer.Argument()],
     run_id: Annotated[str, typer.Argument()],
+    baseline_run_id: Annotated[
+        str | None, typer.Option(help="Previous run ID used for a v1/v2 comparison")
+    ] = None,
     resume: Annotated[bool, typer.Option()] = False,
 ) -> None:
     """Generate the review checklist and move the run to needs_review."""
     try:
         path = _scene(location_id, scene_id)
-        report = write_qa_report(path, load_run(path, run_id), resume=resume)
+        baseline = load_run(path, baseline_run_id) if baseline_run_id else None
+        report = write_qa_report(
+            path, load_run(path, run_id), baseline=baseline, resume=resume
+        )
         console.print(f"QA report: [green]{report}[/green]")
     except Exception as error:
         _fatal(error)

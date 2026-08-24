@@ -47,6 +47,7 @@ locations/*/scenes/*/exports/**
 
 # Published scene artifacts are versioned; large PLY/MP4 files use Git LFS.
 !locations/*/scenes/*/exports/*/splat.ply
+!locations/*/scenes/*/exports/*/splat-yup.ply
 !locations/*/scenes/*/exports/*/preview.mp4
 !locations/*/scenes/*/exports/*/thumbnail.jpg
 !locations/*/scenes/*/exports/*/transforms.json

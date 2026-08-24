@@ -1,6 +1,6 @@
-# 009 前 90 秒遮罩版 Demo：明早启动手册
+# 009 前 90 秒 v002：审查调整版运行手册
 
-> **现在不要执行本页任何启动命令。** 本页用于今晚完成配置审核；请等到明早准备出门、确认电脑可以持续通电且不会休眠后再启动。本文中的命令会实际解码视频、下载/加载分割模型、生成数千张视图、运行 CPU COLMAP 和 GPU 训练。
+> 本页对应审核后的 schema v2 流水线。命令会实际解码视频、生成高分辨率视图、运行 CUDA COLMAP、rig BA 与 100k GPU 训练；启动后保持供电并禁用休眠。
 
 本次运行固定使用：
 
@@ -8,7 +8,7 @@
 - 场景：`night-walk-4k`
 - 采集：`capture-009-4k`
 - 片段：009 视频的 `0–90` 秒
-- 主流程：270 张全景帧 × 每帧 8 个透视视图，共 2160 张
+- 候选：270 张全景帧；主流程按时间桶选最清晰 135 张 × 8 个视图，共 1080 张 2048² 图
 - 有界降级：主重建未达门槛时，才运行 180 × 14，共 2520 张
 - 人物处理：本地 Mask R-CNN 分割、边缘闭合与扩张；同一黑白遮罩同时用于 COLMAP 和 Nerfstudio
 - 最终状态：`needs_review`，脚本不会自动批准结果
@@ -30,6 +30,7 @@ masking:
   dilation_pixels: 24
   closing_pixels: 7
   max_masked_fraction: 0.45
+  qa_sample_count: 16
 vision_qa:
   enabled: false            # 设置 DEEPSEEK_API_KEY 后用 --vision-qa 新建运行
   provider: deepseek
@@ -37,13 +38,30 @@ vision_qa:
   image_detail: original
   minimum_confidence: 0.80
 reconstruction:
+  use_gpu_sift: true
+  gpu_index: 0
+  fix_intrinsics: true
   registration_threshold: 0.70
-  primary:  {frame_count: 270, images_per_equirect: 8,  crop_bottom: 0.20}
-  fallback: {frame_count: 180, images_per_equirect: 14, crop_bottom: 0.15}
+  rig_center_spread_ratio_limit: 0.001
+  primary:
+    {frame_count: 135, images_per_equirect: 8, projection_fov_degrees: 120,
+     projection_size: 2048, crop_bottom: 0.20, use_rig: true}
+  fallback:
+    {frame_count: 180, images_per_equirect: 14, projection_fov_degrees: 110,
+     projection_size: 1746, crop_bottom: 0.15, use_rig: true}
 train:
-  method: splatfacto
-  max_iterations: 30000
+  method: splatfacto-big
+  max_iterations: 100000
+  downscale_factor: 1
+  cache_images: cpu
+  cache_images_type: uint8
+  use_scale_regularization: true
+  rasterize_mode: classic
+  camera_optimizer_mode: SO3xR3
+  use_bilateral_grid: true
   oom_retry_downscale: 2
+export:
+  ply_axis: y_up
 ```
 
 ## 明早启动前检查
@@ -77,7 +95,7 @@ train:
    .\gsdb.ps1 doctor
    ```
 
-   `doctor` 会检查 WSL GPU、CUDA、Torch/Torchvision、gsplat 小型反向传播、FFmpeg、CPU COLMAP、写入权限和剩余空间。失败时先停下，不要绕过。
+   `doctor` 会检查 WSL 内存（至少 28 GiB）、Torch/Torchvision、gsplat 反向传播、COLMAP 的 `with CUDA` 标识和真实 GPU SIFT、小工具、写入权限及剩余空间。失败时先停下，不要绕过。
 
 ## 推荐：一键启动
 
@@ -97,7 +115,7 @@ Set-Location D:\Project\3DGS
 doctor → ingest → preprocess → mask → reconstruct → train → export → qa report → catalog build
 ```
 
-脚本会从 `preprocess` 输出中自动取得 RunId，并在任一阶段失败时立即停止。默认导出版本为 `v001`；如果该版本已经存在，启动前明确指定一个尚未使用的版本，例如：
+脚本会从 `preprocess` 输出中自动取得 RunId，并在任一阶段失败时立即停止。默认导出版本为 `v002`，QA 基线固定为 `20260824T022046Z-5679786b`：
 
 ```powershell
 .\scripts\run-009-demo.ps1 -Version v002
@@ -146,10 +164,11 @@ $RunId = '20260825T001234Z-1a2b3c4d'
   yanguan-ancient-town-20260822 night-walk-4k $RunId
 
 .\gsdb.ps1 export `
-  yanguan-ancient-town-20260822 night-walk-4k $RunId --version v001
+  yanguan-ancient-town-20260822 night-walk-4k $RunId --version v002
 
 .\gsdb.ps1 qa report `
-  yanguan-ancient-town-20260822 night-walk-4k $RunId
+  yanguan-ancient-town-20260822 night-walk-4k $RunId `
+  --baseline-run-id 20260824T022046Z-5679786b
 
 .\gsdb.ps1 catalog build
 ```
@@ -167,11 +186,11 @@ locations\yanguan-ancient-town-20260822\scenes\night-walk-4k\work\<RunId>\
 
 `mask` 在 COLMAP 之前完成以下工作：
 
-1. 把 270 张等距柱状全景投影为 2160 张透视图，并生成两个图像下采样层级。
+1. 分析 270 张候选全景、按 135 个时间桶挑最清晰帧，再显式投影为 1080 张 2048²/120° 透视图并生成两个下采样层级。
 2. 用 `maskrcnn_resnet50_fpn_v2` 检测和分割人物；夜景推理使用固定 gamma，人物边缘执行闭合和 24 px 扩张。
 3. 为每张透视图保存同尺寸二值遮罩：白色为可用建筑像素，黑色为人物等忽略区域。
 4. 校验图片/遮罩一一对应、尺寸一致、只包含 0/255，并拒绝单张遮掉超过 45% 的异常结果。
-5. 生成抽样联系表。DeepSeek 未启用时只记录“远程 QA 已禁用”，不会发送图片到外部服务。
+5. 从 16 个抽样透视视图生成两张联系表。DeepSeek 未启用时只记录“远程 QA 已禁用”，不会发送图片到外部服务。
 
 随后 `reconstruct` 把同一组遮罩通过 COLMAP 的 `ImageReader.mask_path` 排除出特征提取，并把 `mask_path` 写进 Nerfstudio 的 `transforms.json`，训练时继续排除这些像素。
 
@@ -179,9 +198,9 @@ locations\yanguan-ancient-town-20260822\scenes\night-walk-4k\work\<RunId>\
 
 不传 `-EnableVisionQa` 时使用默认的 `--no-vision-qa`。这只关闭远程多模态判定，不会关闭本地人物分割和确定性遮罩检查。
 
-启用远程闸门会把最多 4 张抽样遮罩联系表发送到 DeepSeek。联系表可能包含可识别的游客或拍摄者，应把它视为对第三方服务的数据外发；确认可以接受后再启用。
+启用远程闸门会把两张、共 16 个视图的抽样遮罩联系表发送到 DeepSeek。联系表可能包含可识别的游客或拍摄者，应把它视为对第三方服务的数据外发；确认可以接受后再启用。
 
-从 DeepSeek 控制台取得 API Key，在**当前 PowerShell 进程**临时设置环境变量：
+一键脚本优先读取 Git 忽略的 `D:\Project\3DGS\env\key.env`（单行原始 key），只在子流程运行期间注入环境变量并在 finally 中清除；也可提前在当前 PowerShell 进程设置：
 
 ```powershell
 $DeepSeekCredential = Get-Credential -UserName 'deepseek-api-key' -Message '输入 DEEPSEEK_API_KEY'
@@ -201,7 +220,7 @@ Remove-Item Env:DEEPSEEK_API_KEY -ErrorAction SilentlyContinue
 $DeepSeekCredential = $null
 ```
 
-API Key 不得写入 Git、README、脚本、YAML、`.env`、命令参数或日志。仓库只保存环境变量名 `DEEPSEEK_API_KEY`，不会保存变量值。
+API Key 不得写入 Git、README、脚本、YAML、命令参数或日志。`env/` 已整体忽略；仓库只保存环境变量名 `DEEPSEEK_API_KEY`，不会保存变量值。
 
 启用 DeepSeek 会改变运行配置和 RunId。不能给已经以 `--no-vision-qa` 创建的 RunId“中途加开”远程 QA；应新建运行。
 
@@ -227,12 +246,13 @@ $RunId = '<上次打印的 RunId>'
 .\gsdb.ps1 train `
   yanguan-ancient-town-20260822 night-walk-4k $RunId --resume
 .\gsdb.ps1 export `
-  yanguan-ancient-town-20260822 night-walk-4k $RunId --version v001 --resume
+  yanguan-ancient-town-20260822 night-walk-4k $RunId --version v002 --resume
 .\gsdb.ps1 qa report `
-  yanguan-ancient-town-20260822 night-walk-4k $RunId --resume
+  yanguan-ancient-town-20260822 night-walk-4k $RunId `
+  --baseline-run-id 20260824T022046Z-5679786b --resume
 ```
 
-`--resume` 只复用可验证的完成结果。人物遮罩会逐文件核验后续作；COLMAP 数据库若没有完整阶段标记，会保留旧数据库并在同一 RunId 下创建新的 `attempt-NNN`。投影目录只生成了一部分，或现有图片/遮罩的数量、尺寸、二值范围不一致时，程序会故意拒绝猜测；遇到这种提示应保留旧运行用于排错，从 `preprocess` 创建新 RunId，不要手动拼接、覆盖或删除中间产物。
+`--resume` 只复用可验证的完成结果。人物遮罩逐文件核验；COLMAP 的 feature、matching、mapping、rig BA 和转换都有独立完成标记，mapper 无 sparse 输出时保留数据库并以单线程恢复，不完整 sparse/rig 输出不会被覆盖。投影目录只生成一部分或图片/遮罩校验失败时会拒绝猜测。
 
 可在运行 YAML 的 `stages`、`active_stage`、`message` 和 `log_path` 字段中确认停在何处；各阶段日志位于对应的 `work\<RunId>\logs` 下。
 
@@ -244,24 +264,25 @@ $RunId = '<上次打印的 RunId>'
 - 本地遮罩缺失、尺寸错误、非二值或单图遮挡超过 45%：在 COLMAP 前停止。
 - 启用 DeepSeek 后远程调用失败或判定 `fail`：在 COLMAP 前停止。
 - 主 COLMAP 的注册率或最大连通模型覆盖低于 70%：只运行一次 180 × 14 降级流程。
+- rig BA 后同帧光心 p95 散布超过中位帧间基线 0.1%：重建失败，不进入训练。
 - 降级 COLMAP 仍低于 70%：停止，不启动训练，并保留失败分析数据。
 - Splatfacto 首次明确 CUDA OOM：只降低一级训练分辨率重试一次；第二次 OOM 或其他训练错误直接停止。
 - 任何失败运行都不会覆盖历史成功运行或已有导出。
 
 ## 预计耗时与空间
 
-以下是 RTX 4070 Ti SUPER 16 GiB + CPU COLMAP 对本次夜景 4K Demo 的规划区间，不是承诺值。COLMAP 的耗时对纹理、拖影、人物数量、CPU 核数和是否触发降级最敏感。
+以下是 RTX 4070 Ti SUPER 16 GiB + CUDA COLMAP 对审核后高分辨率方案的规划区间，不是承诺值。
 
 | 阶段 | 规划耗时 | 主要空间 |
 | --- | ---: | ---: |
 | doctor / ingest | 5–20 分钟 | 很小；首次 gsplat/模型缓存另计 |
 | preprocess（270 张全景） | 10–30 分钟 | 约 2–6 GiB |
-| 投影 + 人物遮罩 + 金字塔 | 30–90 分钟 | 约 8–25 GiB |
-| 主 COLMAP（2160 图，CPU） | 2–8 小时 | 约 5–20 GiB |
-| Splatfacto 30k | 2–6 小时 | 约 5–25 GiB |
+| 投影 + 人物遮罩 + 金字塔（1080×2048²） | 30–120 分钟 | 约 15–40 GiB |
+| 主 COLMAP + rig BA（1080 图，GPU SIFT） | 1–5 小时 | 约 5–25 GiB |
+| Splatfacto-big 100k | 1–5 小时 | 约 10–35 GiB |
 | export / QA / catalog | 10–40 分钟 | 约 2–10 GiB |
 
-主流程通常按 **5–15 小时、峰值约 30–80 GiB** 规划。若触发 2520 图的唯一降级重建，整体可能达到 **10–24 小时、峰值约 50–100 GiB**。首次下载权重、CPU 较慢或夜景匹配困难时还会更久。实际耗时、磁盘峰值和显存峰值会写入运行清单与 QA 报告。
+主流程先按 **3–10 小时、峰值约 40–100 GiB** 规划。若触发 2520 图降级，整体按 **6–18 小时、峰值约 70–160 GiB**。实际耗时、磁盘峰值和显存峰值会写入运行清单与 QA 报告。
 
 因此，明早启动后当天未完成不等于卡死。判断是否仍在工作应查看日志更新时间、CPU/GPU 占用和工作目录增长，不要仅凭控制台一段时间没有新行就中断。
 
@@ -275,7 +296,7 @@ Completed <RunId>. Artifacts remain needs_review; no automatic approval was perf
 
 完成后应存在：
 
-- 场景 `exports\<version>` 下的 Gaussian PLY、Nerfstudio 配置、坐标变换、缩略图和预览视频；
+- 场景 `exports\v002` 下只有 `splat-yup.ply`、`preview.mp4`、`thumbnail.jpg`、`transforms.json` 与 `artifact.yaml`；canonical Z-up PLY 只留在 Git 忽略的 work staging；
 - `qa\<RunId>.md`；
 - `runs\<RunId>.yaml` 中完整的遮罩、重建、训练、资源和产物记录；
 - 从 YAML 原子重建的 `catalog\catalog.sqlite` 记录。

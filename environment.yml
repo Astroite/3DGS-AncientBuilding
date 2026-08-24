@@ -12,7 +12,8 @@ dependencies:
   - git
   - ninja
   - ffmpeg=6.1
-  - colmap=3.8=cpu*
+  - colmap=3.8=gpuhe53869c_110
+  - cudatoolkit=11.8
   - pytorch=2.1.2
   - torchvision=0.16.2
   - pytorch-cuda=11.8

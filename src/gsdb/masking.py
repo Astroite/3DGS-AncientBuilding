@@ -27,13 +27,25 @@ PersonPredictor = Callable[[np.ndarray], PersonPrediction]
 
 def image_files(path: Path) -> list[Path]:
     return sorted(
-        item for item in path.iterdir() if item.is_file() and item.suffix.lower() in IMAGE_SUFFIXES
+        (
+            item
+            for item in path.rglob("*")
+            if item.is_file() and item.suffix.lower() in IMAGE_SUFFIXES
+        ),
+        key=lambda item: item.relative_to(path).as_posix(),
     )
 
 
-def mask_path_for_image(masks_dir: Path, image: Path) -> Path:
+def mask_path_for_image(
+    masks_dir: Path, image: Path, images_dir: Path | None = None
+) -> Path:
     """COLMAP appends .png to the complete relative image name."""
-    return masks_dir / f"{image.name}.png"
+    images_dir = images_dir or masks_dir.parent / "images"
+    try:
+        relative = image.relative_to(images_dir)
+    except ValueError:
+        relative = Path(image.name)
+    return masks_dir / relative.parent / f"{relative.name}.png"
 
 
 def atomic_imwrite(
@@ -171,13 +183,14 @@ def generate_person_masks(
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
     with metrics_path.open("w", encoding="utf-8", newline="\n") as metrics_stream:
         for index, image_path in enumerate(images, start=1):
+            image_name = image_path.relative_to(images_dir).as_posix()
             image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
             if image is None:
                 raise RuntimeError(f"Cannot decode planar image: {image_path}")
-            target = mask_path_for_image(masks_dir, image_path)
+            target = mask_path_for_image(masks_dir, image_path, images_dir)
             if target.exists():
                 ignored = _read_existing_mask(target, image.shape[:2])
-                detections = previous_records.get(image_path.name, {}).get("detections")
+                detections = previous_records.get(image_name, {}).get("detections")
                 reused = True
             else:
                 prediction = (
@@ -196,8 +209,8 @@ def generate_person_masks(
                 atomic_imwrite(target, colmap_mask_from_ignored(ignored))
             fraction = float(np.count_nonzero(ignored) / ignored.size)
             record: dict[str, object] = {
-                "image": image_path.name,
-                "mask": target.name,
+                "image": image_name,
+                "mask": target.relative_to(masks_dir).as_posix(),
                 "detections": detections,
                 "masked_fraction": round(fraction, 8),
                 "reused": reused,
@@ -216,8 +229,15 @@ def validate_mask_set(
     max_masked_fraction: float,
 ) -> dict[str, object]:
     images = image_files(images_dir)
-    expected = {f"{image.name}.png": image for image in images}
-    actual = {item.name: item for item in masks_dir.glob("*.png") if item.is_file()}
+    expected = {
+        mask_path_for_image(masks_dir, image, images_dir).relative_to(masks_dir).as_posix(): image
+        for image in images
+    }
+    actual = {
+        item.relative_to(masks_dir).as_posix(): item
+        for item in masks_dir.rglob("*.png")
+        if item.is_file()
+    }
     if set(actual) != set(expected):
         missing = sorted(set(expected) - set(actual))[:5]
         extra = sorted(set(actual) - set(expected))[:5]
@@ -287,10 +307,11 @@ def create_mask_contact_sheets(
         batch = selected[sheet_index : sheet_index + 8]
         canvas = np.zeros((2 * (tile_size + 34), 4 * tile_size, 3), dtype=np.uint8)
         for tile_index, record in enumerate(batch):
-            image_path = images_dir / str(record["image"])
+            image_path = images_dir / Path(str(record["image"]))
             image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
             mask = cv2.imread(
-                str(mask_path_for_image(masks_dir, image_path)), cv2.IMREAD_GRAYSCALE
+                str(mask_path_for_image(masks_dir, image_path, images_dir)),
+                cv2.IMREAD_GRAYSCALE,
             )
             if image is None or mask is None:
                 raise RuntimeError(f"Cannot build QA tile for {image_path.name}")
@@ -305,7 +326,7 @@ def create_mask_contact_sheets(
             y = row * (tile_size + 34)
             x = column * tile_size
             canvas[y : y + tile_size, x : x + tile_size] = overlay
-            label = f"{image_path.name}  mask={float(record['masked_fraction']):.1%}"
+            label = f"{record['image']}  mask={float(record['masked_fraction']):.1%}"
             cv2.putText(
                 canvas,
                 label[:43],

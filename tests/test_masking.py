@@ -94,3 +94,24 @@ def test_postprocess_rejects_non_2d_mask() -> None:
             np.zeros((4, 4, 1), dtype=np.uint8),
             MaskingConfig(dilation_pixels=0, closing_pixels=0),
         )
+
+
+def test_nested_view_masks_mirror_image_relative_paths(tmp_path: Path) -> None:
+    images = tmp_path / "images"
+    masks = tmp_path / "masks"
+    view = images / "view_03"
+    view.mkdir(parents=True)
+    image_path = view / "frame_000007.jpg"
+    _write_image(image_path)
+
+    records = generate_person_masks(
+        images,
+        masks,
+        MaskingConfig(enabled=False, dilation_pixels=0, closing_pixels=0),
+        tmp_path / "metrics.jsonl",
+    )
+
+    assert records[0]["image"] == "view_03/frame_000007.jpg"
+    assert records[0]["mask"] == "view_03/frame_000007.jpg.png"
+    assert (masks / "view_03" / "frame_000007.jpg.png").is_file()
+    assert validate_mask_set(images, masks, 0.45)["mask_count"] == 1

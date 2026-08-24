@@ -13,8 +13,9 @@ def test_environment_lock_contains_fixed_binary_and_training_stack() -> None:
         "pytorch": "2.1.2",
         "pytorch-cuda": "11.8",
         "torchvision": "0.16.2",
-        "ffmpeg": "6.1.2",
+        "ffmpeg": "6.1.1",
         "colmap": "3.8",
+        "cudatoolkit": "11.8.0",
         "gsplat": "1.4.0",
         "nerfstudio": "1.1.5",
     }
@@ -22,3 +23,5 @@ def test_environment_lock_contains_fixed_binary_and_training_stack() -> None:
     assert packages["nerfstudio"]["source"]["url"].endswith(
         "@758ea1918e082aa44776009d8e755c2f3a88d2ee"
     )
+    assert packages["colmap"]["url"].endswith("colmap-3.8-gpuhe53869c_110.conda")
+    assert packages["colmap"]["dependencies"]["cudatoolkit"] == ">=11.2,<12"
