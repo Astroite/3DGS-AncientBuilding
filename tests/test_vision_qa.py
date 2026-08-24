@@ -48,6 +48,18 @@ def test_deepseek_verdict_is_strictly_parsed() -> None:
     assert verdict.confidence == 0.92
 
 
+def test_deepseek_verdict_accepts_reasoning_prefix_but_keeps_strict_schema() -> None:
+    content = """<think>Checked all sixteen tiles.</think>
+```json
+{"decision":"pass","confidence":0.95,"false_negative_views":[],"false_positive_views":[],"rationale":"All visible people are masked."}
+```"""
+    verdict = parse_deepseek_verdict(
+        {"choices": [{"message": {"content": content}}]}
+    )
+    assert verdict.decision == "pass"
+    assert verdict.confidence == 0.95
+
+
 def test_deepseek_endpoint_requires_https() -> None:
     assert (
         resolve_deepseek_endpoint("https://api.deepseek.com", "/chat/completions")

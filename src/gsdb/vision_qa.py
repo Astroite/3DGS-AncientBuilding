@@ -97,13 +97,30 @@ def parse_deepseek_verdict(response: dict[str, Any]) -> VisionQAVerdict:
             str(item.get("text", "")) if isinstance(item, dict) else str(item)
             for item in content
         )
+    if isinstance(content, dict):
+        try:
+            return VisionQAVerdict.model_validate(content)
+        except Exception as error:
+            raise RuntimeError("DeepSeek returned invalid mask-QA JSON") from error
     text = str(content).strip()
     if text.startswith("```"):
         text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     try:
         return VisionQAVerdict.model_validate_json(text)
-    except Exception as error:
-        raise RuntimeError("DeepSeek returned invalid mask-QA JSON") from error
+    except Exception as direct_error:
+        # Some reasoning-capable endpoints prepend prose or <think> blocks even
+        # when response_format=json_object is requested. Scan for a complete JSON
+        # object, but still validate the exact fail-closed verdict schema.
+        decoder = json.JSONDecoder()
+        for index, character in enumerate(text):
+            if character != "{":
+                continue
+            try:
+                candidate, _ = decoder.raw_decode(text[index:])
+                return VisionQAVerdict.model_validate(candidate)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                continue
+        raise RuntimeError("DeepSeek returned invalid mask-QA JSON") from direct_error
 
 
 def validate_deepseek_gate(
