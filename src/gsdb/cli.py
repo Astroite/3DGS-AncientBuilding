@@ -202,6 +202,9 @@ def preprocess(
     max_masked_fraction: Annotated[
         float, typer.Option(help="Reject a view when its ignored fraction exceeds this value")
     ] = 0.45,
+    mask_qa_sample_count: Annotated[
+        int, typer.Option(help="Perspective views sampled for person-mask QA")
+    ] = 32,
     vision_qa: Annotated[
         bool,
         typer.Option(
@@ -229,6 +232,7 @@ def preprocess(
                     "inference_gamma": mask_gamma,
                     "dilation_pixels": mask_dilation_pixels,
                     "max_masked_fraction": max_masked_fraction,
+                    "qa_sample_count": mask_qa_sample_count,
                 },
                 vision_qa={"enabled": vision_qa},
             )

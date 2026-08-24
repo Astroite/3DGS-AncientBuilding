@@ -10,13 +10,13 @@ raw_source:
   sha256: df4787046ff6deb4e233cd189ac4ad4b0c1adcf557bcfee5739b98a53f6c312d
 stitched_video:
   relative_path: inputs/stitched/capture-009-4k-equirect.mp4
-  sha256: null
-  byte_size: null
-  width: null
-  height: null
-  fps: null
-  duration_seconds: null
-  codec: null
+  sha256: a91be48251da8d346934d476c1b18ddfe933af7e44a8366f70cdb8e93bd637ad
+  byte_size: 2286311238
+  width: 3840
+  height: 1920
+  fps: 29.97002997002997
+  duration_seconds: 293.860233
+  codec: hevc
 camera:
   make: Insta360
   model: X6
@@ -34,7 +34,7 @@ selection:
   end_seconds: 90.0
 export_settings:
   projection: equirectangular
-  aspect_ratio: "2:1"
+  aspect_ratio: '2:1'
   resolution: 3840x1920
   codec: h265
   color_space: Rec.709 10bit

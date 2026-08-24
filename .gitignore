@@ -6,6 +6,7 @@ __pycache__/
 .coverage
 htmlcov/
 .venv/
+env/
 condaenv.*.requirements.txt
 
 # Editors and operating systems
@@ -43,3 +44,9 @@ locations/*/scenes/*/exports/**
 *.onnx
 *.db-shm
 *.db-wal
+
+# Published scene artifacts are versioned; large PLY/MP4 files use Git LFS.
+!locations/*/scenes/*/exports/*/splat.ply
+!locations/*/scenes/*/exports/*/preview.mp4
+!locations/*/scenes/*/exports/*/thumbnail.jpg
+!locations/*/scenes/*/exports/*/transforms.json

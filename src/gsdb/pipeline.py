@@ -472,6 +472,28 @@ def _artifact_record(path: Path, scene_path: Path, kind: str, version: str) -> A
     )
 
 
+def _preview_render_command(config: Path, preview: Path) -> list[str]:
+    """Build a short preview command compatible with splatfacto's full-image datamanager."""
+    return [
+        "ns-render",
+        "interpolate",
+        "--load-config",
+        str(config),
+        "--output-path",
+        str(preview),
+        "--pose-source",
+        "eval",
+        "--interpolation-steps",
+        "1",
+        "--frame-rate",
+        "72",
+        "--downscale-factor",
+        "4",
+        "--rendered-output-names",
+        "rgb",
+    ]
+
+
 def export_run(
     scene_path: Path,
     run: RunManifest,
@@ -488,8 +510,7 @@ def export_run(
     work = scene_path / "work" / run.id
     log_dir = work / "logs"
     try:
-        existing_manifest = manifest_path.is_file()
-        if export_dir.exists() and any(export_dir.iterdir()) and not (resume and existing_manifest):
+        if export_dir.exists() and any(export_dir.iterdir()) and not resume:
             raise FileExistsError(f"Export directory is not empty: {export_dir}")
         export_dir.mkdir(parents=True, exist_ok=True)
         config = ensure_within(scene_path / run.metrics["train"]["config_path"], scene_path)
@@ -513,22 +534,7 @@ def export_run(
         preview = export_dir / "preview.mp4"
         if not preview.is_file():
             run_logged(
-                [
-                    "ns-render",
-                    "spiral",
-                    "--load-config",
-                    str(config),
-                    "--output-path",
-                    str(preview),
-                    "--seconds",
-                    "3",
-                    "--frame-rate",
-                    "24",
-                    "--downscale-factor",
-                    "4",
-                    "--rendered-output-names",
-                    "rgb",
-                ],
+                _preview_render_command(config, preview),
                 log_dir / "export-preview.log",
             )
         thumbnail = export_dir / "thumbnail.jpg"

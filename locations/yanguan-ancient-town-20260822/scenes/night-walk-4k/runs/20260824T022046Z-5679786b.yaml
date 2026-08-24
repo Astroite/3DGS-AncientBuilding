@@ -1,0 +1,205 @@
+schema_version: 1
+id: 20260824T022046Z-5679786b
+location_id: yanguan-ancient-town-20260822
+scene_id: night-walk-4k
+status: needs_review
+config_hash: 5679786b71621b06191101aaa50fe27dd83d215193b6532ba7cad6eb12d62323
+config:
+  capture_id: capture-009-4k
+  input_sha256: a91be48251da8d346934d476c1b18ddfe933af7e44a8366f70cdb8e93bd637ad
+  preprocess:
+    target_frames: 270
+    jpeg_quality: 2
+    minimum_free_gib: 20.0
+  masking:
+    enabled: true
+    model: maskrcnn_resnet50_fpn_v2
+    weights: DEFAULT
+    device: cuda
+    person_class_id: 1
+    score_threshold: 0.25
+    probability_threshold: 0.5
+    inference_gamma: 0.75
+    dilation_pixels: 24
+    closing_pixels: 7
+    max_masked_fraction: 0.45
+    qa_sample_count: 8
+  vision_qa:
+    enabled: true
+    provider: deepseek
+    model: deepseek-v4-flash-vision-exp
+    api_key_env: DEEPSEEK_API_KEY
+    base_url: https://api.deepseek.com
+    endpoint_path: /chat/completions
+    image_detail: original
+    timeout_seconds: 120
+    max_contact_sheets: 4
+    minimum_confidence: 0.8
+  reconstruction:
+    registration_threshold: 0.7
+    primary:
+      frame_count: 270
+      images_per_equirect: 8
+      crop_bottom: 0.2
+      matching_method: sequential
+      num_downscales: 2
+    fallback:
+      frame_count: 180
+      images_per_equirect: 14
+      crop_bottom: 0.15
+      matching_method: sequential
+      num_downscales: 2
+  train:
+    method: splatfacto
+    max_iterations: 30000
+    oom_retry_downscale: 2
+created_at: '2026-08-24T02:20:46Z'
+updated_at: '2026-08-24T09:54:20Z'
+active_stage: null
+stages:
+  preprocess:
+    status: succeeded
+    started_at: '2026-08-24T02:20:46Z'
+    completed_at: '2026-08-24T02:21:33Z'
+    elapsed_seconds: 47.0
+    message: Extracted and analyzed 270 equirectangular frames
+    log_path: work/20260824T022046Z-5679786b/logs/preprocess.log
+  mask:
+    status: succeeded
+    started_at: '2026-08-24T02:21:59Z'
+    completed_at: '2026-08-24T02:44:57Z'
+    elapsed_seconds: 1378.0
+    message: Projected and masked 2160 primary perspective views; deterministic QA
+      passed
+    log_path: work/20260824T022046Z-5679786b/logs/mask.log
+  reconstruct:
+    status: succeeded
+    started_at: '2026-08-24T05:52:17Z'
+    completed_at: '2026-08-24T09:30:08Z'
+    elapsed_seconds: 13071.0
+    message: 'Selected dataset: work/20260824T022046Z-5679786b/reconstruction-primary'
+    log_path: work/20260824T022046Z-5679786b/logs
+  train:
+    status: succeeded
+    started_at: '2026-08-24T09:30:11Z'
+    completed_at: '2026-08-24T09:44:50Z'
+    elapsed_seconds: 879.0
+    message: 'Training config: work/20260824T022046Z-5679786b/training/attempt-1/unnamed/splatfacto/2026-08-24_173017/config.yml'
+    log_path: work/20260824T022046Z-5679786b/logs
+  export:
+    status: succeeded
+    started_at: '2026-08-24T09:51:28Z'
+    completed_at: '2026-08-24T09:53:51Z'
+    elapsed_seconds: 143.0
+    message: Exported 4 artifacts to exports/v001
+    log_path: work/20260824T022046Z-5679786b/logs
+  qa:
+    status: succeeded
+    started_at: '2026-08-24T09:54:20Z'
+    completed_at: '2026-08-24T09:54:20Z'
+    elapsed_seconds: 0.0
+    message: 'QA report: qa/20260824T022046Z-5679786b.md'
+    log_path: null
+tool_versions:
+  python: 3.10.12
+  ffmpeg: ffmpeg version 6.1.2 Copyright (c) 2000-2024 the FFmpeg developers
+  colmap: COLMAP 3.8 -- Structure-from-Motion and Multi-View Stereo
+  gsplat: 1.4.0
+  nerfstudio: 1.1.5
+  torchvision: 0.16.2
+  nerfstudio_commit: 758ea1918e082aa44776009d8e755c2f3a88d2ee
+  torch: 2.1.2
+  torch_cuda: '11.8'
+metrics:
+  input:
+    width: 3840
+    height: 1920
+    fps: 29.97002997002997
+    duration_seconds: 293.860233
+    codec: hevc
+    pixel_format: yuv420p10le
+    byte_size: 2286311238
+  selection:
+    start_seconds: 0.0
+    end_seconds: 90.0
+  disk_budget:
+    free_bytes: 315511447552
+    required_bytes: 42949672960
+  preprocess:
+    frame_count: 270
+    blur_median: 592.1952290000602
+    luma_mean_median: 64.99068641662598
+    black_fraction_median: 0.026119232177734375
+    highlight_fraction_median: 0.0003108978271484375
+  resources:
+    disk_observed_peak_bytes: 2962398579
+    gpu_memory_observed_peak_mib: 4868.0
+  masking:
+    primary:
+      planar_images: 2160
+      model: maskrcnn_resnet50_fpn_v2
+      detection:
+        images: 2160
+        images_with_detection_metrics: 2160
+        detection_metrics_complete: true
+        images_with_detections: 804
+        person_instances: 1107
+        reused_masks: 0
+      validation:
+        image_count: 2160
+        mask_count: 2160
+        masked_images: 804
+        zero_mask_images: 1356
+        mean_masked_fraction: 0.02700754876784336
+        max_masked_fraction: 0.22648328993055555
+        deterministic_qa: passed
+      contact_sheets:
+      - work/20260824T022046Z-5679786b/reconstruction-primary/mask-qa/mask-contact-01.jpg
+      vision_qa:
+        decision: pass
+        confidence: 0.95
+        false_negative_views: []
+        false_positive_views: []
+        rationale: All visible people are covered by red masks with reasonable margins.
+          No permanent architecture is broadly removed.
+  reconstruction:
+    primary:
+      expected_planar_images: 2160
+      written_planar_images: 2160
+      registered_images: 2152
+      selected_component_images: 2152
+      registration_ratio: 0.9962962962962963
+      largest_component_coverage: 0.9962962962962963
+      component_count: 1
+      component_sizes:
+      - 2152
+  train:
+    attempts:
+    - name: attempt-1
+      elapsed_seconds: 735.03
+      gpu_memory_peak_mib: 4868.0
+    config_path: work/20260824T022046Z-5679786b/training/attempt-1/unnamed/splatfacto/2026-08-24_173017/config.yml
+selected_dataset: work/20260824T022046Z-5679786b/reconstruction-primary
+fallback_attempted: false
+artifacts:
+- kind: gaussian_ply
+  relative_path: exports/v001/splat.ply
+  sha256: 02779816046f9242951947a0b772360d5d83524b86fead31aebda7cad2be51b6
+  byte_size: 112468353
+  version: v001
+- kind: preview_video
+  relative_path: exports/v001/preview.mp4
+  sha256: 3ec0cc9869aec30826527ab7a70cd1a3a77d1d0df458fc6e9471eda705c8b3d9
+  byte_size: 1936524
+  version: v001
+- kind: thumbnail
+  relative_path: exports/v001/thumbnail.jpg
+  sha256: 5c1ae90b4bcde21f71d72d83dad38834cb39e457cd6bb44c72bcf4f4f3492193
+  byte_size: 10513
+  version: v001
+- kind: transforms
+  relative_path: exports/v001/transforms.json
+  sha256: 73a0831d3a4fe725658b5dcb74e723e5a42239b464045bdb598b87fd6f36f8b6
+  byte_size: 1475273
+  version: v001
+review_notes: null

@@ -132,6 +132,7 @@ def build_colmap_commands(
     dataset: Path,
     attempt: ReconstructionAttempt,
     colmap_attempt_dir: Path | None = None,
+    mapper_num_threads: int | None = None,
 ) -> list[list[str]]:
     images_dir = dataset / "images"
     masks_dir = dataset / "masks"
@@ -142,7 +143,7 @@ def build_colmap_commands(
     database = colmap_attempt_dir / "database.db"
     sparse = colmap_attempt_dir / "sparse"
     camera_params = pinhole_camera_parameters(images[0], projection_fov_degrees(attempt))
-    return [
+    commands = [
         [
             "colmap",
             "feature_extractor",
@@ -182,6 +183,34 @@ def build_colmap_commands(
             str(sparse),
         ],
     ]
+    if mapper_num_threads is not None:
+        commands[2].extend(["--Mapper.num_threads", str(mapper_num_threads)])
+    return commands
+
+
+def select_colmap_attempt(colmap_root: Path) -> tuple[Path, int | None]:
+    """Select an attempt and request a safe mapper retry when prerequisites are reusable."""
+    existing_attempts = sorted(
+        item for item in colmap_root.glob("attempt-*") if item.is_dir()
+    )
+    if not existing_attempts:
+        return colmap_root / "attempt-001", None
+
+    latest = existing_attempts[-1]
+    if (latest / ".mapping-complete").is_file():
+        return latest, None
+
+    prerequisites_complete = all(
+        (latest / f".{name}-complete").is_file()
+        for name in ("features", "matching")
+    )
+    sparse_root = latest / "sparse"
+    sparse_has_output = sparse_root.is_dir() and any(sparse_root.iterdir())
+    if prerequisites_complete and not sparse_has_output:
+        return latest, 1
+
+    next_number = int(latest.name.rsplit("-", 1)[1]) + 1
+    return colmap_root / f"attempt-{next_number:03d}", None
 
 
 def _colmap_components(sparse_root: Path) -> list[tuple[Path, dict[int, Any]]]:
@@ -301,20 +330,16 @@ def run_masked_colmap(
 
     colmap_root = dataset / "colmap"
     colmap_root.mkdir(parents=True, exist_ok=True)
-    existing_attempts = sorted(
-        item for item in colmap_root.glob("attempt-*") if item.is_dir()
-    )
-    if existing_attempts and not (existing_attempts[-1] / ".mapping-complete").is_file():
-        next_number = int(existing_attempts[-1].name.rsplit("-", 1)[1]) + 1
-        colmap_attempt = colmap_root / f"attempt-{next_number:03d}"
-    elif existing_attempts:
-        colmap_attempt = existing_attempts[-1]
-    else:
-        colmap_attempt = colmap_root / "attempt-001"
+    colmap_attempt, mapper_num_threads = select_colmap_attempt(colmap_root)
     sparse_root = colmap_attempt / "sparse"
     colmap_attempt.mkdir(parents=True, exist_ok=True)
     sparse_root.mkdir(parents=True, exist_ok=True)
-    commands = build_colmap_commands(dataset, attempt, colmap_attempt)
+    commands = build_colmap_commands(
+        dataset,
+        attempt,
+        colmap_attempt,
+        mapper_num_threads=mapper_num_threads,
+    )
     steps = (
         ("features", commands[0]),
         ("matching", commands[1]),

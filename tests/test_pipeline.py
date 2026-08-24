@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from gsdb.models import RunConfig, RunManifest, StageStatus, utc_now
-from gsdb.pipeline import _train_command, preprocess_run
+from gsdb.pipeline import _preview_render_command, _train_command, preprocess_run
 from gsdb.runs import create_run, load_run
 
 
@@ -28,6 +28,19 @@ def test_train_retry_uses_nerfstudio_dataparser_downscale() -> None:
         "--downscale-factor",
         "2",
     ]
+
+
+def test_preview_render_uses_full_image_datamanager_compatible_path() -> None:
+    config = Path("/work/config.yml")
+    preview = Path("/exports/preview.mp4")
+
+    command = _preview_render_command(config, preview)
+
+    assert command[:2] == ["ns-render", "interpolate"]
+    assert "--pose-source" in command
+    assert command[command.index("--pose-source") + 1] == "eval"
+    assert command[command.index("--interpolation-steps") + 1] == "1"
+    assert "--seconds" not in command
 
 
 def test_stage_start_is_saved_before_interrupt(

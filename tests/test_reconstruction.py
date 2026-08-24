@@ -11,6 +11,7 @@ from gsdb.reconstruction import (
     build_colmap_commands,
     build_image_pyramid,
     pinhole_camera_parameters,
+    select_colmap_attempt,
     validate_frame_masks,
 )
 
@@ -33,8 +34,44 @@ def test_colmap_commands_use_per_image_masks_cpu_and_projection_intrinsics(
     assert feature[feature.index("--SiftExtraction.use_gpu") + 1] == "0"
     assert commands[1][commands[1].index("--SiftMatching.use_gpu") + 1] == "0"
     assert commands[1][commands[1].index("--SequentialMatching.overlap") + 1] == "16"
+    retry_commands = build_colmap_commands(
+        dataset, attempt, mapper_num_threads=1
+    )
+    assert retry_commands[2][retry_commands[2].index("--Mapper.num_threads") + 1] == "1"
     parameters = pinhole_camera_parameters(image_path, 120.0).split(",")
     assert abs(float(parameters[0]) - 28.867513) < 0.001
+
+
+def test_colmap_mapper_retry_reuses_completed_database_single_threaded(
+    tmp_path: Path,
+) -> None:
+    colmap_root = tmp_path / "colmap"
+    attempt_dir = colmap_root / "attempt-001"
+    (attempt_dir / "sparse").mkdir(parents=True)
+    (attempt_dir / ".features-complete").write_text("complete\n", encoding="utf-8")
+    (attempt_dir / ".matching-complete").write_text("complete\n", encoding="utf-8")
+
+    selected, mapper_num_threads = select_colmap_attempt(colmap_root)
+
+    assert selected == attempt_dir
+    assert mapper_num_threads == 1
+
+
+def test_colmap_mapper_retry_does_not_overwrite_partial_sparse_output(
+    tmp_path: Path,
+) -> None:
+    colmap_root = tmp_path / "colmap"
+    attempt_dir = colmap_root / "attempt-001"
+    sparse_component = attempt_dir / "sparse" / "0"
+    sparse_component.mkdir(parents=True)
+    (sparse_component / "images.bin").write_bytes(b"partial")
+    (attempt_dir / ".features-complete").write_text("complete\n", encoding="utf-8")
+    (attempt_dir / ".matching-complete").write_text("complete\n", encoding="utf-8")
+
+    selected, mapper_num_threads = select_colmap_attempt(colmap_root)
+
+    assert selected == colmap_root / "attempt-002"
+    assert mapper_num_threads is None
 
 
 def test_transforms_receive_matching_per_frame_mask_path(tmp_path: Path) -> None:
