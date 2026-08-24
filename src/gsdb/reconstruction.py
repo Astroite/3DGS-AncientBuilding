@@ -432,15 +432,24 @@ def reorder_database_image_ids(database: Path, ordered_names: list[str]) -> bool
             return False
         offset = max(current.values()) + len(current) + 1000
         connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "CREATE TEMP TABLE image_id_reorder "
+            "(temporary_id INTEGER PRIMARY KEY, new_id INTEGER UNIQUE NOT NULL)"
+        )
+        connection.executemany(
+            "INSERT INTO image_id_reorder (temporary_id, new_id) VALUES (?, ?)",
+            [
+                (current[name] + offset, new_id)
+                for name, new_id in desired.items()
+            ],
+        )
         for table in ("images", "keypoints", "descriptors"):
             connection.execute(f"UPDATE {table} SET image_id = image_id + ?", (offset,))
-        for name, new_id in desired.items():
-            temporary_id = current[name] + offset
-            for table in ("images", "keypoints", "descriptors"):
-                connection.execute(
-                    f"UPDATE {table} SET image_id = ? WHERE image_id = ?",
-                    (new_id, temporary_id),
-                )
+            connection.execute(
+                f"UPDATE {table} SET image_id = ("
+                "SELECT new_id FROM image_id_reorder "
+                f"WHERE temporary_id = {table}.image_id)"
+            )
         if connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'"
         ).fetchone():
