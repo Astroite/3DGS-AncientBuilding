@@ -80,7 +80,9 @@ def build_deepseek_request(
             {"role": "user", "content": content},
         ],
         "temperature": 0,
-        "max_tokens": 1200,
+        # Vision-capable reasoning models count hidden reasoning against this
+        # budget. 1200 can finish with empty content before emitting the JSON.
+        "max_tokens": 4096,
         "response_format": {"type": "json_object"},
     }
 

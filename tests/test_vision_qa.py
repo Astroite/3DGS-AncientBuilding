@@ -23,6 +23,7 @@ def test_deepseek_request_embeds_contact_sheet_and_requires_json(tmp_path: Path)
     assert content[1]["image_url"]["detail"] == "original"
     assert request["model"] == "deepseek-v4-flash-vision-exp"
     assert request["response_format"] == {"type": "json_object"}
+    assert request["max_tokens"] == 4096
 
 
 def test_deepseek_verdict_is_strictly_parsed() -> None:
