@@ -1,0 +1,410 @@
+schema_version: 1
+id: 20260825T062740Z-46f434b6
+location_id: yanguan-ancient-town-20260822
+scene_id: night-walk-4k
+status: processing
+config_hash: 46f434b6ee49ad815341b6e02b323cb5a103e703157dcc4f58bfca20110a934e
+config:
+  schema_version: 2
+  capture_id: capture-009-4k
+  input_sha256: a91be48251da8d346934d476c1b18ddfe933af7e44a8366f70cdb8e93bd637ad
+  preprocess:
+    target_frames: 270
+    jpeg_quality: 2
+    minimum_free_gib: 20.0
+  masking:
+    enabled: true
+    model: maskrcnn_resnet50_fpn_v2
+    weights: DEFAULT
+    device: cuda
+    person_class_id: 1
+    score_threshold: 0.25
+    probability_threshold: 0.5
+    inference_gamma: 0.75
+    dilation_pixels: 24
+    closing_pixels: 7
+    max_masked_fraction: 0.45
+    qa_sample_count: 16
+  vision_qa:
+    enabled: false
+    provider: deepseek
+    model: deepseek-v4-flash-vision-exp
+    api_key_env: DEEPSEEK_API_KEY
+    base_url: https://api.deepseek.com
+    endpoint_path: /chat/completions
+    image_detail: original
+    timeout_seconds: 120
+    max_contact_sheets: 4
+    minimum_confidence: 0.8
+  reconstruction:
+    use_gpu_sift: true
+    gpu_index: 0
+    fix_intrinsics: true
+    registration_threshold: 0.7
+    rig_center_spread_ratio_limit: 0.001
+    primary:
+      frame_count: 135
+      images_per_equirect: 8
+      projection_fov_degrees: 120.0
+      projection_size: 2048
+      crop_bottom: 0.2
+      use_rig: true
+      matching_method: sequential
+      num_downscales: 2
+    fallback:
+      frame_count: 180
+      images_per_equirect: 14
+      projection_fov_degrees: 110.0
+      projection_size: 1746
+      crop_bottom: 0.15
+      use_rig: true
+      matching_method: sequential
+      num_downscales: 2
+  train:
+    method: splatfacto-big
+    max_iterations: 100000
+    downscale_factor: 1
+    oom_retry_downscale: 2
+    cache_images: cpu
+    cache_images_type: uint8
+    use_scale_regularization: true
+    rasterize_mode: classic
+    camera_optimizer_mode: SO3xR3
+    use_bilateral_grid: true
+  export:
+    ply_axis: y_up
+created_at: '2026-08-25T06:27:40Z'
+updated_at: '2026-08-25T11:36:47Z'
+active_stage: null
+stages:
+  preprocess:
+    status: succeeded
+    started_at: '2026-08-25T06:27:40Z'
+    completed_at: '2026-08-25T06:28:20Z'
+    elapsed_seconds: 40.0
+    message: Extracted and analyzed 270 candidate equirectangular frames; selected
+      135 blur-aware frames
+    log_path: work/20260825T062740Z-46f434b6/logs/preprocess.log
+  mask:
+    status: succeeded
+    started_at: '2026-08-25T06:28:35Z'
+    completed_at: '2026-08-25T06:38:09Z'
+    elapsed_seconds: 574.0
+    message: Projected and masked 1080 primary perspective views; deterministic QA
+      passed
+    log_path: work/20260825T062740Z-46f434b6/logs/mask.log
+  reconstruct:
+    status: succeeded
+    started_at: '2026-08-25T06:38:25Z'
+    completed_at: '2026-08-25T07:24:31Z'
+    elapsed_seconds: 2766.0
+    message: 'Selected dataset: work/20260825T062740Z-46f434b6/reconstruction-primary'
+    log_path: work/20260825T062740Z-46f434b6/logs
+  train:
+    status: succeeded
+    started_at: '2026-08-25T07:24:55Z'
+    completed_at: '2026-08-25T11:33:49Z'
+    elapsed_seconds: 14934.0
+    message: 'Training config: work/20260825T062740Z-46f434b6/training/attempt-1/unnamed/splatfacto/2026-08-25_152501/config.yml'
+    log_path: work/20260825T062740Z-46f434b6/logs
+  export:
+    status: succeeded
+    started_at: '2026-08-25T11:34:54Z'
+    completed_at: '2026-08-25T11:36:47Z'
+    elapsed_seconds: 113.0
+    message: Exported 4 artifacts to exports/v002
+    log_path: work/20260825T062740Z-46f434b6/logs
+  qa:
+    status: pending
+    started_at: null
+    completed_at: null
+    elapsed_seconds: null
+    message: null
+    log_path: null
+tool_versions:
+  python: 3.10.12
+  ffmpeg: ffmpeg version 6.1.1 Copyright (c) 2000-2023 the FFmpeg developers
+  colmap: COLMAP 3.8 -- Structure-from-Motion and Multi-View Stereo
+  colmap_cuda: enabled
+  gsplat: 1.4.0
+  nerfstudio: 1.1.5
+  torchvision: 0.16.2
+  nerfstudio_commit: 758ea1918e082aa44776009d8e755c2f3a88d2ee
+  torch: 2.1.2
+  torch_cuda: '11.8'
+metrics:
+  input:
+    width: 3840
+    height: 1920
+    fps: 29.97002997002997
+    duration_seconds: 293.860233
+    codec: hevc
+    pixel_format: yuv420p10le
+    byte_size: 2286311238
+  selection:
+    start_seconds: 0.0
+    end_seconds: 90.0
+  disk_budget:
+    free_bytes: 973828603904
+    required_bytes: 42949672960
+  preprocess:
+    candidate:
+      frame_count: 270
+      blur_median: 592.1952290000602
+      luma_mean_median: 64.99068641662598
+      black_fraction_median: 0.026119232177734375
+      highlight_fraction_median: 0.0003108978271484375
+    selected_primary:
+      frame_count: 135
+      blur_median: 618.2336594602093
+      luma_mean_median: 64.99184799194336
+      black_fraction_median: 0.023174285888671875
+      highlight_fraction_median: 0.000293731689453125
+    candidate_frame_count: 270
+    selected_frame_count: 135
+    blur_median_improvement: 26.03843046014913
+    blur_median_improvement_ratio: 1.0439693350858563
+  resources:
+    disk_observed_peak_bytes: 4541140567
+    gpu_memory_observed_peak_mib: 8847.0
+  masking:
+    primary:
+      planar_images: 1080
+      model: maskrcnn_resnet50_fpn_v2
+      detection:
+        images: 1080
+        images_with_detection_metrics: 1080
+        detection_metrics_complete: true
+        images_with_detections: 403
+        person_instances: 540
+        reused_masks: 0
+      validation:
+        image_count: 1080
+        mask_count: 1080
+        masked_images: 403
+        zero_mask_images: 677
+        mean_masked_fraction: 0.022851199353182756
+        max_masked_fraction: 0.14119935035705566
+        deterministic_qa: passed
+      contact_sheets:
+      - work/20260825T062740Z-46f434b6/reconstruction-primary/mask-qa/mask-contact-01.jpg
+      - work/20260825T062740Z-46f434b6/reconstruction-primary/mask-qa/mask-contact-02.jpg
+      vision_qa:
+        status: disabled
+        reason: Set vision_qa.enabled=true in a new run only after confirming an authorized
+          DeepSeek multimodal endpoint
+  reconstruction:
+    primary:
+      expected_planar_images: 1080
+      written_planar_images: 1080
+      registered_images: 1067
+      selected_component_images: 1067
+      registration_ratio: 0.9879629629629629
+      largest_component_coverage: 0.9879629629629629
+      component_count: 1
+      component_sizes:
+      - 1067
+      sift_gpu: true
+      fixed_intrinsics: true
+      cross_view_pairs: 3780
+      rig:
+        enabled: true
+        config_path: colmap/attempt-001/rig-config.json
+        pre_bundle_adjustment:
+          frame_count: 135
+          center_spread_median: 0.0010925790203302496
+          center_spread_p95: 0.003806971141982413
+          center_spread_max: 1.1683489097368416
+          median_interframe_baseline: 0.1373892196192621
+          p95_spread_to_baseline: 0.02770938762540778
+          intrinsics:
+            '1':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '2':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '3':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '4':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '5':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '6':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '7':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '8':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+        post_bundle_adjustment:
+          frame_count: 135
+          center_spread_median: 6.377745716588144e-16
+          center_spread_p95: 1.8682337991855296e-15
+          center_spread_max: 4.447825579847493e-15
+          median_interframe_baseline: 0.1371940901673397
+          p95_spread_to_baseline: 1.3617450991560859e-14
+          intrinsics:
+            '1':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '2':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '3':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '4':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '5':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '6':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '7':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '8':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+        p95_spread_ratio_limit: 0.001
+        gate: passed
+        component_merge:
+          enabled: false
+  train:
+    attempts:
+    - name: attempt-1
+      elapsed_seconds: 14881.524
+      gpu_memory_peak_mib: 8847.0
+    config_path: work/20260825T062740Z-46f434b6/training/attempt-1/unnamed/splatfacto/2026-08-25_152501/config.yml
+  export:
+    gaussian_count: 878467
+    ply_axis: y_up
+    gaussian_count_warning: below_2_million
+selected_dataset: work/20260825T062740Z-46f434b6/reconstruction-primary
+fallback_attempted: false
+artifacts:
+- kind: gaussian_ply
+  relative_path: exports/v002/splat-yup.ply
+  sha256: ab843e11ead33747285d569dada93a7e5628d2b918d472abf74dc3109fd42964
+  byte_size: 217861470
+  version: v002
+- kind: preview_video
+  relative_path: exports/v002/preview.mp4
+  sha256: 258204e604ee1ba4f4f0402dd6af99bad392bcd329b8f9a85393934de2b8c737
+  byte_size: 2808048
+  version: v002
+- kind: thumbnail
+  relative_path: exports/v002/thumbnail.jpg
+  sha256: 1e618a8b3dc5348f8875f0de3026b35dd2dd4273639ffdd5b3e85adeb3fb46f9
+  byte_size: 27558
+  version: v002
+- kind: transforms
+  relative_path: exports/v002/transforms.json
+  sha256: 0a0a6b1611f2286ddb74c7ea6b818a3184cc4dcaa4e2b44f1a7d3158c00f9045
+  byte_size: 993444
+  version: v002
+review_notes: null

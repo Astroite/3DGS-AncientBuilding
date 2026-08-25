@@ -1,0 +1,281 @@
+schema_version: 1
+location_id: yanguan-ancient-town-20260822
+scene_id: night-walk-4k
+run_id: 20260825T062740Z-46f434b6
+version: v002
+status: needs_review
+metric_scale: false
+generated_at: '2026-08-25T11:36:47Z'
+artifacts:
+- kind: gaussian_ply
+  relative_path: exports/v002/splat-yup.ply
+  sha256: ab843e11ead33747285d569dada93a7e5628d2b918d472abf74dc3109fd42964
+  byte_size: 217861470
+  version: v002
+- kind: preview_video
+  relative_path: exports/v002/preview.mp4
+  sha256: 258204e604ee1ba4f4f0402dd6af99bad392bcd329b8f9a85393934de2b8c737
+  byte_size: 2808048
+  version: v002
+- kind: thumbnail
+  relative_path: exports/v002/thumbnail.jpg
+  sha256: 1e618a8b3dc5348f8875f0de3026b35dd2dd4273639ffdd5b3e85adeb3fb46f9
+  byte_size: 27558
+  version: v002
+- kind: transforms
+  relative_path: exports/v002/transforms.json
+  sha256: 0a0a6b1611f2286ddb74c7ea6b818a3184cc4dcaa4e2b44f1a7d3158c00f9045
+  byte_size: 993444
+  version: v002
+qa_metrics:
+  input:
+    width: 3840
+    height: 1920
+    fps: 29.97002997002997
+    duration_seconds: 293.860233
+    codec: hevc
+    pixel_format: yuv420p10le
+    byte_size: 2286311238
+  selection:
+    start_seconds: 0.0
+    end_seconds: 90.0
+  disk_budget:
+    free_bytes: 973828603904
+    required_bytes: 42949672960
+  preprocess:
+    candidate:
+      frame_count: 270
+      blur_median: 592.1952290000602
+      luma_mean_median: 64.99068641662598
+      black_fraction_median: 0.026119232177734375
+      highlight_fraction_median: 0.0003108978271484375
+    selected_primary:
+      frame_count: 135
+      blur_median: 618.2336594602093
+      luma_mean_median: 64.99184799194336
+      black_fraction_median: 0.023174285888671875
+      highlight_fraction_median: 0.000293731689453125
+    candidate_frame_count: 270
+    selected_frame_count: 135
+    blur_median_improvement: 26.03843046014913
+    blur_median_improvement_ratio: 1.0439693350858563
+  resources:
+    disk_observed_peak_bytes: 4541140567
+    gpu_memory_observed_peak_mib: 8847.0
+  masking:
+    primary:
+      planar_images: 1080
+      model: maskrcnn_resnet50_fpn_v2
+      detection:
+        images: 1080
+        images_with_detection_metrics: 1080
+        detection_metrics_complete: true
+        images_with_detections: 403
+        person_instances: 540
+        reused_masks: 0
+      validation:
+        image_count: 1080
+        mask_count: 1080
+        masked_images: 403
+        zero_mask_images: 677
+        mean_masked_fraction: 0.022851199353182756
+        max_masked_fraction: 0.14119935035705566
+        deterministic_qa: passed
+      contact_sheets:
+      - work/20260825T062740Z-46f434b6/reconstruction-primary/mask-qa/mask-contact-01.jpg
+      - work/20260825T062740Z-46f434b6/reconstruction-primary/mask-qa/mask-contact-02.jpg
+      vision_qa:
+        status: disabled
+        reason: Set vision_qa.enabled=true in a new run only after confirming an authorized
+          DeepSeek multimodal endpoint
+  reconstruction:
+    primary:
+      expected_planar_images: 1080
+      written_planar_images: 1080
+      registered_images: 1067
+      selected_component_images: 1067
+      registration_ratio: 0.9879629629629629
+      largest_component_coverage: 0.9879629629629629
+      component_count: 1
+      component_sizes:
+      - 1067
+      sift_gpu: true
+      fixed_intrinsics: true
+      cross_view_pairs: 3780
+      rig:
+        enabled: true
+        config_path: colmap/attempt-001/rig-config.json
+        pre_bundle_adjustment:
+          frame_count: 135
+          center_spread_median: 0.0010925790203302496
+          center_spread_p95: 0.003806971141982413
+          center_spread_max: 1.1683489097368416
+          median_interframe_baseline: 0.1373892196192621
+          p95_spread_to_baseline: 0.02770938762540778
+          intrinsics:
+            '1':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '2':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '3':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '4':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '5':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '6':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '7':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '8':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+        post_bundle_adjustment:
+          frame_count: 135
+          center_spread_median: 6.377745716588144e-16
+          center_spread_p95: 1.8682337991855296e-15
+          center_spread_max: 4.447825579847493e-15
+          median_interframe_baseline: 0.1371940901673397
+          p95_spread_to_baseline: 1.3617450991560859e-14
+          intrinsics:
+            '1':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '2':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '3':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '4':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '5':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '6':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '7':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '8':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+        p95_spread_ratio_limit: 0.001
+        gate: passed
+        component_merge:
+          enabled: false
+  train:
+    attempts:
+    - name: attempt-1
+      elapsed_seconds: 14881.524
+      gpu_memory_peak_mib: 8847.0
+    config_path: work/20260825T062740Z-46f434b6/training/attempt-1/unnamed/splatfacto/2026-08-25_152501/config.yml
+  export:
+    gaussian_count: 878467
+    ply_axis: y_up
+    gaussian_count_warning: below_2_million
