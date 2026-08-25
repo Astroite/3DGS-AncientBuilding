@@ -1,0 +1,639 @@
+schema_version: 1
+id: 20260824T132253Z-e82f2270
+location_id: yanguan-ancient-town-20260822
+scene_id: night-walk-4k
+status: processing
+config_hash: e82f2270bfaa5386bf63c40f36ef31096cb3ef8621182fe6af1ea858e82defbd
+config:
+  schema_version: 2
+  capture_id: capture-009-4k
+  input_sha256: a91be48251da8d346934d476c1b18ddfe933af7e44a8366f70cdb8e93bd637ad
+  preprocess:
+    target_frames: 270
+    jpeg_quality: 2
+    minimum_free_gib: 20.0
+  masking:
+    enabled: true
+    model: maskrcnn_resnet50_fpn_v2
+    weights: DEFAULT
+    device: cuda
+    person_class_id: 1
+    score_threshold: 0.25
+    probability_threshold: 0.5
+    inference_gamma: 0.75
+    dilation_pixels: 24
+    closing_pixels: 7
+    max_masked_fraction: 0.45
+    qa_sample_count: 16
+  vision_qa:
+    enabled: true
+    provider: deepseek
+    model: deepseek-v4-flash-vision-exp
+    api_key_env: DEEPSEEK_API_KEY
+    base_url: https://api.deepseek.com
+    endpoint_path: /chat/completions
+    image_detail: original
+    timeout_seconds: 120
+    max_contact_sheets: 4
+    minimum_confidence: 0.8
+  reconstruction:
+    use_gpu_sift: true
+    gpu_index: 0
+    fix_intrinsics: true
+    registration_threshold: 0.7
+    rig_center_spread_ratio_limit: 0.001
+    primary:
+      frame_count: 135
+      images_per_equirect: 8
+      projection_fov_degrees: 120.0
+      projection_size: 2048
+      crop_bottom: 0.2
+      use_rig: true
+      matching_method: sequential
+      num_downscales: 2
+    fallback:
+      frame_count: 180
+      images_per_equirect: 14
+      projection_fov_degrees: 110.0
+      projection_size: 1746
+      crop_bottom: 0.15
+      use_rig: true
+      matching_method: sequential
+      num_downscales: 2
+  train:
+    method: splatfacto-big
+    max_iterations: 100000
+    downscale_factor: 1
+    oom_retry_downscale: 2
+    cache_images: cpu
+    cache_images_type: uint8
+    use_scale_regularization: true
+    rasterize_mode: classic
+    camera_optimizer_mode: SO3xR3
+    use_bilateral_grid: true
+  export:
+    ply_axis: y_up
+created_at: '2026-08-24T13:22:53Z'
+updated_at: '2026-08-25T02:15:19Z'
+active_stage: reconstruct
+stages:
+  preprocess:
+    status: succeeded
+    started_at: '2026-08-24T13:22:53Z'
+    completed_at: '2026-08-24T13:23:42Z'
+    elapsed_seconds: 49.0
+    message: Extracted and analyzed 270 candidate equirectangular frames; selected
+      135 blur-aware frames
+    log_path: work/20260824T132253Z-e82f2270/logs/preprocess.log
+  mask:
+    status: succeeded
+    started_at: '2026-08-24T13:58:10Z'
+    completed_at: '2026-08-24T14:10:34Z'
+    elapsed_seconds: 744.0
+    message: Projected and masked 1080 primary perspective views; deterministic QA
+      passed
+    log_path: work/20260824T132253Z-e82f2270/logs/mask.log
+  reconstruct:
+    status: processing
+    started_at: '2026-08-25T02:15:19Z'
+    completed_at: null
+    elapsed_seconds: null
+    message: null
+    log_path: null
+  train:
+    status: pending
+    started_at: null
+    completed_at: null
+    elapsed_seconds: null
+    message: null
+    log_path: null
+  export:
+    status: pending
+    started_at: null
+    completed_at: null
+    elapsed_seconds: null
+    message: null
+    log_path: null
+  qa:
+    status: pending
+    started_at: null
+    completed_at: null
+    elapsed_seconds: null
+    message: null
+    log_path: null
+tool_versions:
+  python: 3.10.12
+  ffmpeg: ffmpeg version 6.1.1 Copyright (c) 2000-2023 the FFmpeg developers
+  colmap: COLMAP 3.8 -- Structure-from-Motion and Multi-View Stereo
+  colmap_cuda: enabled
+  gsplat: 1.4.0
+  nerfstudio: 1.1.5
+  torchvision: 0.16.2
+  nerfstudio_commit: 758ea1918e082aa44776009d8e755c2f3a88d2ee
+  torch: 2.1.2
+  torch_cuda: '11.8'
+metrics:
+  input:
+    width: 3840
+    height: 1920
+    fps: 29.97002997002997
+    duration_seconds: 293.860233
+    codec: hevc
+    pixel_format: yuv420p10le
+    byte_size: 2286311238
+  selection:
+    start_seconds: 0.0
+    end_seconds: 90.0
+  disk_budget:
+    free_bytes: 312387276800
+    required_bytes: 42949672960
+  preprocess:
+    candidate:
+      frame_count: 270
+      blur_median: 592.1952290000602
+      luma_mean_median: 64.99068641662598
+      black_fraction_median: 0.026119232177734375
+      highlight_fraction_median: 0.0003108978271484375
+    selected_primary:
+      frame_count: 135
+      blur_median: 618.2336594602093
+      luma_mean_median: 64.99184799194336
+      black_fraction_median: 0.023174285888671875
+      highlight_fraction_median: 0.000293731689453125
+    candidate_frame_count: 270
+    selected_frame_count: 135
+    blur_median_improvement: 26.03843046014913
+    blur_median_improvement_ratio: 1.0439693350858563
+  resources:
+    disk_observed_peak_bytes: 1304278299
+  masking:
+    primary:
+      planar_images: 1080
+      model: maskrcnn_resnet50_fpn_v2
+      detection:
+        images: 1080
+        images_with_detection_metrics: 1080
+        detection_metrics_complete: true
+        images_with_detections: 403
+        person_instances: 540
+        reused_masks: 1080
+      validation:
+        image_count: 1080
+        mask_count: 1080
+        masked_images: 403
+        zero_mask_images: 677
+        mean_masked_fraction: 0.022851199353182756
+        max_masked_fraction: 0.14119935035705566
+        deterministic_qa: passed
+      contact_sheets:
+      - work/20260824T132253Z-e82f2270/reconstruction-primary/mask-qa/mask-contact-01.jpg
+      - work/20260824T132253Z-e82f2270/reconstruction-primary/mask-qa/mask-contact-02.jpg
+      vision_qa:
+        decision: pass
+        confidence: 0.95
+        false_negative_views: []
+        false_positive_views: []
+        rationale: All visible persons are fully covered by the red mask with reasonable
+          margins, and no permanent architecture is broadly removed. No false negatives
+          or destructive false positives detected.
+    fallback:
+      planar_images: 2520
+      model: maskrcnn_resnet50_fpn_v2
+      detection:
+        images: 2520
+        images_with_detection_metrics: 2520
+        detection_metrics_complete: true
+        images_with_detections: 827
+        person_instances: 1318
+        reused_masks: 2520
+      validation:
+        image_count: 2520
+        mask_count: 2520
+        masked_images: 827
+        zero_mask_images: 1693
+        mean_masked_fraction: 0.019899143303178247
+        max_masked_fraction: 0.2703922170656149
+        deterministic_qa: passed
+      contact_sheets:
+      - work/20260824T132253Z-e82f2270/reconstruction-fallback/mask-qa/mask-contact-01.jpg
+      - work/20260824T132253Z-e82f2270/reconstruction-fallback/mask-qa/mask-contact-02.jpg
+      vision_qa:
+        provider: codex-local-llm
+        review_file: work/20260824T132253Z-e82f2270/reconstruction-fallback/mask-qa/codex-local-review.json
+        contact_sheet_sha256:
+          mask-contact-01.jpg: 7ed817f9b9d0564b6708536183a6ed10fc6afc5e923a899144087d4c5e3f4824
+          mask-contact-02.jpg: f8624e62467c5cd6095b37bad83bcc957174ea606673dbf5aeb0efb2ad711050
+        decision: pass
+        confidence: 0.96
+        false_negative_views: []
+        false_positive_views: []
+        rationale: All 16 sampled tiles were inspected locally. Near-field people,
+          edge-truncated bodies, and distant pedestrians are covered with reasonable
+          margins, while walls, timberwork, roofs, paving, and vegetation are retained
+          without broad destructive masking.
+  reconstruction:
+    primary:
+      expected_planar_images: 1080
+      written_planar_images: 1080
+      registered_images: 867
+      selected_component_images: 346
+      registration_ratio: 0.8027777777777778
+      largest_component_coverage: 0.662962962962963
+      component_count: 9
+      component_sizes:
+      - 716
+      - 346
+      - 186
+      - 109
+      - 76
+      - 75
+      - 31
+      - 31
+      - 16
+      sift_gpu: true
+      fixed_intrinsics: true
+      rig:
+        enabled: true
+        config_path: colmap/attempt-002/rig-config.json
+        pre_bundle_adjustment:
+          frame_count: 109
+          center_spread_median: 0.008554331419198334
+          center_spread_p95: 0.017327219884273253
+          center_spread_max: 0.8066131160861598
+          median_interframe_baseline: 0.14474957355186707
+          p95_spread_to_baseline: 0.11970480782152021
+          intrinsics:
+            '1':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '2':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '3':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '4':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+        post_bundle_adjustment:
+          frame_count: 109
+          center_spread_median: 4.965068306494546e-16
+          center_spread_p95: 1.3287027960751119e-15
+          center_spread_max: 2.5727487310015434e-15
+          median_interframe_baseline: 0.13808791516539032
+          p95_spread_to_baseline: 9.622151181612825e-15
+          intrinsics:
+            '1':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '2':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '3':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+            '4':
+              model: PINHOLE
+              width: 2048
+              height: 2048
+              params:
+              - 591.2066756502
+              - 591.2066756502
+              - 1024.0
+              - 1024.0
+        p95_spread_ratio_limit: 0.001
+        gate: passed
+        component_merge:
+          enabled: true
+          reference_component: '1'
+          source_component_count: 8
+          accepted_component_count: 4
+          contributing_components:
+          - '1'
+          - '0'
+          - '4'
+          - '3'
+          rejected_components:
+            '2': p95 center residual exceeds 5% of the trajectory extent
+            '5': p95 center residual exceeds 5% of the trajectory extent
+            '6': p95 center residual exceeds 5% of the trajectory extent
+            '7': p95 center residual exceeds 5% of the trajectory extent
+          duplicate_images_deduplicated: 0
+          merged_images: 716
+          merged_points: 158286
+          alignments:
+            '1':
+              reference: true
+              frames: 131
+            '0':
+              common_frames: 103
+              scale: 0.792362945734726
+              center_residual_median: 0.008146901512159906
+              center_residual_p95: 0.035493740299108574
+              median_interframe_baseline: 0.1431768016342772
+              center_residual_p95_to_baseline: 0.2479014749175065
+              reference_trajectory_extent_p95: 4.439991806924909
+              center_residual_p95_to_trajectory_extent: 0.007994100404363394
+              rotation_error_median_degrees: 0.13966412403351633
+              rotation_error_p95_degrees: 0.2728841152460482
+            '3':
+              common_frames: 75
+              scale: 0.6311300341158536
+              center_residual_median: 0.01980194140089631
+              center_residual_p95: 0.04357275742680459
+              median_interframe_baseline: 0.14282257211244503
+              center_residual_p95_to_baseline: 0.30508313064478004
+              reference_trajectory_extent_p95: 3.7194657128417328
+              center_residual_p95_to_trajectory_extent: 0.011714789378583702
+              rotation_error_median_degrees: 0.1379443036632562
+              rotation_error_p95_degrees: 0.4185183125107001
+            '4':
+              common_frames: 109
+              scale: 0.8433847537618475
+              center_residual_median: 0.04444836293392079
+              center_residual_p95: 0.08440572967776883
+              median_interframe_baseline: 0.14474957355186707
+              center_residual_p95_to_baseline: 0.5831155671593349
+              reference_trajectory_extent_p95: 5.122890500696993
+              center_residual_p95_to_trajectory_extent: 0.016476192428138966
+              rotation_error_median_degrees: 0.16868652964700306
+              rotation_error_p95_degrees: 0.587703738451852
+    fallback:
+      expected_planar_images: 2520
+      written_planar_images: 2520
+      registered_images: 1958
+      selected_component_images: 180
+      registration_ratio: 0.776984126984127
+      largest_component_coverage: 0.6876984126984127
+      component_count: 19
+      component_sizes:
+      - 1733
+      - 180
+      - 180
+      - 180
+      - 147
+      - 147
+      - 142
+      - 140
+      - 121
+      - 114
+      - 113
+      - 113
+      - 89
+      - 87
+      - 86
+      - 85
+      - 24
+      - 18
+      - 12
+      sift_gpu: true
+      fixed_intrinsics: true
+      rig:
+        enabled: true
+        config_path: colmap/attempt-001/rig-config.json
+        pre_bundle_adjustment:
+          frame_count: 0
+          center_spread_median: 0.0
+          center_spread_p95: 0.0
+          center_spread_max: 0.0
+          median_interframe_baseline: 0.0
+          p95_spread_to_baseline: 0.0
+          intrinsics:
+            '4':
+              model: PINHOLE
+              width: 1746
+              height: 1746
+              params:
+              - 611.2811808571
+              - 611.2811808571
+              - 873.0
+              - 873.0
+        post_bundle_adjustment:
+          frame_count: 0
+          center_spread_median: 0.0
+          center_spread_p95: 0.0
+          center_spread_max: 0.0
+          median_interframe_baseline: 0.0
+          p95_spread_to_baseline: 0.0
+          intrinsics:
+            '4':
+              model: PINHOLE
+              width: 1746
+              height: 1746
+              params:
+              - 611.2811808571
+              - 611.2811808571
+              - 873.0
+              - 873.0
+        p95_spread_ratio_limit: 0.001
+        gate: passed
+        component_merge:
+          enabled: true
+          reference_component: '1'
+          source_component_count: 18
+          accepted_component_count: 13
+          contributing_components:
+          - '1'
+          - '2'
+          - '4'
+          - '6'
+          - '8'
+          - '0'
+          - '3'
+          - '5'
+          - '10'
+          - '11'
+          - '12'
+          - '13'
+          - '14'
+          rejected_components:
+            '15': p95 center residual exceeds 5% of the trajectory extent
+            '16': p95 center residual exceeds 5% of the trajectory extent
+            '17': p95 center residual exceeds 5% of the trajectory extent
+            '7': p95 center residual exceeds 5% of the trajectory extent
+            '9': p95 center residual exceeds 5% of the trajectory extent
+          duplicate_images_deduplicated: 20
+          merged_images: 1733
+          merged_points: 446472
+          alignments:
+            '1':
+              reference: true
+              frames: 180
+            '0':
+              common_frames: 142
+              scale: 0.7705664053800315
+              center_residual_median: 0.01302937840807511
+              center_residual_p95: 0.031649222065564434
+              median_interframe_baseline: 0.07716811184852922
+              center_residual_p95_to_baseline: 0.4101334256783121
+              reference_trajectory_extent_p95: 4.301414827169833
+              center_residual_p95_to_trajectory_extent: 0.0073578632466816535
+              rotation_error_median_degrees: 0.1564657505456634
+              rotation_error_p95_degrees: 0.2605288216764851
+            '10':
+              common_frames: 114
+              scale: 0.6445739134198438
+              center_residual_median: 0.04059524082412381
+              center_residual_p95: 0.07287338156852591
+              median_interframe_baseline: 0.08201839340900603
+              center_residual_p95_to_baseline: 0.888500475803322
+              reference_trajectory_extent_p95: 3.787441375753043
+              center_residual_p95_to_trajectory_extent: 0.01924079459950367
+              rotation_error_median_degrees: 0.36124841100295574
+              rotation_error_p95_degrees: 0.5061757957246836
+            '11':
+              common_frames: 113
+              scale: 0.6417677401978168
+              center_residual_median: 0.0375412577940278
+              center_residual_p95: 0.06097434782070452
+              median_interframe_baseline: 0.08092409680855589
+              center_residual_p95_to_baseline: 0.7534757905911885
+              reference_trajectory_extent_p95: 3.767138173587707
+              center_residual_p95_to_trajectory_extent: 0.016185853826177665
+              rotation_error_median_degrees: 0.2967737811317772
+              rotation_error_p95_degrees: 0.6270965741479343
+            '12':
+              common_frames: 113
+              scale: 0.6598856438027387
+              center_residual_median: 0.030916231927056375
+              center_residual_p95: 0.07097420352515996
+              median_interframe_baseline: 0.09319810097439887
+              center_residual_p95_to_baseline: 0.7615413059184143
+              reference_trajectory_extent_p95: 4.082921533519819
+              center_residual_p95_to_trajectory_extent: 0.017383190674246013
+              rotation_error_median_degrees: 1.4651467151013895
+              rotation_error_p95_degrees: 2.433920297080731
+            '13':
+              common_frames: 89
+              scale: 0.5466523965254113
+              center_residual_median: 0.025776682448413298
+              center_residual_p95: 0.053577617582275666
+              median_interframe_baseline: 0.09319810097439887
+              center_residual_p95_to_baseline: 0.5748788550637229
+              reference_trajectory_extent_p95: 3.154339476430138
+              center_residual_p95_to_trajectory_extent: 0.016985368246702187
+              rotation_error_median_degrees: 0.24688511839420374
+              rotation_error_p95_degrees: 0.3967928567177372
+            '14':
+              common_frames: 87
+              scale: 0.45795432583267787
+              center_residual_median: 0.014939915997833612
+              center_residual_p95: 0.02790007146849029
+              median_interframe_baseline: 0.07693507758138152
+              center_residual_p95_to_baseline: 0.36264435346773705
+              reference_trajectory_extent_p95: 2.762191011779047
+              center_residual_p95_to_trajectory_extent: 0.010100703155398606
+              rotation_error_median_degrees: 0.5968865471431951
+              rotation_error_p95_degrees: 1.0191894971530604
+            '2':
+              common_frames: 180
+              scale: 1.0018193909417321
+              center_residual_median: 0.022853494341770808
+              center_residual_p95: 0.03475644534445275
+              median_interframe_baseline: 0.07982980020810573
+              center_residual_p95_to_baseline: 0.4353818405388375
+              reference_trajectory_extent_p95: 5.140194645948009
+              center_residual_p95_to_trajectory_extent: 0.006761698289353904
+              rotation_error_median_degrees: 0.15457362313831763
+              rotation_error_p95_degrees: 0.30974022573677035
+            '3':
+              common_frames: 140
+              scale: 0.7665914363873118
+              center_residual_median: 0.04308779252155849
+              center_residual_p95: 0.06883946035705318
+              median_interframe_baseline: 0.08201839340900603
+              center_residual_p95_to_baseline: 0.8393173469488402
+              reference_trajectory_extent_p95: 4.5192388351588315
+              center_residual_p95_to_trajectory_extent: 0.0152325342536657
+              rotation_error_median_degrees: 0.18857968130279124
+              rotation_error_p95_degrees: 0.5699326049781701
+            '4':
+              common_frames: 180
+              scale: 1.0082334609573995
+              center_residual_median: 0.020196741165437564
+              center_residual_p95: 0.037636422189458854
+              median_interframe_baseline: 0.07982980020810573
+              center_residual_p95_to_baseline: 0.47145830368290637
+              reference_trajectory_extent_p95: 5.140194645948009
+              center_residual_p95_to_trajectory_extent: 0.007321983851161642
+              rotation_error_median_degrees: 0.24751871348875087
+              rotation_error_p95_degrees: 0.5170508205676572
+            '5':
+              common_frames: 121
+              scale: 0.7437488389857555
+              center_residual_median: 0.0448194720514769
+              center_residual_p95: 0.12758381932043739
+              median_interframe_baseline: 0.07959325262876762
+              center_residual_p95_to_baseline: 1.6029476759230266
+              reference_trajectory_extent_p95: 4.437718293645796
+              center_residual_p95_to_trajectory_extent: 0.02874986893672812
+              rotation_error_median_degrees: 0.30875778958054606
+              rotation_error_p95_degrees: 0.7049234583863869
+            '6':
+              common_frames: 147
+              scale: 0.8042061457436751
+              center_residual_median: 0.056002520594205164
+              center_residual_p95: 0.08752243308983869
+              median_interframe_baseline: 0.08092409680855589
+              center_residual_p95_to_baseline: 1.0815373484722683
+              reference_trajectory_extent_p95: 4.944334437423271
+              center_residual_p95_to_trajectory_extent: 0.017701560078013413
+              rotation_error_median_degrees: 0.19492193542987118
+              rotation_error_p95_degrees: 0.37659445199590086
+            '8':
+              common_frames: 147
+              scale: 0.8035331227720387
+              center_residual_median: 0.0783815530856803
+              center_residual_p95: 0.1401828425494202
+              median_interframe_baseline: 0.08092409680855589
+              center_residual_p95_to_baseline: 1.7322756518500808
+              reference_trajectory_extent_p95: 4.944334437423271
+              center_residual_p95_to_trajectory_extent: 0.028352216931036765
+              rotation_error_median_degrees: 0.20467718966273976
+              rotation_error_p95_degrees: 0.5542376898140524
+selected_dataset: null
+fallback_attempted: true
+artifacts: []
+review_notes: null

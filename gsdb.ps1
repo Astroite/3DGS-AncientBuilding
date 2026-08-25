@@ -27,5 +27,10 @@ if ($ForwardedNames.Count -gt 0) {
     $env:WSLENV = (@($ExistingForwarded + $ForwardedNames) | Select-Object -Unique) -join ':'
 }
 
-& wsl.exe -d Ubuntu-22.04 --cd $WslRoot -- $CondaExe run -n 3dgs --no-capture-output gsdb @GsdbArgs
+# Run scratch data goes on the WSL ext4 disk instead of the 9p /mnt/d bridge, where
+# every image read costs about four times as much. Manifests and published artifacts
+# stay in the project tree; only the intermediate bytes move.
+$ScratchRoot = if ($env:GSDB_SCRATCH_ROOT) { $env:GSDB_SCRATCH_ROOT } else { "$WslHome/gsdb-scratch" }
+
+& wsl.exe -d Ubuntu-22.04 --cd $WslRoot -- env "GSDB_SCRATCH_ROOT=$ScratchRoot" $CondaExe run -n 3dgs --no-capture-output gsdb @GsdbArgs
 exit $LASTEXITCODE

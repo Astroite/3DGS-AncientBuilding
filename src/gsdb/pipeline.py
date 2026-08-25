@@ -12,6 +12,7 @@ from .manifests import load_model, save_yaml
 from .masking import (
     create_mask_contact_sheets,
     generate_person_masks,
+    image_files,
     summarize_detection_records,
     validate_mask_set,
 )
@@ -36,7 +37,7 @@ from .models import (
     SceneManifest,
     utc_now,
 )
-from .paths import ensure_within, host_path
+from .paths import ensure_within, ensure_work_dir, host_path
 from .ply import gaussian_count, rotate_gaussian_ply_y_up
 from .processes import CommandError, run_logged
 from .reconstruction import (
@@ -140,7 +141,7 @@ def preprocess_run(scene_path: Path, run: RunManifest, resume: bool = False) -> 
     if not begin_stage(run, "preprocess", resume=resume):
         return run
     save_run(scene_path, run)
-    work = scene_path / "work" / run.id
+    work = ensure_work_dir(scene_path, run.id)
     log_path = work / "logs" / "preprocess.log"
     try:
         if not run.tool_versions:
@@ -157,7 +158,9 @@ def preprocess_run(scene_path: Path, run: RunManifest, resume: bool = False) -> 
         validate_equirectangular(probe)
         selection_duration = capture.selection.end_seconds - capture.selection.start_seconds
         budget = check_disk_budget(
-            scene_path,
+            # Intermediates land in the work directory, which the scratch redirect
+            # can place on a different filesystem than the scene tree.
+            work,
             video.stat().st_size,
             run.config.preprocess.minimum_free_gib,
         )
@@ -227,6 +230,63 @@ def preprocess_run(scene_path: Path, run: RunManifest, resume: bool = False) -> 
     return run
 
 
+def _cached_masking_result(
+    scene_path: Path,
+    dataset: Path,
+    attempt: ReconstructionAttempt,
+    run: RunManifest,
+    label: str,
+) -> dict[str, Any] | None:
+    cached = run.metrics.get("masking", {}).get(label)
+    if not isinstance(cached, dict):
+        return None
+    expected_count = attempt.frame_count * attempt.images_per_equirect
+    if int(cached.get("planar_images", 0)) != expected_count:
+        return None
+    images_dir = dataset / "images"
+    masks_dir = dataset / "masks"
+    images = image_files(images_dir)
+    image_names = {path.relative_to(images_dir).as_posix() for path in images}
+    if len(image_names) != expected_count:
+        return None
+    expected_masks = {
+        (Path(name).parent / f"{Path(name).name}.png").as_posix()
+        for name in image_names
+    }
+    actual_masks = {
+        path.relative_to(masks_dir).as_posix() for path in image_files(masks_dir)
+    }
+    if actual_masks != expected_masks:
+        return None
+    for level in range(1, attempt.num_downscales + 1):
+        factor = 2**level
+        image_pyramid = dataset / f"images_{factor}"
+        mask_pyramid = dataset / f"masks_{factor}"
+        if {
+            path.relative_to(image_pyramid).as_posix()
+            for path in image_files(image_pyramid)
+        } != image_names:
+            return None
+        if {
+            path.relative_to(mask_pyramid).as_posix()
+            for path in image_files(mask_pyramid)
+        } != expected_masks:
+            return None
+    sheets = [scene_path / str(path) for path in cached.get("contact_sheets", [])]
+    if not sheets or not all(path.is_file() for path in sheets):
+        return None
+    if run.config.vision_qa.enabled:
+        local_review_path = dataset / "mask-qa" / "codex-local-review.json"
+        if not local_review_path.is_file():
+            return None
+        _, verdict = load_local_mask_qa_review(
+            local_review_path, sheets, run.config.vision_qa
+        )
+        if verdict.decision != "pass":
+            return None
+    return dict(cached)
+
+
 def _prepare_masked_dataset(
     scene_path: Path,
     work: Path,
@@ -236,6 +296,10 @@ def _prepare_masked_dataset(
     run: RunManifest,
     label: str,
 ) -> dict[str, Any]:
+    cached = _cached_masking_result(scene_path, dataset, attempt, run, label)
+    if cached is not None:
+        print(f"Masked dataset: {label} (validated cached result)", flush=True)
+        return cached
     images = project_equirectangular_frames(source, dataset, attempt)
     build_image_pyramid(
         dataset / "images", dataset, "images", attempt.num_downscales, is_mask=False
@@ -305,7 +369,7 @@ def mask_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunMan
     if not begin_stage(run, "mask", resume=resume):
         return run
     save_run(scene_path, run)
-    work = scene_path / "work" / run.id
+    work = ensure_work_dir(scene_path, run.id)
     log_path = work / "logs" / "mask.log"
     try:
         primary = _prepare_masked_dataset(
@@ -344,7 +408,7 @@ def reconstruct_run(scene_path: Path, run: RunManifest, resume: bool = False) ->
     if not begin_stage(run, "reconstruct", resume=resume):
         return run
     save_run(scene_path, run)
-    work = scene_path / "work" / run.id
+    work = ensure_work_dir(scene_path, run.id)
     metrics_records = [
         json.loads(line)
         for line in (work / "frame-metrics.jsonl").read_text(encoding="utf-8").splitlines()
@@ -485,7 +549,7 @@ def train_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunMa
     save_run(scene_path, run)
     assert run.selected_dataset is not None
     dataset = ensure_within(scene_path / run.selected_dataset, scene_path)
-    work = scene_path / "work" / run.id
+    work = ensure_work_dir(scene_path, run.id)
     training_root = work / "training"
     attempt_one = training_root / "attempt-1"
     log_one = work / "logs" / "train-attempt-1.log"
@@ -590,7 +654,7 @@ def export_run(
     save_run(scene_path, run)
     export_dir = scene_path / "exports" / version
     manifest_path = export_dir / "artifact.yaml"
-    work = scene_path / "work" / run.id
+    work = ensure_work_dir(scene_path, run.id)
     log_dir = work / "logs"
     try:
         if export_dir.exists() and any(export_dir.iterdir()) and not resume:

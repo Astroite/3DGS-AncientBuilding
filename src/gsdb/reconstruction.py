@@ -2,16 +2,26 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import sqlite3
+import struct
 import tempfile
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Sequence
 
 import cv2
 import numpy as np
 
-from .masking import atomic_imwrite, image_files
+from .masking import (
+    atomic_imwrite,
+    image_dimensions,
+    image_files,
+    io_worker_count,
+    run_image_tasks,
+)
 from .models import (
     LegacyReconstructionAttemptV1,
     LegacyReconstructionConfigV1,
@@ -23,6 +33,42 @@ from .processes import run_logged
 
 AttemptConfig = ReconstructionAttempt | LegacyReconstructionAttemptV1
 ReconstructionSettings = ReconstructionConfig | LegacyReconstructionConfigV1
+
+class _WriteQueue:
+    """Bounded background encode/write queue that keeps the GPU loop moving.
+
+    Each pending 2048x2048 BGR frame holds about 12 MiB, so the queue is capped
+    rather than unbounded.
+    """
+
+    def __init__(self) -> None:
+        self._workers = io_worker_count()
+        self._pool = ThreadPoolExecutor(max_workers=self._workers)
+        self._pending: deque[Future[Any]] = deque()
+        self._limit = max(2, self._workers * 4)
+
+    def submit(self, action: Callable[..., Any], *arguments: Any) -> None:
+        while len(self._pending) >= self._limit:
+            self._pending.popleft().result()
+        self._pending.append(self._pool.submit(action, *arguments))
+
+    def drain(self) -> None:
+        while self._pending:
+            self._pending.popleft().result()
+
+    def __enter__(self) -> "_WriteQueue":
+        return self
+
+    def __exit__(self, exc_type: type[BaseException] | None, *_: Any) -> None:
+        try:
+            if exc_type is None:
+                self.drain()
+            else:
+                # Let the original failure surface instead of a queued write's error.
+                for future in self._pending:
+                    future.cancel()
+        finally:
+            self._pool.shutdown(wait=True)
 
 
 def expected_planar_images(attempt: AttemptConfig) -> int:
@@ -105,13 +151,21 @@ def validate_existing_projection_set(
             "Existing planar projection contains unexpected images: "
             + ", ".join(path.as_posix() for path in unexpected[:5])
         )
-    for relative in sorted(actual):
-        image = cv2.imread(str(target / relative), cv2.IMREAD_GRAYSCALE)
-        if image is None or image.shape != (projection_size, projection_size):
+
+    def check(relative: Path) -> None:
+        try:
+            shape = image_dimensions(target / relative)
+        except (OSError, RuntimeError) as error:
+            raise RuntimeError(
+                f"Existing planar projection is invalid: {relative.as_posix()}; {error}"
+            ) from error
+        if shape != (projection_size, projection_size):
             raise RuntimeError(
                 f"Existing planar projection is invalid: {relative.as_posix()}; "
                 f"expected {projection_size}x{projection_size}"
             )
+
+    run_image_tasks(check, sorted(actual))
     return actual
 
 
@@ -185,53 +239,106 @@ def project_equirectangular_frames(
     target.mkdir(parents=True, exist_ok=True)
     for view_index in range(len(specs)):
         (target / f"view_{view_index:02d}").mkdir(parents=True, exist_ok=True)
-    for frame_index, frame in enumerate(frames, start=1):
-        frame_targets = [
-            Path(f"view_{view_index:02d}") / f"frame_{frame_index:06d}.jpg"
-            for view_index in range(len(specs))
-        ]
-        if all(relative in reusable for relative in frame_targets):
-            print(
-                f"Planar projection: {frame_index}/{len(frames)} (reused)",
-                flush=True,
-            )
-            continue
-        image = cv2.imread(str(frame), cv2.IMREAD_COLOR)
+
+    def decode(frame_path: Path) -> np.ndarray:
+        image = cv2.imread(str(frame_path), cv2.IMREAD_COLOR)
         if image is None:
-            raise RuntimeError(f"Cannot decode equirectangular frame: {frame}")
-        tensor = torch.tensor(image, dtype=torch.float32, device=device)
-        tensor = tensor.permute(2, 0, 1).unsqueeze(0) / 255.0
-        for view_index, (yaw, pitch) in enumerate(specs):
-            relative = frame_targets[view_index]
-            if relative in reusable:
+            raise RuntimeError(f"Cannot decode equirectangular frame: {frame_path}")
+        return image
+
+    with ThreadPoolExecutor(max_workers=1) as reader, _WriteQueue() as writes:
+        prefetched: Future[np.ndarray] | None = None
+        for frame_index, frame in enumerate(frames, start=1):
+            frame_targets = [
+                Path(f"view_{view_index:02d}") / f"frame_{frame_index:06d}.jpg"
+                for view_index in range(len(specs))
+            ]
+            if all(relative in reusable for relative in frame_targets):
+                print(
+                    f"Planar projection: {frame_index}/{len(frames)} (reused)",
+                    flush=True,
+                )
                 continue
-            perspective = equirect2persp(
-                tensor,
-                attempt.projection_fov_degrees,
-                yaw,
-                pitch,
-                size,
-                size,
-            )
-            output = (
-                (perspective * 255.0)
-                .clamp(0, 255)
-                .squeeze(0)
-                .permute(1, 2, 0)
-                .to(torch.uint8)
-                .cpu()
-                .numpy()
-            )
-            atomic_imwrite(
-                target / relative,
-                output,
-                [cv2.IMWRITE_JPEG_QUALITY, 95],
-            )
-        print(f"Planar projection: {frame_index}/{len(frames)}", flush=True)
+            image = prefetched.result() if prefetched is not None else decode(frame)
+            prefetched = None
+            # Overlap the next equirectangular decode with this frame's GPU work.
+            for later_index in range(frame_index, len(frames)):
+                later_targets = [
+                    Path(f"view_{view_index:02d}") / f"frame_{later_index + 1:06d}.jpg"
+                    for view_index in range(len(specs))
+                ]
+                if not all(relative in reusable for relative in later_targets):
+                    prefetched = reader.submit(decode, frames[later_index])
+                    break
+            tensor = torch.tensor(image, dtype=torch.float32, device=device)
+            tensor = tensor.permute(2, 0, 1).unsqueeze(0) / 255.0
+            for view_index, (yaw, pitch) in enumerate(specs):
+                relative = frame_targets[view_index]
+                if relative in reusable:
+                    continue
+                perspective = equirect2persp(
+                    tensor,
+                    attempt.projection_fov_degrees,
+                    yaw,
+                    pitch,
+                    size,
+                    size,
+                )
+                output = (
+                    (perspective * 255.0)
+                    .clamp(0, 255)
+                    .squeeze(0)
+                    .permute(1, 2, 0)
+                    .to(torch.uint8)
+                    .cpu()
+                    .numpy()
+                )
+                writes.submit(
+                    atomic_imwrite,
+                    target / relative,
+                    output,
+                    [cv2.IMWRITE_JPEG_QUALITY, 95],
+                )
+            print(f"Planar projection: {frame_index}/{len(frames)}", flush=True)
     produced = image_files(target)
     if len(produced) != expected:
         raise RuntimeError(f"Projection produced {len(produced)} images; expected {expected}")
     return image_files(target)
+
+
+def pyramid_level_marker(dataset: Path, prefix: str, factor: int) -> Path:
+    """Marker recording that a level was written and fully validated once."""
+    return dataset / f".pyramid-complete-{prefix}_{factor}"
+
+
+def _pyramid_level_is_current(
+    target_dir: Path,
+    relatives: Sequence[Path],
+    source_shapes: dict[Path, tuple[int, int]],
+    factor: int,
+) -> bool:
+    """Header-only recheck of a level a previous run already validated in full.
+
+    Every file was written through ``atomic_imwrite``, so a name that exists holds
+    complete content; the header confirms it is the level this factor expects.
+    """
+    if {item.relative_to(target_dir) for item in image_files(target_dir)} != set(relatives):
+        return False
+
+    def check(relative: Path) -> None:
+        height, width = source_shapes[relative]
+        expected = (max(1, height // factor), max(1, width // factor))
+        if image_dimensions(target_dir / relative) != expected:
+            raise RuntimeError(
+                f"Existing pyramid file is invalid: {target_dir / relative}; "
+                f"expected shape {expected}"
+            )
+
+    try:
+        run_image_tasks(check, relatives)
+    except (OSError, RuntimeError):
+        return False
+    return True
 
 
 def build_image_pyramid(
@@ -241,19 +348,48 @@ def build_image_pyramid(
     num_downscales: int,
     is_mask: bool = False,
 ) -> None:
+    if num_downscales < 1:
+        return
     sources = image_files(source_dir)
+    if not sources:
+        raise RuntimeError(f"No pyramid source images found in {source_dir}")
+    relatives = [source.relative_to(source_dir) for source in sources]
+    flag = cv2.IMREAD_GRAYSCALE if is_mask else cv2.IMREAD_COLOR
+    interpolation = cv2.INTER_NEAREST if is_mask else cv2.INTER_AREA
+    arguments: list[int] = [] if is_mask else [cv2.IMWRITE_JPEG_QUALITY, 95]
+
+    source_shapes: dict[Path, tuple[int, int]] | None = None
+    pending: list[tuple[int, Path]] = []
     for level in range(1, num_downscales + 1):
         factor = 2**level
         target_dir = dataset / f"{prefix}_{factor}"
+        if pyramid_level_marker(dataset, prefix, factor).is_file():
+            if source_shapes is None:
+                source_shapes = dict(
+                    zip(
+                        relatives,
+                        run_image_tasks(
+                            lambda relative: image_dimensions(source_dir / relative),
+                            relatives,
+                        ),
+                    )
+                )
+            if _pyramid_level_is_current(target_dir, relatives, source_shapes, factor):
+                continue
+        pending.append((factor, target_dir))
+    if not pending:
+        return
+    for _, target_dir in pending:
         target_dir.mkdir(parents=True, exist_ok=True)
-        for source in sources:
-            relative = source.relative_to(source_dir)
+
+    def build(relative: Path) -> None:
+        source = source_dir / relative
+        image = cv2.imread(str(source), flag)
+        if image is None:
+            raise RuntimeError(f"Cannot decode pyramid source: {source}")
+        height, width = image.shape[:2]
+        for factor, target_dir in pending:
             target = target_dir / relative
-            flag = cv2.IMREAD_GRAYSCALE if is_mask else cv2.IMREAD_COLOR
-            image = cv2.imread(str(source), flag)
-            if image is None:
-                raise RuntimeError(f"Cannot decode pyramid source: {source}")
-            height, width = image.shape[:2]
             expected_shape = (max(1, height // factor), max(1, width // factor))
             if target.exists():
                 existing = cv2.imread(str(target), flag)
@@ -267,30 +403,62 @@ def build_image_pyramid(
                 ):
                     raise RuntimeError(f"Existing mask pyramid file is not binary: {target}")
                 continue
-            interpolation = cv2.INTER_NEAREST if is_mask else cv2.INTER_AREA
             resized = cv2.resize(
                 image,
                 (expected_shape[1], expected_shape[0]),
                 interpolation=interpolation,
             )
-            arguments = [] if is_mask else [cv2.IMWRITE_JPEG_QUALITY, 95]
             atomic_imwrite(target, resized, arguments)
+
+    run_image_tasks(build, relatives)
+    for factor, target_dir in pending:
         actual = image_files(target_dir)
-        if {item.relative_to(target_dir) for item in actual} != {
-            item.relative_to(source_dir) for item in sources
-        }:
+        if {item.relative_to(target_dir) for item in actual} != set(relatives):
             raise RuntimeError(
                 f"Pyramid {target_dir.name} does not exactly match its source file set"
             )
+        pyramid_level_marker(dataset, prefix, factor).write_text(
+            "complete\n", encoding="utf-8"
+        )
 
 
 def pinhole_camera_parameters(image_path: Path, fov_degrees: float) -> str:
-    image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
-    if image is None:
-        raise RuntimeError(f"Cannot determine planar image dimensions: {image_path}")
-    height, width = image.shape
+    height, width = image_dimensions(image_path)
     focal = width / (2.0 * math.tan(math.radians(fov_degrees) / 2.0))
     return f"{focal:.10f},{focal:.10f},{width / 2.0:.10f},{height / 2.0:.10f}"
+
+
+def cross_view_pair_names(attempt: AttemptConfig) -> list[tuple[str, str]]:
+    """Every within-frame view pair of one panorama, in deterministic order.
+
+    COLMAP 3.8's sequential matcher orders images by *name*, so ``view_XX/`` folders
+    are matched as independent temporal chains and the eight views of a single
+    panorama never see each other. The mapper then splits the scene into one
+    component per view. These pairs supply the missing links: they share an optical
+    center, so their two-view geometry is a homography that cannot be triangulated
+    on its own, but they join feature tracks that neighbouring frames with a real
+    baseline do triangulate. Non-overlapping pairs such as opposing views are
+    rejected by COLMAP's own geometric verification, so the full set is safe to emit.
+    """
+    views = attempt.images_per_equirect
+    return [
+        (
+            f"view_{first:02d}/frame_{frame:06d}.jpg",
+            f"view_{second:02d}/frame_{frame:06d}.jpg",
+        )
+        for frame in range(1, attempt.frame_count + 1)
+        for first in range(views)
+        for second in range(first + 1, views)
+    ]
+
+
+def write_cross_view_pair_list(path: Path, attempt: AttemptConfig) -> int:
+    pairs = cross_view_pair_names(attempt)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(f"{first} {second}\n" for first, second in pairs), encoding="utf-8"
+    )
+    return len(pairs)
 
 
 def build_colmap_commands(
@@ -299,7 +467,7 @@ def build_colmap_commands(
     settings: ReconstructionSettings | None = None,
     colmap_attempt_dir: Path | None = None,
     mapper_num_threads: int | None = None,
-) -> list[list[str]]:
+) -> dict[str, list[str]]:
     images_dir = dataset / "images"
     masks_dir = dataset / "masks"
     images = image_files(images_dir)
@@ -354,6 +522,18 @@ def build_colmap_commands(
         ],
         [
             "colmap",
+            "matches_importer",
+            "--database_path",
+            str(database),
+            "--match_list_path",
+            str(colmap_attempt_dir / "cross-view-pairs.txt"),
+            "--match_type",
+            "pairs",
+            "--SiftMatching.use_gpu",
+            "1" if use_gpu else "0",
+        ],
+        [
+            "colmap",
             "mapper",
             "--database_path",
             str(database),
@@ -363,11 +543,19 @@ def build_colmap_commands(
             str(sparse),
         ],
     ]
+    named = dict(
+        zip(("features", "matching", "cross_view", "mapping"), commands)
+    )
+    if not is_v2:
+        # Legacy v1 datasets are flat, so there are no per-view folders to link.
+        del named["cross_view"]
     if use_gpu:
-        commands[0].extend(["--SiftExtraction.gpu_index", str(gpu_index)])
-        commands[1].extend(["--SiftMatching.gpu_index", str(gpu_index)])
+        named["features"].extend(["--SiftExtraction.gpu_index", str(gpu_index)])
+        for key in ("matching", "cross_view"):
+            if key in named:
+                named[key].extend(["--SiftMatching.gpu_index", str(gpu_index)])
     if fix_intrinsics:
-        commands[2].extend(
+        named["mapping"].extend(
             [
                 "--Mapper.ba_refine_focal_length",
                 "0",
@@ -378,8 +566,8 @@ def build_colmap_commands(
             ]
         )
     if mapper_num_threads is not None:
-        commands[2].extend(["--Mapper.num_threads", str(mapper_num_threads)])
-    return commands
+        named["mapping"].extend(["--Mapper.num_threads", str(mapper_num_threads)])
+    return named
 
 
 _NESTED_FRAME_PATTERN = re.compile(r"^view_(\d+)/frame_(\d+)\.[^.]+$")
@@ -400,70 +588,14 @@ def _image_order_key(name: str) -> tuple[int, int, str]:
 
 
 def interleaved_image_names(images_dir: Path) -> list[str]:
-    """Frame-major order keeps sequential matching aligned across view folders."""
+    """Frame-major order for the COLMAP image list and rig-facing outputs.
+
+    This is presentation order only. COLMAP 3.8's sequential matcher orders
+    images by name regardless of image ID, so cross-view links come from
+    :func:`cross_view_pair_names` rather than from the ID layout.
+    """
     names = [path.relative_to(images_dir).as_posix() for path in image_files(images_dir)]
     return sorted(names, key=_image_order_key)
-
-
-def reorder_database_image_ids(database: Path, ordered_names: list[str]) -> bool:
-    """Transactionally enforce frame-major IDs before sequential matching.
-
-    COLMAP 3.8 sorts ``image_list_path`` lexically before inserting rows, so a
-    per-folder camera layout otherwise becomes view-major despite an interleaved
-    list. Feature tables can be safely re-keyed before any matches exist.
-    """
-    with sqlite3.connect(database) as connection:
-        rows = connection.execute("SELECT image_id, name FROM images").fetchall()
-        actual_names = {str(name) for _, name in rows}
-        if actual_names != set(ordered_names) or len(rows) != len(ordered_names):
-            raise RuntimeError(
-                f"COLMAP database image set differs from image-list.txt: "
-                f"database={len(rows)}, expected={len(ordered_names)}"
-            )
-        for table in ("matches", "two_view_geometries"):
-            count = int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-            if count:
-                raise RuntimeError(
-                    f"Refusing to reorder COLMAP image IDs after {table} has rows"
-                )
-        desired = {name: index for index, name in enumerate(ordered_names, start=1)}
-        current = {str(name): int(image_id) for image_id, name in rows}
-        if current == desired:
-            return False
-        offset = max(current.values()) + len(current) + 1000
-        connection.execute("BEGIN IMMEDIATE")
-        connection.execute(
-            "CREATE TEMP TABLE image_id_reorder "
-            "(temporary_id INTEGER PRIMARY KEY, new_id INTEGER UNIQUE NOT NULL)"
-        )
-        connection.executemany(
-            "INSERT INTO image_id_reorder (temporary_id, new_id) VALUES (?, ?)",
-            [
-                (current[name] + offset, new_id)
-                for name, new_id in desired.items()
-            ],
-        )
-        for table in ("images", "keypoints", "descriptors"):
-            connection.execute(f"UPDATE {table} SET image_id = image_id + ?", (offset,))
-            connection.execute(
-                f"UPDATE {table} SET image_id = ("
-                "SELECT new_id FROM image_id_reorder "
-                f"WHERE temporary_id = {table}.image_id)"
-            )
-        if connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'"
-        ).fetchone():
-            connection.execute(
-                "UPDATE sqlite_sequence SET seq = ? WHERE name = 'images'",
-                (len(ordered_names),),
-            )
-        connection.commit()
-        verified = connection.execute(
-            "SELECT name FROM images ORDER BY image_id"
-        ).fetchall()
-    if [str(row[0]) for row in verified] != ordered_names:
-        raise RuntimeError("COLMAP database image-ID reordering verification failed")
-    return True
 
 
 def validate_folder_camera_ids(
@@ -602,6 +734,447 @@ def camera_ids_for_model(
     if not selected:
         raise RuntimeError("Selected sparse model does not contain a rig camera")
     return selected
+
+
+def _average_rotations(
+    rotations: list[np.ndarray], determinant: int = 1
+) -> np.ndarray:
+    if not rotations:
+        raise ValueError("Cannot average an empty rotation set")
+    if determinant not in (-1, 1):
+        raise ValueError("Orthogonal-matrix determinant must be -1 or 1")
+    left, _, right = np.linalg.svd(np.sum(rotations, axis=0))
+    correction = np.eye(3)
+    correction[2, 2] = determinant * np.linalg.det(left @ right)
+    return left @ correction @ right
+
+
+def _component_rig_poses(
+    images: dict[int, Any], attempt: ReconstructionAttempt
+) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+    """Infer one rig center/orientation per frame from a sparse component."""
+    specs = projection_view_specs(attempt)
+    grouped: dict[int, list[tuple[np.ndarray, np.ndarray]]] = {}
+    for image in images.values():
+        match = _NESTED_FRAME_PATTERN.match(image.name.replace("\\", "/"))
+        if match is None:
+            raise RuntimeError(f"Cannot infer rig pose from image name: {image.name}")
+        view_index, frame = (int(value) for value in match.groups())
+        if view_index >= len(specs):
+            raise RuntimeError(f"Projected view index is out of range: {image.name}")
+        camera_from_world = _qvec_to_rotation(image.qvec)
+        world_from_camera = camera_from_world.T
+        center = -(world_from_camera @ np.asarray(image.tvec, dtype=np.float64))
+        rig_from_camera = projection_world_from_camera(*specs[view_index])
+        world_from_rig = world_from_camera @ rig_from_camera.T
+        grouped.setdefault(frame, []).append((center, world_from_rig))
+    return {
+        frame: (
+            np.mean([item[0] for item in values], axis=0),
+            # Nerfstudio's equirectangular [forward, right, up] convention is
+            # left-handed, so these per-frame rig transforms have det=-1.
+            _average_rotations([item[1] for item in values], determinant=-1),
+        )
+        for frame, values in grouped.items()
+    }
+
+
+def _rig_component_alignment(
+    reference: dict[int, tuple[np.ndarray, np.ndarray]],
+    moving: dict[int, tuple[np.ndarray, np.ndarray]],
+) -> tuple[float, np.ndarray, np.ndarray, dict[str, float | int]]:
+    """Estimate ``reference = scale * rotation * moving + translation``."""
+    common = sorted(set(reference) & set(moving))
+    if len(common) < 6:
+        raise RuntimeError(
+            f"Rig components share only {len(common)} frames; at least 6 are required"
+        )
+    rotations = [reference[frame][1] @ moving[frame][1].T for frame in common]
+    rotation = _average_rotations(rotations)
+    moving_centers = np.vstack([moving[frame][0] for frame in common])
+    reference_centers = np.vstack([reference[frame][0] for frame in common])
+    rotated = moving_centers @ rotation.T
+    moving_mean = rotated.mean(axis=0)
+    reference_mean = reference_centers.mean(axis=0)
+    centered_moving = rotated - moving_mean
+    centered_reference = reference_centers - reference_mean
+    denominator = float(np.sum(centered_moving * centered_moving))
+    if denominator <= np.finfo(np.float64).eps:
+        raise RuntimeError("Rig component trajectory has no usable translation baseline")
+    scale = float(np.sum(centered_moving * centered_reference) / denominator)
+    if not math.isfinite(scale) or scale <= 0:
+        raise RuntimeError(f"Rig component alignment produced invalid scale: {scale}")
+    translation = reference_mean - scale * moving_mean
+    aligned_centers = scale * rotated + translation
+    residuals = np.linalg.norm(aligned_centers - reference_centers, axis=1)
+    baselines = np.linalg.norm(np.diff(reference_centers, axis=0), axis=1)
+    positive_baselines = baselines[baselines > np.finfo(np.float64).eps]
+    median_baseline = (
+        float(np.median(positive_baselines)) if positive_baselines.size else 0.0
+    )
+    if median_baseline <= 0:
+        raise RuntimeError("Reference rig trajectory has no usable inter-frame baseline")
+    trajectory_extent = float(
+        np.percentile(
+            np.linalg.norm(reference_centers - reference_mean, axis=1), 95
+        )
+    )
+    if trajectory_extent <= 0:
+        raise RuntimeError("Reference rig trajectory has no usable spatial extent")
+    rotation_errors = []
+    for frame in common:
+        delta = rotation @ moving[frame][1] @ reference[frame][1].T
+        cosine = float(np.clip((np.trace(delta) - 1.0) / 2.0, -1.0, 1.0))
+        rotation_errors.append(math.degrees(math.acos(cosine)))
+    metrics: dict[str, float | int] = {
+        "common_frames": len(common),
+        "scale": scale,
+        "center_residual_median": float(np.median(residuals)),
+        "center_residual_p95": float(np.percentile(residuals, 95)),
+        "median_interframe_baseline": median_baseline,
+        "center_residual_p95_to_baseline": float(np.percentile(residuals, 95))
+        / median_baseline,
+        "reference_trajectory_extent_p95": trajectory_extent,
+        "center_residual_p95_to_trajectory_extent": float(
+            np.percentile(residuals, 95)
+        )
+        / trajectory_extent,
+        "rotation_error_median_degrees": float(np.median(rotation_errors)),
+        "rotation_error_p95_degrees": float(np.percentile(rotation_errors, 95)),
+    }
+    return scale, rotation, translation, metrics
+
+
+def _write_colmap_binary_model(
+    output: Path,
+    cameras: dict[int, Any],
+    images: dict[int, Any],
+    points: dict[int, Any],
+) -> None:
+    """Write the COLMAP 3.8 binary subset used by the rig merge."""
+    output.mkdir(parents=True, exist_ok=True)
+    with (output / "cameras.bin").open("wb") as stream:
+        stream.write(struct.pack("<Q", len(cameras)))
+        for camera_id, camera in sorted(cameras.items()):
+            if camera.model != "PINHOLE" or len(camera.params) != 4:
+                raise RuntimeError(
+                    f"Rig merge supports only four-parameter PINHOLE cameras, got {camera.model}"
+                )
+            stream.write(
+                struct.pack(
+                    "<iiQQ4d",
+                    int(camera_id),
+                    1,
+                    int(camera.width),
+                    int(camera.height),
+                    *(float(value) for value in camera.params),
+                )
+            )
+    with (output / "images.bin").open("wb") as stream:
+        stream.write(struct.pack("<Q", len(images)))
+        for image_id, image in sorted(images.items()):
+            stream.write(
+                struct.pack(
+                    "<i7di",
+                    int(image_id),
+                    *(float(value) for value in image.qvec),
+                    *(float(value) for value in image.tvec),
+                    int(image.camera_id),
+                )
+            )
+            stream.write(image.name.encode("utf-8") + b"\0")
+            stream.write(struct.pack("<Q", len(image.xys)))
+            for xy, point_id in zip(image.xys, image.point3D_ids):
+                stream.write(
+                    struct.pack(
+                        "<ddq", float(xy[0]), float(xy[1]), int(point_id)
+                    )
+                )
+    with (output / "points3D.bin").open("wb") as stream:
+        stream.write(struct.pack("<Q", len(points)))
+        for point_id, point in sorted(points.items()):
+            error = float(np.asarray(point.error).reshape(-1)[0])
+            stream.write(
+                struct.pack(
+                    "<Q3d3BdQ",
+                    int(point_id),
+                    *(float(value) for value in point.xyz),
+                    *(int(value) for value in point.rgb),
+                    error,
+                    len(point.image_ids),
+                )
+            )
+            for image_id, point2d_index in zip(point.image_ids, point.point2D_idxs):
+                stream.write(struct.pack("<ii", int(image_id), int(point2d_index)))
+
+
+def merge_rig_components(
+    sparse_root: Path,
+    output: Path,
+    attempt: ReconstructionAttempt,
+) -> dict[str, Any]:
+    """Align disconnected COLMAP components using shared-frame virtual-rig poses."""
+    from nerfstudio.process_data.colmap_utils import (
+        read_cameras_binary,
+        read_images_binary,
+        read_points3D_binary,
+    )
+
+    components: list[tuple[Path, dict[int, Any]]] = []
+    for candidate, images in _colmap_components(sparse_root):
+        if candidate.name.isdigit():
+            components.append((candidate, images))
+    if len(components) < 2:
+        raise RuntimeError("Rig component merge requires at least two mapper components")
+    poses = {
+        candidate: _component_rig_poses(images, attempt)
+        for candidate, images in components
+    }
+    reference_path, reference_images = max(
+        components,
+        key=lambda item: (
+            len(poses[item[0]]),
+            len(item[1]),
+            any(image.name.replace("\\", "/").startswith("view_00/") for image in item[1].values()),
+        ),
+    )
+    alignment_parts: list[dict[str, Any]] = [
+        {
+            "path": reference_path,
+            "frames": set(poses[reference_path]),
+            "transform": (1.0, np.eye(3), np.zeros(3)),
+            "label": reference_path.name,
+        }
+    ]
+    accepted_paths = {reference_path}
+    alignment_metrics: dict[str, Any] = {
+        reference_path.name: {"reference": True, "frames": len(poses[reference_path])}
+    }
+    rejected: dict[str, str] = {}
+
+    def gate_error(metrics: dict[str, float | int]) -> str | None:
+        if float(metrics["center_residual_p95_to_trajectory_extent"]) > 0.055:
+            return "p95 center residual exceeds 5.5% of the trajectory extent"
+        if float(metrics["rotation_error_p95_degrees"]) > 5.0:
+            return "p95 rig rotation residual exceeds 5 degrees"
+        return None
+
+    for candidate, _ in components:
+        if candidate == reference_path:
+            continue
+        try:
+            scale, rotation, translation, metrics = _rig_component_alignment(
+                poses[reference_path], poses[candidate]
+            )
+            failure = gate_error(metrics)
+            if failure is None:
+                alignment_parts.append(
+                    {
+                        "path": candidate,
+                        "frames": set(poses[candidate]),
+                        "transform": (scale, rotation, translation),
+                        "label": candidate.name,
+                    }
+                )
+                accepted_paths.add(candidate)
+                alignment_metrics[candidate.name] = metrics
+                continue
+
+            # Monocular trajectories can accumulate scale drift in one interval
+            # while remaining accurate elsewhere. Recover only independently
+            # gated, non-overlapping 30-frame windows when orientation is sound.
+            if float(metrics["rotation_error_p95_degrees"]) > 5.0:
+                raise RuntimeError(failure)
+            common = sorted(set(poses[reference_path]) & set(poses[candidate]))
+            runs: list[list[int]] = []
+            for frame in common:
+                if not runs or frame != runs[-1][-1] + 1:
+                    runs.append([])
+                runs[-1].append(frame)
+            segment_metrics: dict[str, Any] = {}
+            for run in runs:
+                for start in range(0, len(run), 30):
+                    frames = run[start : start + 30]
+                    if len(frames) < 10:
+                        continue
+                    segment_reference = {
+                        frame: poses[reference_path][frame] for frame in frames
+                    }
+                    segment_moving = {frame: poses[candidate][frame] for frame in frames}
+                    try:
+                        segment_scale, segment_rotation, segment_translation, segment = (
+                            _rig_component_alignment(segment_reference, segment_moving)
+                        )
+                    except RuntimeError:
+                        continue
+                    if gate_error(segment) is not None:
+                        continue
+                    label = f"{candidate.name}:frames-{frames[0]:06d}-{frames[-1]:06d}"
+                    alignment_parts.append(
+                        {
+                            "path": candidate,
+                            "frames": set(frames),
+                            "transform": (
+                                segment_scale,
+                                segment_rotation,
+                                segment_translation,
+                            ),
+                            "label": label,
+                        }
+                    )
+                    segment_metrics[label] = segment
+            if not segment_metrics:
+                raise RuntimeError(failure)
+            accepted_paths.add(candidate)
+            alignment_metrics[candidate.name] = {
+                "global_rejection": failure,
+                "segments": segment_metrics,
+            }
+        except RuntimeError as error:
+            rejected[candidate.name] = str(error)
+    if len(alignment_parts) < 2:
+        raise RuntimeError(
+            "No additional COLMAP component passed the virtual-rig alignment gates"
+        )
+
+    merged_cameras: dict[int, Any] = {}
+    merged_images: dict[int, Any] = {}
+    merged_points: dict[int, Any] = {}
+    seen_names: set[str] = set()
+    next_point_id = 1
+    duplicate_images = 0
+    contributing_components: list[str] = []
+    images_by_path = dict(components)
+    alignment_parts.sort(
+        key=lambda part: (
+            part["path"] != reference_path,
+            -len(part["frames"]),
+            int(part["path"].name),
+            part["label"],
+        )
+    )
+    camera_cache: dict[Path, dict[int, Any]] = {}
+    point_cache: dict[Path, dict[int, Any]] = {}
+    for part in alignment_parts:
+        candidate = part["path"]
+        component_images = {
+            image_id: image
+            for image_id, image in images_by_path[candidate].items()
+            if _frame_number(image.name) in part["frames"]
+        }
+        for image_id, image in component_images.items():
+            previous = merged_images.get(image_id)
+            if previous is not None and previous.name != image.name:
+                raise RuntimeError(
+                    f"COLMAP image ID {image_id} names differ across components"
+                )
+        included_image_ids = {
+            int(image_id)
+            for image_id, image in component_images.items()
+            if image.name not in seen_names and image_id not in merged_images
+        }
+        duplicate_images += len(component_images) - len(included_image_ids)
+        if not included_image_ids:
+            continue
+        contributing_components.append(str(part["label"]))
+        if candidate not in camera_cache:
+            camera_cache[candidate] = read_cameras_binary(candidate / "cameras.bin")
+        if candidate not in point_cache:
+            point_cache[candidate] = read_points3D_binary(candidate / "points3D.bin")
+        component_cameras = camera_cache[candidate]
+        component_points = point_cache[candidate]
+        for camera_id, camera in component_cameras.items():
+            previous = merged_cameras.get(camera_id)
+            if previous is not None and (
+                previous.model != camera.model
+                or previous.width != camera.width
+                or previous.height != camera.height
+                or not np.allclose(previous.params, camera.params)
+            ):
+                raise RuntimeError(f"Camera {camera_id} differs across sparse components")
+            merged_cameras[camera_id] = camera
+        point_id_map: dict[int, int] = {}
+        filtered_tracks: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        for old_id, point in sorted(component_points.items()):
+            keep = np.isin(point.image_ids, list(included_image_ids))
+            if not np.any(keep):
+                continue
+            point_id_map[int(old_id)] = next_point_id
+            next_point_id += 1
+            filtered_tracks[int(old_id)] = (
+                np.asarray(point.image_ids)[keep],
+                np.asarray(point.point2D_idxs)[keep],
+            )
+        scale, alignment_rotation, translation = part["transform"]
+        for old_id, point in component_points.items():
+            if int(old_id) not in point_id_map:
+                continue
+            new_id = point_id_map[int(old_id)]
+            xyz = scale * (alignment_rotation @ np.asarray(point.xyz)) + translation
+            image_ids, point2d_indices = filtered_tracks[int(old_id)]
+            merged_points[new_id] = point._replace(
+                id=new_id,
+                xyz=xyz,
+                image_ids=image_ids,
+                point2D_idxs=point2d_indices,
+            )
+        for image_id, image in component_images.items():
+            if int(image_id) not in included_image_ids:
+                continue
+            camera_from_component = _qvec_to_rotation(image.qvec)
+            component_from_camera = camera_from_component.T
+            component_center = -(component_from_camera @ np.asarray(image.tvec))
+            merged_center = scale * (alignment_rotation @ component_center) + translation
+            merged_from_camera = alignment_rotation @ component_from_camera
+            camera_from_merged = merged_from_camera.T
+            merged_tvec = -(camera_from_merged @ merged_center)
+            merged_qvec = np.asarray(
+                rotation_matrix_to_quaternion_wxyz(camera_from_merged),
+                dtype=np.float64,
+            )
+            merged_point_ids = np.asarray(
+                [
+                    point_id_map.get(int(point_id), -1)
+                    if int(point_id) >= 0
+                    else -1
+                    for point_id in image.point3D_ids
+                ],
+                dtype=np.int64,
+            )
+            merged_images[image_id] = image._replace(
+                qvec=merged_qvec,
+                tvec=merged_tvec,
+                point3D_ids=merged_point_ids,
+            )
+            seen_names.add(image.name)
+
+    _write_colmap_binary_model(output, merged_cameras, merged_images, merged_points)
+    verified_images = read_images_binary(output / "images.bin")
+    verified_points = read_points3D_binary(output / "points3D.bin")
+    if set(verified_images) != set(merged_images) or {
+        image.name for image in verified_images.values()
+    } != seen_names:
+        raise RuntimeError("Rig-merged COLMAP image verification failed")
+    if len(verified_points) != len(merged_points):
+        raise RuntimeError("Rig-merged COLMAP point verification failed")
+    metrics = {
+        "merge_algorithm_version": 2,
+        "enabled": True,
+        "reference_component": reference_path.name,
+        "source_component_count": len(components),
+        "accepted_component_count": len(accepted_paths),
+        "accepted_alignment_part_count": len(alignment_parts),
+        "contributing_components": contributing_components,
+        "rejected_components": rejected,
+        "duplicate_images_deduplicated": duplicate_images,
+        "merged_images": len(merged_images),
+        "merged_points": len(merged_points),
+        "alignments": alignment_metrics,
+    }
+    (output / "merge-metrics.json").write_text(
+        json.dumps(metrics, indent=2) + "\n", encoding="utf-8"
+    )
+    return metrics
 
 
 def write_rig_config(
@@ -860,8 +1433,27 @@ def reconstruction_metrics(
         "component_sizes": sorted(component_sizes, reverse=True),
         "sift_gpu": bool(getattr(settings, "use_gpu_sift", False)),
         "fixed_intrinsics": bool(getattr(settings, "fix_intrinsics", False)),
+        "cross_view_pairs": _recorded_cross_view_pairs(dataset),
         "rig": selection.get("rig", {"enabled": False}),
     }
+
+
+def _recorded_cross_view_pairs(dataset: Path) -> int:
+    """Pairs imported by the within-frame view matcher for the selected attempt."""
+    selection_path = dataset / "colmap" / "selected-attempt.json"
+    attempt_name = None
+    if selection_path.is_file():
+        attempt_name = json.loads(selection_path.read_text(encoding="utf-8")).get("attempt")
+    candidates = (
+        [dataset / "colmap" / str(attempt_name)]
+        if attempt_name
+        else sorted((dataset / "colmap").glob("attempt-*"))
+    )
+    for candidate in candidates:
+        marker = candidate / ".cross-view-matching-complete"
+        if marker.is_file():
+            return int(marker.read_text(encoding="utf-8").strip() or 0)
+    return 0
 
 
 def run_masked_colmap(
@@ -873,7 +1465,16 @@ def run_masked_colmap(
     transforms = dataset / "transforms.json"
     if transforms.is_file():
         try:
-            return reconstruction_metrics(dataset, attempt, settings)
+            existing_metrics = reconstruction_metrics(dataset, attempt, settings)
+            threshold = float(getattr(settings, "registration_threshold", 0.70))
+            needs_rig_merge = (
+                isinstance(attempt, ReconstructionAttempt)
+                and attempt.use_rig
+                and float(existing_metrics["largest_component_coverage"])
+                < threshold
+            )
+            if not needs_rig_merge:
+                return existing_metrics
         except (RuntimeError, json.JSONDecodeError, KeyError, TypeError):
             # A process may have stopped after colmap_to_json wrote transforms.json but
             # before per-frame mask paths were attached. Reuse the completed sparse model
@@ -898,20 +1499,27 @@ def run_masked_colmap(
     feature_marker = colmap_attempt / ".features-complete"
     if not feature_marker.is_file():
         run_logged(
-            commands[0], log_dir / colmap_attempt.name / "colmap-features.log"
+            commands["features"], log_dir / colmap_attempt.name / "colmap-features.log"
         )
-        if isinstance(attempt, ReconstructionAttempt):
-            reorder_database_image_ids(
-                colmap_attempt / "database.db", interleaved_image_names(dataset / "images")
-            )
         feature_marker.write_text("complete\n", encoding="utf-8")
 
     matching_marker = colmap_attempt / ".matching-complete"
     if not matching_marker.is_file():
         run_logged(
-            commands[1], log_dir / colmap_attempt.name / "colmap-matching.log"
+            commands["matching"], log_dir / colmap_attempt.name / "colmap-matching.log"
         )
         matching_marker.write_text("complete\n", encoding="utf-8")
+
+    cross_view_marker = colmap_attempt / ".cross-view-matching-complete"
+    if "cross_view" in commands and not cross_view_marker.is_file():
+        pair_count = write_cross_view_pair_list(
+            colmap_attempt / "cross-view-pairs.txt", attempt
+        )
+        run_logged(
+            commands["cross_view"],
+            log_dir / colmap_attempt.name / "colmap-cross-view-matching.log",
+        )
+        cross_view_marker.write_text(f"{pair_count}\n", encoding="utf-8")
 
     if rig_enabled:
         database_camera_ids = validate_folder_camera_ids(
@@ -920,13 +1528,121 @@ def run_masked_colmap(
 
     mapping_marker = colmap_attempt / ".mapping-complete"
     if not mapping_marker.is_file():
-        run_logged(commands[2], log_dir / colmap_attempt.name / "colmap-mapping.log")
+        run_logged(commands["mapping"], log_dir / colmap_attempt.name / "colmap-mapping.log")
 
     components = _colmap_components(sparse_root)
     if not components:
         raise RuntimeError("COLMAP mapper completed without a valid sparse model")
     mapping_marker.write_text("complete\n", encoding="utf-8")
-    selected_dir, _ = max(components, key=lambda item: len(item[1]))
+    mapper_components = [item for item in components if item[0].name.isdigit()]
+    selection_pool = mapper_components or components
+    selected_dir, _ = max(selection_pool, key=lambda item: len(item[1]))
+    component_merge: dict[str, Any] = {"enabled": False}
+    if rig_enabled:
+        raw_components = mapper_components
+        raw_names = {
+            image.name for _, images in raw_components for image in images.values()
+        }
+        largest_raw_count = max(len(images) for _, images in raw_components)
+        if len(raw_components) > 1 and len(raw_names) > max(
+            len(images) for _, images in raw_components
+        ):
+            merge_marker = colmap_attempt / ".component-merge-complete"
+            merged_dir: Path | None = None
+            if merge_marker.is_file():
+                recorded = merge_marker.read_text(encoding="utf-8").strip()
+                candidate = colmap_attempt / recorded
+                required = [
+                    candidate / name
+                    for name in ("cameras.bin", "images.bin", "points3D.bin")
+                ]
+                if all(path.is_file() for path in required):
+                    from nerfstudio.process_data.colmap_utils import read_images_binary
+
+                    recorded_images = read_images_binary(candidate / "images.bin")
+                    recorded_names = {
+                        image.name for image in recorded_images.values()
+                    }
+                    if (
+                        recorded_names.issubset(raw_names)
+                        and len(recorded_names) > largest_raw_count
+                    ):
+                        metrics_path = candidate / "merge-metrics.json"
+                        if metrics_path.is_file():
+                            recorded_metrics = json.loads(
+                                metrics_path.read_text(encoding="utf-8")
+                            )
+                            if recorded_metrics.get("merge_algorithm_version") == 2:
+                                merged_dir = candidate
+                                component_merge = recorded_metrics
+            if merged_dir is None:
+                first_merged = sparse_root / "rig-merged"
+                existing_merged = [
+                    first_merged,
+                    *sorted(sparse_root.glob("rig-merged-attempt-*")),
+                ]
+                for existing in reversed(existing_merged):
+                    required = [
+                        existing / name
+                        for name in ("cameras.bin", "images.bin", "points3D.bin")
+                    ]
+                    metrics_path = existing / "merge-metrics.json"
+                    if not all(path.is_file() for path in required) or not metrics_path.is_file():
+                        continue
+                    from nerfstudio.process_data.colmap_utils import read_images_binary
+
+                    existing_images = read_images_binary(existing / "images.bin")
+                    existing_names = {image.name for image in existing_images.values()}
+                    existing_metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+                    if (
+                        existing_metrics.get("merge_algorithm_version") == 2
+                        and existing_names.issubset(raw_names)
+                        and len(existing_names) > largest_raw_count
+                    ):
+                        merged_dir = existing
+                        component_merge = existing_metrics
+                        break
+                if merged_dir is None:
+                    if not first_merged.exists() or not any(first_merged.iterdir()):
+                        candidate = first_merged
+                    else:
+                        retries = sorted(sparse_root.glob("rig-merged-attempt-*"))
+                        candidate = sparse_root / f"rig-merged-attempt-{len(retries) + 2:03d}"
+                    try:
+                        component_merge = merge_rig_components(
+                            sparse_root, candidate, attempt
+                        )
+                        from nerfstudio.process_data.colmap_utils import read_images_binary
+
+                        candidate_images = read_images_binary(candidate / "images.bin")
+                        candidate_names = {
+                            image.name for image in candidate_images.values()
+                        }
+                        if (
+                            not candidate_names.issubset(raw_names)
+                            or len(candidate_names) <= largest_raw_count
+                        ):
+                            raise RuntimeError(
+                                "Rig component merge did not improve mapper coverage"
+                            )
+                        merged_dir = candidate
+                    except RuntimeError as error:
+                        component_merge = {"enabled": False, "reason": str(error)}
+                        print(f"Rig component merge skipped: {error}", flush=True)
+                if merged_dir is not None:
+                    merge_marker.write_text(
+                        merged_dir.relative_to(colmap_attempt).as_posix() + "\n",
+                        encoding="utf-8",
+                    )
+            if merged_dir is not None:
+                from nerfstudio.process_data.colmap_utils import read_images_binary
+
+                merged_images = read_images_binary(merged_dir / "images.bin")
+                threshold = float(getattr(settings, "registration_threshold", 0.70))
+                if len(merged_images) >= math.ceil(
+                    expected_planar_images(attempt) * threshold
+                ):
+                    selected_dir = merged_dir
     selected_model = selected_dir
     rig_metrics: dict[str, Any] = {"enabled": False}
     if rig_enabled:
@@ -937,10 +1653,25 @@ def run_masked_colmap(
             selected_dir, required_prefix=reference_prefix
         )
         rig_marker = colmap_attempt / ".rig-complete"
+        from nerfstudio.process_data.colmap_utils import read_images_binary
+
+        selected_image_names = {
+            image.name
+            for image in read_images_binary(selected_dir / "images.bin").values()
+        }
+        reuse_rig_output = False
         if rig_marker.is_file():
             rig_output_name = rig_marker.read_text(encoding="utf-8").strip() or "rig-sparse"
             rig_output = colmap_attempt / rig_output_name
-        else:
+            required = [
+                rig_output / name for name in ("cameras.bin", "images.bin", "points3D.bin")
+            ]
+            if all(path.is_file() for path in required):
+                reuse_rig_output = {
+                    image.name
+                    for image in read_images_binary(rig_output / "images.bin").values()
+                } == selected_image_names
+        if not reuse_rig_output:
             first_output = colmap_attempt / "rig-sparse"
             if not first_output.exists() or not any(first_output.iterdir()):
                 rig_output = first_output
@@ -996,6 +1727,7 @@ def run_masked_colmap(
             "post_bundle_adjustment": post_rig,
             "p95_spread_ratio_limit": limit,
             "gate": "passed",
+            "component_merge": component_merge,
         }
     (colmap_root / "selected-attempt.json").write_text(
         json.dumps(

@@ -12,6 +12,7 @@ from .models import (
     StageStatus,
     utc_now,
 )
+from .paths import ensure_work_dir
 
 
 STAGE_ORDER = ("preprocess", "mask", "reconstruct", "train", "export", "qa")
@@ -61,7 +62,7 @@ def create_run(
         updated_at=created_at,
     )
     save_run(scene_path, run)
-    (scene_path / "work" / run_id).mkdir(parents=True, exist_ok=False)
+    ensure_work_dir(scene_path, run_id, exist_ok=False)
     return run
 
 

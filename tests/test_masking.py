@@ -8,6 +8,7 @@ from gsdb.masking import (
     PersonPrediction,
     colmap_mask_from_ignored,
     generate_person_masks,
+    image_dimensions,
     mask_path_for_image,
     postprocess_person_mask,
     validate_mask_set,
@@ -115,3 +116,25 @@ def test_nested_view_masks_mirror_image_relative_paths(tmp_path: Path) -> None:
     assert records[0]["mask"] == "view_03/frame_000007.jpg.png"
     assert (masks / "view_03" / "frame_000007.jpg.png").is_file()
     assert validate_mask_set(images, masks, 0.45)["mask_count"] == 1
+
+
+def test_image_dimensions_reads_headers_without_decoding(tmp_path: Path) -> None:
+    jpeg = tmp_path / "frame.jpg"
+    png = tmp_path / "mask.png"
+    assert cv2.imwrite(str(jpeg), np.zeros((48, 96, 3), dtype=np.uint8))
+    assert cv2.imwrite(str(png), np.zeros((17, 33), dtype=np.uint8))
+    assert image_dimensions(jpeg) == (48, 96)
+    assert image_dimensions(png) == (17, 33)
+
+
+def test_image_dimensions_rejects_truncated_and_foreign_files(tmp_path: Path) -> None:
+    jpeg = tmp_path / "frame.jpg"
+    assert cv2.imwrite(str(jpeg), np.zeros((48, 96, 3), dtype=np.uint8))
+    truncated = tmp_path / "truncated.jpg"
+    truncated.write_bytes(jpeg.read_bytes()[:4])
+    with pytest.raises(RuntimeError):
+        image_dimensions(truncated)
+    foreign = tmp_path / "notes.txt"
+    foreign.write_bytes(b"not an image at all")
+    with pytest.raises(RuntimeError, match="Unsupported image header"):
+        image_dimensions(foreign)

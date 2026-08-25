@@ -46,6 +46,39 @@ app.add_typer(catalog_app, name="catalog")
 app.add_typer(qa_app, name="qa")
 console = Console()
 
+# Ceilings applied by --smoke. Every value is an upper bound, so an explicitly
+# smaller flag still wins and the resulting config hash stays reproducible.
+SMOKE_PROFILE: dict[str, int] = {
+    "target_frames": 80,
+    "primary_frames": 40,
+    "fallback_frames": 48,
+    "projection_size": 1024,
+    "mask_qa_sample_count": 8,
+    "train_iterations": 5000,
+}
+
+
+SMOKE_CEILINGS: dict[str, int] = {
+    "target_frames": SMOKE_PROFILE["target_frames"],
+    "primary_frames": SMOKE_PROFILE["primary_frames"],
+    "fallback_frames": SMOKE_PROFILE["fallback_frames"],
+    "primary_projection_size": SMOKE_PROFILE["projection_size"],
+    "fallback_projection_size": SMOKE_PROFILE["projection_size"],
+    "mask_qa_sample_count": SMOKE_PROFILE["mask_qa_sample_count"],
+    "train_iterations": SMOKE_PROFILE["train_iterations"],
+}
+
+
+def apply_smoke_profile(settings: dict[str, int | None]) -> dict[str, int | None]:
+    """Clamp preprocess settings to the smoke ceilings without ever raising them."""
+    unknown = set(settings) - set(SMOKE_CEILINGS)
+    if unknown:
+        raise KeyError(f"No smoke ceiling defined for: {sorted(unknown)}")
+    return {
+        key: SMOKE_CEILINGS[key] if value is None else min(int(value), SMOKE_CEILINGS[key])
+        for key, value in settings.items()
+    }
+
 
 def _root() -> Path:
     return find_project_root()
@@ -224,6 +257,19 @@ def preprocess(
             help="Gate masks through DeepSeek V4 Flash Vision",
         ),
     ] = False,
+    smoke: Annotated[
+        bool,
+        typer.Option(
+            "--smoke",
+            help=(
+                "Reduced end-to-end profile for plumbing checks: fewer frames, smaller "
+                "projections and a short training run. Never a quality baseline."
+            ),
+        ),
+    ] = False,
+    train_iterations: Annotated[
+        int | None, typer.Option(help="Override the Splatfacto iteration count")
+    ] = None,
 ) -> None:
     """Create a run, extract uniform panorama frames, and measure input quality."""
     try:
@@ -231,6 +277,27 @@ def preprocess(
         if run_id:
             run = load_run(path, run_id)
         else:
+            if smoke:
+                # A distinct config hash keeps smoke output in its own run directory,
+                # so it can never be mistaken for or overwrite a full-quality run.
+                reduced = apply_smoke_profile(
+                    {
+                        "target_frames": target_frames,
+                        "primary_frames": primary_frames,
+                        "fallback_frames": fallback_frames,
+                        "primary_projection_size": primary_projection_size,
+                        "fallback_projection_size": fallback_projection_size,
+                        "mask_qa_sample_count": mask_qa_sample_count,
+                        "train_iterations": train_iterations,
+                    }
+                )
+                target_frames = int(reduced["target_frames"])
+                primary_frames = int(reduced["primary_frames"])
+                fallback_frames = int(reduced["fallback_frames"])
+                primary_projection_size = int(reduced["primary_projection_size"])
+                fallback_projection_size = int(reduced["fallback_projection_size"])
+                mask_qa_sample_count = int(reduced["mask_qa_sample_count"])
+                train_iterations = int(reduced["train_iterations"])
             capture = load_model(path / "captures" / f"{capture_id}.yaml", CaptureManifest)
             if not capture.stitched_video.sha256:
                 raise RuntimeError("Capture has not been ingested; run gsdb ingest first")
@@ -267,7 +334,14 @@ def preprocess(
                 },
             )
             config.preprocess.target_frames = target_frames
+            if train_iterations is not None:
+                config.train.max_iterations = train_iterations
             run = create_run(path, location_id, scene_id, config)
+            if smoke:
+                console.print(
+                    "[yellow]Smoke profile[/yellow]: reduced frames, projection size and "
+                    "training length. Use it to validate the pipeline, never to judge quality."
+                )
         run = preprocess_run(path, run, resume=resume)
         console.print(f"Run [green]{run.id}[/green]: preprocess={run.stages['preprocess'].status.value}")
         console.print(f"RUN_ID={run.id}", markup=False)

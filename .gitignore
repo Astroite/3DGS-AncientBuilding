@@ -9,7 +9,8 @@ htmlcov/
 env/
 condaenv.*.requirements.txt
 
-# Editors and operating systems
+# Editors, tooling indexes, and operating systems
+.codegraph/
 .idea/
 .vscode/
 .DS_Store

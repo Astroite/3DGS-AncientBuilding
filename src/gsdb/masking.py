@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, Iterable, Sequence, TypeVar
 
 import cv2
 import numpy as np
@@ -14,6 +16,35 @@ from .models import MaskingConfig
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+
+_T = TypeVar("_T")
+
+
+IO_WORKERS_ENV = "GSDB_IO_WORKERS"
+
+
+def io_worker_count() -> int:
+    """Threads used for JPEG/PNG decode, encode and write.
+
+    OpenCV releases the GIL around codec and resize calls, so these stages scale
+    with threads while the projection keeps its single CUDA stream serialized.
+    """
+    override = os.environ.get(IO_WORKERS_ENV, "").strip()
+    if override:
+        workers = int(override)
+        if workers < 1:
+            raise ValueError(f"{IO_WORKERS_ENV} must be at least 1, got {workers}")
+        return workers
+    return max(1, min(8, (os.cpu_count() or 1)))
+
+
+def run_image_tasks(action: Callable[[_T], Any], items: Sequence[_T]) -> list[Any]:
+    """Run ``action`` over ``items``, surfacing the first failure deterministically."""
+    workers = min(io_worker_count(), len(items))
+    if workers <= 1:
+        return [action(item) for item in items]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return [future.result() for future in [pool.submit(action, item) for item in items]]
 
 
 @dataclass(frozen=True)
@@ -34,6 +65,46 @@ def image_files(path: Path) -> list[Path]:
         ),
         key=lambda item: item.relative_to(path).as_posix(),
     )
+
+
+_JPEG_SIZE_MARKERS = frozenset(
+    # SOF0-SOF15 carry the frame dimensions; DHT/JPG/DAC share the range and do not.
+    value for value in range(0xC0, 0xD0) if value not in (0xC4, 0xC8, 0xCC)
+)
+
+
+def image_dimensions(path: Path) -> tuple[int, int]:
+    """Return ``(height, width)`` from the file header without decoding pixels.
+
+    Validating a cached image set with ``cv2.imread`` costs a full JPEG decode per
+    file — about 50 ms each over the 9p mount — which dominates every resume. The
+    header carries the only property those checks actually test.
+    """
+    with path.open("rb") as stream:
+        prefix = stream.read(8)
+        if prefix.startswith(b"\x89PNG\r\n\x1a\n"):
+            header = stream.read(17)
+            if len(header) < 17 or header[4:8] != b"IHDR":
+                raise RuntimeError(f"Truncated PNG header: {path}")
+            width, height = struct.unpack(">II", header[8:16])
+            return int(height), int(width)
+        if not prefix.startswith(b"\xff\xd8"):
+            raise RuntimeError(f"Unsupported image header: {path}")
+        stream.seek(2)
+        while True:
+            marker = stream.read(2)
+            if len(marker) < 2 or marker[0] != 0xFF:
+                raise RuntimeError(f"Truncated JPEG header: {path}")
+            if marker[1] in _JPEG_SIZE_MARKERS:
+                frame = stream.read(7)
+                if len(frame) < 7:
+                    raise RuntimeError(f"Truncated JPEG frame header: {path}")
+                height, width = struct.unpack(">HH", frame[3:7])
+                return int(height), int(width)
+            length = stream.read(2)
+            if len(length) < 2:
+                raise RuntimeError(f"Truncated JPEG segment: {path}")
+            stream.seek(struct.unpack(">H", length)[0] - 2, os.SEEK_CUR)
 
 
 def mask_path_for_image(
@@ -184,15 +255,16 @@ def generate_person_masks(
     with metrics_path.open("w", encoding="utf-8", newline="\n") as metrics_stream:
         for index, image_path in enumerate(images, start=1):
             image_name = image_path.relative_to(images_dir).as_posix()
-            image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-            if image is None:
-                raise RuntimeError(f"Cannot decode planar image: {image_path}")
             target = mask_path_for_image(masks_dir, image_path, images_dir)
             if target.exists():
-                ignored = _read_existing_mask(target, image.shape[:2])
+                # Only the shape is needed to check a cached mask, so skip the decode.
+                ignored = _read_existing_mask(target, image_dimensions(image_path))
                 detections = previous_records.get(image_name, {}).get("detections")
                 reused = True
             else:
+                image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+                if image is None:
+                    raise RuntimeError(f"Cannot decode planar image: {image_path}")
                 prediction = (
                     predictor(image)
                     if predictor is not None
@@ -242,13 +314,14 @@ def validate_mask_set(
         missing = sorted(set(expected) - set(actual))[:5]
         extra = sorted(set(actual) - set(expected))[:5]
         raise RuntimeError(f"Mask/image mismatch; missing={missing}, extra={extra}")
-    fractions: list[float] = []
-    for name, image_path in expected.items():
-        image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+    def measure(item: tuple[str, Path]) -> float:
+        name, image_path = item
+        # The mask is decoded because its pixels drive the ratio; the image only has
+        # to agree on shape, which the header already carries.
         mask = cv2.imread(str(actual[name]), cv2.IMREAD_GRAYSCALE)
-        if image is None or mask is None:
+        if mask is None:
             raise RuntimeError(f"Cannot decode image/mask pair: {image_path.name}")
-        if mask.shape != image.shape:
+        if mask.shape != image_dimensions(image_path):
             raise RuntimeError(f"Mask size mismatch for {image_path.name}")
         ignored = ignored_from_colmap_mask(mask)
         fraction = float(np.count_nonzero(ignored) / ignored.size)
@@ -257,7 +330,9 @@ def validate_mask_set(
                 f"Mask for {image_path.name} hides {fraction:.1%}, above "
                 f"the configured {max_masked_fraction:.1%} ceiling"
             )
-        fractions.append(fraction)
+        return fraction
+
+    fractions: list[float] = run_image_tasks(measure, list(expected.items()))
     return {
         "image_count": len(images),
         "mask_count": len(actual),

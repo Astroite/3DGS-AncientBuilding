@@ -27,4 +27,15 @@ else
 fi
 conda run -n 3dgs python -m pip install --editable '.[dev]'
 conda run -n 3dgs python scripts/apply_nerfstudio_patch.py
+
+# Run scratch data belongs on this VM's ext4 disk, not on the 9p /mnt/d bridge.
+# gsdb.ps1 passes this through for Windows-launched runs; this makes direct WSL
+# shells behave the same way.
+GSDB_SCRATCH_ROOT="${GSDB_SCRATCH_ROOT:-${HOME}/gsdb-scratch}"
+export GSDB_SCRATCH_ROOT
+mkdir -p "${GSDB_SCRATCH_ROOT}"
+if ! grep -q 'GSDB_SCRATCH_ROOT' "${HOME}/.bashrc" 2>/dev/null; then
+  printf '\nexport GSDB_SCRATCH_ROOT="%s"\n' "${GSDB_SCRATCH_ROOT}" >> "${HOME}/.bashrc"
+fi
+
 conda run -n 3dgs gsdb doctor
