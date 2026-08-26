@@ -74,7 +74,7 @@ config:
   export:
     ply_axis: y_up
 created_at: '2026-08-25T06:27:40Z'
-updated_at: '2026-08-25T11:36:47Z'
+updated_at: '2026-08-26T02:25:58Z'
 active_stage: null
 stages:
   preprocess:
@@ -109,17 +109,17 @@ stages:
     log_path: work/20260825T062740Z-46f434b6/logs
   export:
     status: succeeded
-    started_at: '2026-08-25T11:34:54Z'
-    completed_at: '2026-08-25T11:36:47Z'
-    elapsed_seconds: 113.0
-    message: Exported 4 artifacts to exports/v002
+    started_at: '2026-08-26T02:23:51Z'
+    completed_at: '2026-08-26T02:25:58Z'
+    elapsed_seconds: 127.0
+    message: Exported 6 artifacts to exports/v003
     log_path: work/20260825T062740Z-46f434b6/logs
   qa:
-    status: pending
-    started_at: null
-    completed_at: null
-    elapsed_seconds: null
-    message: null
+    status: succeeded
+    started_at: '2026-08-26T02:22:02Z'
+    completed_at: '2026-08-26T02:22:02Z'
+    elapsed_seconds: 0.0
+    message: 'QA report: qa/20260825T062740Z-46f434b6.md'
     log_path: null
 tool_versions:
   python: 3.10.12
@@ -165,7 +165,7 @@ metrics:
     blur_median_improvement: 26.03843046014913
     blur_median_improvement_ratio: 1.0439693350858563
   resources:
-    disk_observed_peak_bytes: 4541140567
+    disk_observed_peak_bytes: 4755533369
     gpu_memory_observed_peak_mib: 8847.0
   masking:
     primary:
@@ -381,9 +381,173 @@ metrics:
       gpu_memory_peak_mib: 8847.0
     config_path: work/20260825T062740Z-46f434b6/training/attempt-1/unnamed/splatfacto/2026-08-25_152501/config.yml
   export:
-    gaussian_count: 878467
+    gaussian_count: 860446
     ply_axis: y_up
     gaussian_count_warning: below_2_million
+    cull:
+      enabled: true
+      distance_factor: 3.0
+      scale_factor: 1.0
+      max_removed_fraction: 0.05
+      trajectory_radius: 1.0276864005641484
+      input_gaussians: 878467
+      removed_total: 18021
+      removed_beyond_distance: 18021
+      removed_above_scale: 428
+      removed_fraction: 0.020514145665118895
+      max_distance: 3.0830592016924454
+      max_scale: 1.0276864005641484
+      camera_to_cloud_median: 0.013193776831030846
+      published_gaussians: 860446
+    publish_frame:
+      frames: 135
+      up_vector:
+      - -0.0001520134910640726
+      - -0.9046775697914292
+      - 0.4260967866672689
+      deviation_median_degrees: 0.4488838222224847
+      deviation_p95_degrees: 0.8090183042361725
+      deviation_max_degrees: 0.9502159087077421
+      deviation_limit_degrees: 5.0
+      pose_normalisation_peak: 1.0008221785752587
+      up_in_model_frame:
+      - -0.0012296152460999365
+      - 0.9999964740556233
+      - -0.0023537040314373344
+      published_height_span_ratio: 0.01583233430352629
+      published_height_span_limit: 0.1
+      rotation:
+      - - -0.9996180498205075
+        - -0.0012941260195235096
+        - -0.027605791256383124
+      - - -0.0012296152460999367
+        - 0.9999964740556234
+        - -0.002353704031437335
+      - - 0.027608739909528023
+        - -0.0023188605319505538
+        - -0.99961611649995
+    versions:
+      v003:
+        gaussian_count: 860446
+        ply_axis: y_up
+        gaussian_count_warning: below_2_million
+        cull:
+          enabled: true
+          distance_factor: 3.0
+          scale_factor: 1.0
+          max_removed_fraction: 0.05
+          trajectory_radius: 1.0276864005641484
+          input_gaussians: 878467
+          removed_total: 18021
+          removed_beyond_distance: 18021
+          removed_above_scale: 428
+          removed_fraction: 0.020514145665118895
+          max_distance: 3.0830592016924454
+          max_scale: 1.0276864005641484
+          camera_to_cloud_median: 0.013193776831030846
+          published_gaussians: 860446
+        publish_frame:
+          frames: 135
+          up_vector:
+          - -0.0001520134910640726
+          - -0.9046775697914292
+          - 0.4260967866672689
+          deviation_median_degrees: 0.4488838222224847
+          deviation_p95_degrees: 0.8090183042361725
+          deviation_max_degrees: 0.9502159087077421
+          deviation_limit_degrees: 5.0
+          pose_normalisation_peak: 1.0008221785752587
+          up_in_model_frame:
+          - -0.0012296152460999365
+          - 0.9999964740556233
+          - -0.0023537040314373344
+          published_height_span_ratio: 0.01583233430352629
+          published_height_span_limit: 0.1
+          rotation:
+          - - -0.9996180498205075
+            - -0.0012941260195235096
+            - -0.027605791256383124
+          - - -0.0012296152460999367
+            - 0.9999964740556234
+            - -0.002353704031437335
+          - - 0.027608739909528023
+            - -0.0023188605319505538
+            - -0.99961611649995
+  qa:
+    quality_snapshot:
+      angular_resolution_px_per_degree: 10.318503049865775
+      candidate_frames: 270
+      selected_frames: 135
+      blur_median: 618.2336594602093
+      registration_ratio: 0.9879629629629629
+      largest_component_coverage: 0.9879629629629629
+      fixed_intrinsics: true
+      rig_center_spread_p95: 1.8682337991855296e-15
+      rig_spread_to_baseline: 1.3617450991560859e-14
+      gaussian_count: 860446
+      reconstruct_seconds: 2766.0
+      train_seconds: 14934.0
+      gpu_memory_peak_mib: 8847.0
+      disk_peak_gib: 4.4289355808869
+    comparison:
+      baseline_run_id: 20260824T022046Z-5679786b
+      current_run_id: 20260825T062740Z-46f434b6
+      metrics:
+        angular_resolution_px_per_degree:
+          baseline: 4.836798304624582
+          current: 10.318503049865775
+          delta: 5.481704745241193
+        candidate_frames:
+          baseline: 270
+          current: 270
+          delta: 0.0
+        selected_frames:
+          baseline: 270
+          current: 135
+          delta: -135.0
+        blur_median:
+          baseline: 592.1952290000602
+          current: 618.2336594602093
+          delta: 26.03843046014913
+        registration_ratio:
+          baseline: 0.9962962962962963
+          current: 0.9879629629629629
+          delta: -0.008333333333333415
+        largest_component_coverage:
+          baseline: 0.9962962962962963
+          current: 0.9879629629629629
+          delta: -0.008333333333333415
+        fixed_intrinsics:
+          baseline: false
+          current: true
+        rig_center_spread_p95:
+          baseline: 0.0028986899338264913
+          current: 1.8682337991855296e-15
+          delta: -0.002898689933824623
+        rig_spread_to_baseline:
+          baseline: 0.04237908713179426
+          current: 1.3617450991560859e-14
+          delta: -0.042379087131780645
+        gaussian_count:
+          baseline: 453495
+          current: 860446
+          delta: 406951.0
+        reconstruct_seconds:
+          baseline: 13071.0
+          current: 2766.0
+          delta: -10305.0
+        train_seconds:
+          baseline: 879.0
+          current: 14934.0
+          delta: 14055.0
+        gpu_memory_peak_mib:
+          baseline: 4868.0
+          current: 8847.0
+          delta: 3979.0
+        disk_peak_gib:
+          baseline: 2.758948671631515
+          current: 4.4289355808869
+          delta: 1.6699869092553854
 selected_dataset: work/20260825T062740Z-46f434b6/reconstruction-primary
 fallback_attempted: false
 artifacts:
@@ -407,4 +571,34 @@ artifacts:
   sha256: 0a0a6b1611f2286ddb74c7ea6b818a3184cc4dcaa4e2b44f1a7d3158c00f9045
   byte_size: 993444
   version: v002
+- kind: gaussian_ply
+  relative_path: exports/v003/splat-yup.ply
+  sha256: 77193a1b725cccaafea30926f827f849638fdeca547c067846c334b3b75c2b68
+  byte_size: 213392359
+  version: v003
+- kind: preview_video
+  relative_path: exports/v003/preview.mp4
+  sha256: 258204e604ee1ba4f4f0402dd6af99bad392bcd329b8f9a85393934de2b8c737
+  byte_size: 2808048
+  version: v003
+- kind: thumbnail
+  relative_path: exports/v003/thumbnail.jpg
+  sha256: 1e618a8b3dc5348f8875f0de3026b35dd2dd4273639ffdd5b3e85adeb3fb46f9
+  byte_size: 27558
+  version: v003
+- kind: transforms
+  relative_path: exports/v003/transforms.json
+  sha256: 950104182662656808e83dd143367fabcc4832142e300ce1bba4c23a66266038
+  byte_size: 999974
+  version: v003
+- kind: transforms-colmap
+  relative_path: exports/v003/transforms-colmap.json
+  sha256: 0a0a6b1611f2286ddb74c7ea6b818a3184cc4dcaa4e2b44f1a7d3158c00f9045
+  byte_size: 993444
+  version: v003
+- kind: dataparser_transforms
+  relative_path: exports/v003/dataparser_transforms.json
+  sha256: e606c10bee6abff609d36a7578de516a634dd361fafea9269884b8be97ef2d69
+  byte_size: 530
+  version: v003
 review_notes: null

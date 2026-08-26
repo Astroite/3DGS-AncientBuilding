@@ -23,6 +23,7 @@ from .models import (
 )
 from .paths import find_project_root, host_path, location_dir, scene_dir
 from .pipeline import (
+    CullSettings,
     export_run,
     ingest_capture,
     mask_run,
@@ -408,12 +409,54 @@ def export_command(
     run_id: Annotated[str, typer.Argument()],
     version: Annotated[str, typer.Option()] = "v001",
     resume: Annotated[bool, typer.Option()] = False,
+    cull: Annotated[
+        bool,
+        typer.Option(
+            "--cull/--no-cull",
+            help="Drop Gaussians far from the capture path or larger than the scene",
+        ),
+    ] = True,
+    cull_distance_factor: Annotated[
+        float,
+        typer.Option(help="Cull beyond this multiple of the capture path radius"),
+    ] = 3.0,
+    cull_scale_factor: Annotated[
+        float,
+        typer.Option(help="Cull Gaussians wider than this multiple of the path radius"),
+    ] = 1.0,
+    cull_max_removed_fraction: Annotated[
+        float,
+        typer.Option(help="Refuse to publish if culling would remove more than this"),
+    ] = 0.05,
 ) -> None:
-    """Export PLY, preview, thumbnail, transforms, and artifact manifest."""
+    """Export PLY, preview, thumbnail, transforms, and artifact manifest.
+
+    Culling is a publishing decision, not a training one, so these options are not
+    part of the run's config hash: the same run can publish several versions.
+    """
     try:
         path = _scene(location_id, scene_id)
-        run = export_run(path, load_run(path, run_id), version=version, resume=resume)
+        run = export_run(
+            path,
+            load_run(path, run_id),
+            version=version,
+            resume=resume,
+            cull=CullSettings(
+                enabled=cull,
+                distance_factor=cull_distance_factor,
+                scale_factor=cull_scale_factor,
+                max_removed_fraction=cull_max_removed_fraction,
+            ),
+        )
+        published = run.metrics.get("export", {}).get("cull", {})
         console.print(f"Run [green]{run.id}[/green]: artifacts={len(run.artifacts)}")
+        if published.get("removed_total") is not None:
+            console.print(
+                f"Culled [yellow]{published['removed_total']:,}[/yellow] of "
+                f"{published['input_gaussians']:,} Gaussians "
+                f"({published['removed_fraction']:.2%}); published "
+                f"{published['published_gaussians']:,}"
+            )
     except Exception as error:
         _fatal(error)
 

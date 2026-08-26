@@ -78,17 +78,29 @@ def require_previous_stages(run: RunManifest, stage: str) -> None:
             )
 
 
-def begin_stage(run: RunManifest, stage: str, resume: bool = False) -> bool:
+def begin_stage(
+    run: RunManifest, stage: str, resume: bool = False, force: bool = False
+) -> bool:
+    """Open a stage for work, or report that a completed one can be reused.
+
+    ``force`` re-opens a stage that already succeeded. It exists for publishing an
+    additional export version from a finished run, which produces new artifacts
+    without invalidating the ones already published.
+    """
     if stage not in STAGE_ORDER:
         raise ValueError(f"Unknown stage: {stage}")
     if stage not in ("preprocess", "qa"):
         require_previous_stages(run, stage)
     current = run.stages.get(stage, StageRecord())
-    if current.status == StageStatus.SUCCEEDED:
+    if current.status == StageStatus.SUCCEEDED and not force:
         if resume:
             return False
         raise RuntimeError(f"Stage {stage} already succeeded; use --resume to reuse it")
-    if current.status in (StageStatus.PROCESSING, StageStatus.FAILED) and not resume:
+    if (
+        current.status in (StageStatus.PROCESSING, StageStatus.FAILED)
+        and not resume
+        and not force
+    ):
         raise RuntimeError(f"Stage {stage} was already attempted; use --resume or create a new run")
     run.stages[stage] = StageRecord(status=StageStatus.PROCESSING, started_at=utc_now())
     run.status = RunStatus.PROCESSING

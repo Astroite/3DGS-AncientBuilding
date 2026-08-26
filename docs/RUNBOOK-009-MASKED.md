@@ -283,6 +283,7 @@ $RunId = '<上次打印的 RunId>'
 | 主 COLMAP + rig BA（1080 图，GPU SIFT） | 1–3 小时 | 约 5–25 GiB |
 | Splatfacto-big 100k | 1–5 小时 | 约 10–35 GiB |
 | export / QA / catalog | 10–40 分钟 | 约 2–10 GiB |
+| 训练 checkpoint（每 10k 步一个，共 10 个） | — | 约 10–25 GiB |
 
 主流程先按 **2.5–8 小时、峰值约 40–100 GiB** 规划。若触发 2520 图降级，整体按 **5–14 小时、峰值约 70–160 GiB**。实际耗时、磁盘峰值和显存峰值会写入运行清单与 QA 报告。
 
@@ -301,6 +302,21 @@ $RunId = '<上次打印的 RunId>'
 
 因此，明早启动后当天未完成不等于卡死。判断是否仍在工作应查看日志更新时间、CPU/GPU 占用和工作目录增长，不要仅凭控制台一段时间没有新行就中断。
 
+## 人工检查产物时看什么
+
+指标能拦住机器能判断的问题，剩下的必须人眼看。把 `exports\<版本>\splat-yup.ply` 和同目录的
+`transforms.json` 一起载入查看器，确认四件事：
+
+1. **场景是正立的**。这是重力恢复是否正确的最终判据。QA 报告里"发布后相机高度跨度占比"
+   应该是个很小的数（009 实测 1.58%）；如果场景躺倒或倒置，说明素材的重力稳定有问题。
+2. **相机落在场景内部**，沿街道排成一条连续轨迹，而不是飘在外面。
+3. **远处的浮点球消失了**，天空与远景区域干净。
+4. **街道本体没有被削掉** —— 尤其是街道尽头的远景建筑。如果发现该留的被删了，
+   调大 `--cull-distance-factor` 重新发一个版本即可，不需要重训。
+
+QA 报告的"外围高斯剔除"一节会列出剔除总数以及按距离、按尺度各剔除多少。剔除比例通常在 2% 左右；
+明显偏高（接近 5% 上限）值得先看一眼再接受。
+
 ## 完成判定
 
 一键脚本最终打印类似：
@@ -311,7 +327,7 @@ Completed <RunId>. Artifacts remain needs_review; no automatic approval was perf
 
 完成后应存在：
 
-- 场景 `exports\v002` 下只有 `splat-yup.ply`、`preview.mp4`、`thumbnail.jpg`、`transforms.json` 与 `artifact.yaml`；canonical Z-up PLY 只留在 Git 忽略的 work staging；
+- 场景 `exports002` 下有 `splat-yup.ply`、`preview.mp4`、`thumbnail.jpg`、`artifact.yaml`，以及三个互相能对齐的坐标文件：`transforms.json`（与 PLY 同坐标系）、`transforms-colmap.json`（重建原始）、`dataparser_transforms.json`（Nerfstudio 归一化参数）；Nerfstudio 的原始 PLY 只留在 Git 忽略的 work staging；
 - `qa\<RunId>.md`；
 - `runs\<RunId>.yaml` 中完整的遮罩、重建、训练、资源和产物记录；
 - 从 YAML 原子重建的 `catalog\catalog.sqlite` 记录。

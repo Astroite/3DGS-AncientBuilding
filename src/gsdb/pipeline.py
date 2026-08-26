@@ -4,8 +4,11 @@ import json
 import math
 import re
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from .doctor import collect_tool_versions
 from .manifests import load_model, save_yaml
@@ -37,10 +40,22 @@ from .models import (
     SceneManifest,
     utc_now,
 )
+from .frames import (
+    applied_transform,
+    camera_positions,
+    check_pose_normalisation,
+    load_dataparser_transform,
+    rig_gravity,
+    to_model_frame,
+    trajectory_frame,
+    upright_rotation,
+    write_published_transforms,
+)
 from .paths import ensure_within, ensure_work_dir, host_path
-from .ply import gaussian_count, rotate_gaussian_ply_y_up
+from .ply import CullSpec, gaussian_count, publish_gaussian_ply, rotate_gaussian_ply_y_up
 from .processes import CommandError, run_logged
 from .reconstruction import (
+    _selected_model_dir,
     build_image_pyramid,
     center_spread_metrics,
     projection_fov_degrees,
@@ -52,6 +67,75 @@ from .vision_qa import load_local_mask_qa_review, run_deepseek_mask_qa
 
 
 VERSION_PATTERN = re.compile(r"^v\d{3}$")
+
+# A walking capture holds a near-constant camera height, so a large spread along
+# the published vertical means the axis is wrong rather than the path steep.
+PUBLISHED_HEIGHT_SPAN_LIMIT = 0.10
+
+
+@dataclass(frozen=True)
+class TrainSettings:
+    """Instrumentation around training that does not change what is learned.
+
+    Checkpoint frequency and logging backend affect neither the loss nor the
+    Gaussians, so like culling they stay out of the run's config hash — otherwise
+    turning on a metric would invalidate every manifest already on disk.
+    """
+
+    # Mirrors nerfstudio 1.1.5's TrainerConfig.vis literals, so a typo fails here
+    # rather than four hours into a run.
+    VIS_CHOICES = ("viewer", "wandb", "tensorboard", "comet", "viewer+tensorboard", "viewer+wandb")
+
+    steps_per_save: int = 10_000
+    vis: str = "tensorboard"
+
+    def __post_init__(self) -> None:
+        if self.vis not in self.VIS_CHOICES:
+            raise ValueError(f"vis must be one of {self.VIS_CHOICES}, got {self.vis!r}")
+        if self.steps_per_save < 1:
+            raise ValueError(f"steps_per_save must be positive, got {self.steps_per_save}")
+
+    def command_arguments(self) -> list[str]:
+        return [
+            # Densification stops at splatfacto's stop_split_at (15k), so the rest of
+            # a 100k run only refines a fixed Gaussian set. Keeping every checkpoint
+            # lets one run answer "where does quality stop improving?" by exporting
+            # from several steps, instead of retraining once per candidate.
+            "--save-only-latest-checkpoint",
+            "False",
+            "--steps-per-save",
+            str(self.steps_per_save),
+            # An unattended batch run has nobody watching a live viewer, and
+            # tensorboard leaves the eval curve on disk for that decision.
+            "--vis",
+            self.vis,
+        ]
+
+    def as_metrics(self) -> dict[str, Any]:
+        return {"steps_per_save": self.steps_per_save, "vis": self.vis}
+
+
+@dataclass(frozen=True)
+class CullSettings:
+    """Publish-time culling knobs.
+
+    Deliberately not part of RunConfig: culling changes what is published, not
+    what was trained, so adjusting it must not invalidate a run's config hash and
+    force a four-hour retrain.
+    """
+
+    enabled: bool = True
+    distance_factor: float = 3.0
+    scale_factor: float = 1.0
+    max_removed_fraction: float = 0.05
+
+    def as_metrics(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "distance_factor": self.distance_factor,
+            "scale_factor": self.scale_factor,
+            "max_removed_fraction": self.max_removed_fraction,
+        }
 
 
 def _tree_size(path: Path) -> int:
@@ -495,7 +579,14 @@ def _find_training_config(output: Path) -> Path | None:
     return configs[-1] if configs else None
 
 
-def _train_command(run: RunManifest, dataset: Path, output: Path, downscale: int | None = None) -> list[str]:
+def _train_command(
+    run: RunManifest,
+    dataset: Path,
+    output: Path,
+    downscale: int | None = None,
+    settings: TrainSettings | None = None,
+) -> list[str]:
+    settings = settings or TrainSettings()
     if getattr(run.config, "schema_version", 1) == 2:
         effective_downscale = downscale or run.config.train.downscale_factor
         return [
@@ -507,6 +598,7 @@ def _train_command(run: RunManifest, dataset: Path, output: Path, downscale: int
             str(run.config.train.max_iterations),
             "--viewer.quit-on-train-completion",
             "True",
+            *settings.command_arguments(),
             "--pipeline.datamanager.cache-images",
             run.config.train.cache_images,
             "--pipeline.datamanager.cache-images-type",
@@ -543,7 +635,13 @@ def _train_command(run: RunManifest, dataset: Path, output: Path, downscale: int
     return command
 
 
-def train_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunManifest:
+def train_run(
+    scene_path: Path,
+    run: RunManifest,
+    resume: bool = False,
+    settings: TrainSettings | None = None,
+) -> RunManifest:
+    settings = settings or TrainSettings()
     if not begin_stage(run, "train", resume=resume):
         return run
     save_run(scene_path, run)
@@ -558,7 +656,9 @@ def train_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunMa
         if selected_config is None:
             try:
                 train_metrics = run_logged(
-                    _train_command(run, dataset, attempt_one), log_one, monitor_gpu=True
+                    _train_command(run, dataset, attempt_one, settings=settings),
+                    log_one,
+                    monitor_gpu=True,
                 )
                 run.metrics.setdefault("train", {}).setdefault("attempts", []).append(
                     {"name": "attempt-1", **train_metrics}
@@ -578,6 +678,7 @@ def train_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunMa
                         dataset,
                         attempt_two,
                         downscale=run.config.train.oom_retry_downscale,
+                        settings=settings,
                     ),
                     log_two,
                     monitor_gpu=True,
@@ -592,6 +693,13 @@ def train_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunMa
         if selected_config is None:
             raise RuntimeError("Training finished without producing config.yml")
         run.metrics.setdefault("train", {})["config_path"] = selected_config.relative_to(scene_path).as_posix()
+        run.metrics["train"]["instrumentation"] = settings.as_metrics()
+        run.metrics["train"]["eval_curve"] = read_eval_curve(selected_config.parent)
+        run.metrics["train"]["checkpoints"] = sorted(
+            int(match.group(1))
+            for path in (selected_config.parent / "nerfstudio_models").glob("step-*.ckpt")
+            if (match := re.search(r"step-(\d+)\.ckpt$", path.name))
+        )
         attempts = run.metrics.get("train", {}).get("attempts", [])
         for item in attempts:
             _record_resources(run, work, item)
@@ -607,6 +715,61 @@ def train_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunMa
         raise
     save_run(scene_path, run)
     return run
+
+
+def metrics_for_version(
+    run: RunManifest, version: str, existing: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Run metrics with the export block describing this version, not the newest one.
+
+    One run can publish several versions, so stamping the run's current export
+    metrics onto every artifact manifest would make an older version claim the
+    Gaussian count and cull settings of a later one.
+    """
+    metrics = {key: value for key, value in run.metrics.items() if key != "export"}
+    recorded = run.metrics.get("export", {}).get("versions", {}).get(version)
+    if recorded is not None:
+        metrics["export"] = recorded
+    elif existing is not None and "export" in existing:
+        # Published before per-version metrics existed: keep what it already says
+        # rather than overwriting it with another version's numbers.
+        metrics["export"] = existing["export"]
+    return metrics
+
+
+EVAL_SCALARS = ("psnr", "ssim", "lpips")
+
+
+def read_eval_curve(training_dir: Path) -> list[dict[str, float]]:
+    """Eval metrics against step, read back from the TensorBoard event files.
+
+    Recorded so the iteration count can be argued from a quality plateau instead of
+    guessed. Missing or unreadable events are not fatal — this is instrumentation,
+    and a run must not fail because a curve could not be plotted.
+    """
+    events = sorted(training_dir.rglob("events.out.tfevents.*"))
+    if not events:
+        return []
+    try:
+        from tensorboard.backend.event_processing import event_accumulator
+    except ImportError:
+        return []
+    by_step: dict[int, dict[str, float]] = {}
+    for path in events:
+        try:
+            accumulator = event_accumulator.EventAccumulator(
+                str(path), size_guidance={event_accumulator.SCALARS: 0}
+            )
+            accumulator.Reload()
+        except Exception:
+            continue
+        for tag in accumulator.Tags().get("scalars", []):
+            name = tag.rsplit("/", 1)[-1].lower()
+            if name not in EVAL_SCALARS or not tag.lower().startswith("eval"):
+                continue
+            for scalar in accumulator.Scalars(tag):
+                by_step.setdefault(int(scalar.step), {})[name] = float(scalar.value)
+    return [{"step": step, **values} for step, values in sorted(by_step.items())]
 
 
 def _artifact_record(path: Path, scene_path: Path, kind: str, version: str) -> ArtifactRecord:
@@ -641,19 +804,78 @@ def _preview_render_command(config: Path, preview: Path) -> list[str]:
     ]
 
 
+def resolve_publish_frame(
+    scene_path: Path, run: RunManifest, training_config: Path
+) -> dict[str, Any]:
+    """Work out the published orientation and the camera path, in the model's frame.
+
+    Nerfstudio's dataparser re-orients the scene using the mean camera up vector.
+    On a panoramic rig the eight views point in every direction, so that estimate
+    does not recover gravity and a fixed axis swap cannot correct it. The rig
+    itself does know: every perspective view was cut from a gravity-stabilised
+    panorama at a known pitch, so the capture reports its own vertical.
+    """
+    dataset = ensure_within(scene_path / (run.selected_dataset or ""), scene_path)
+    attempt = getattr(
+        run.config.reconstruction, "fallback" if run.fallback_attempted else "primary"
+    )
+    rotation_matrix, translation, scale = load_dataparser_transform(training_config)
+    up_colmap, gravity_metrics = rig_gravity(_selected_model_dir(dataset), attempt)
+
+    transforms_path = dataset / "transforms.json"
+    cameras_nerfstudio = camera_positions(transforms_path)
+    cameras_model = to_model_frame(cameras_nerfstudio, rotation_matrix, translation, scale)
+    gravity_metrics["pose_normalisation_peak"] = check_pose_normalisation(cameras_model)
+
+    up_model = rotation_matrix @ (applied_transform(transforms_path) @ up_colmap)
+    up_model = up_model / float(np.linalg.norm(up_model))
+    trajectory = trajectory_frame(cameras_model, up_model)
+    rotation = upright_rotation(up_model, trajectory["forward"])
+
+    published_cameras = cameras_model @ rotation.T
+    heights = published_cameras[:, 1]
+    height_ratio = float((heights.max() - heights.min()) / (2.0 * trajectory["radius"]))
+    if height_ratio > PUBLISHED_HEIGHT_SPAN_LIMIT:
+        raise RuntimeError(
+            f"Published cameras vary {height_ratio:.1%} in height across the capture, "
+            f"above the {PUBLISHED_HEIGHT_SPAN_LIMIT:.0%} limit; the vertical axis is wrong"
+        )
+    return {
+        "rotation": rotation,
+        "cameras_model": cameras_model,
+        "published_cameras": published_cameras,
+        "trajectory_radius": trajectory["radius"],
+        "dataparser": (rotation_matrix, translation, scale),
+        "metrics": {
+            **gravity_metrics,
+            "up_in_model_frame": [float(value) for value in up_model],
+            "published_height_span_ratio": height_ratio,
+            "published_height_span_limit": PUBLISHED_HEIGHT_SPAN_LIMIT,
+            "trajectory_radius": trajectory["radius"],
+        },
+    }
+
+
 def export_run(
     scene_path: Path,
     run: RunManifest,
     version: str = "v001",
     resume: bool = False,
+    cull: CullSettings | None = None,
 ) -> RunManifest:
     if not VERSION_PATTERN.match(version):
         raise ValueError("Artifact version must look like v001")
-    if not begin_stage(run, "export", resume=resume):
-        return run
-    save_run(scene_path, run)
     export_dir = scene_path / "exports" / version
     manifest_path = export_dir / "artifact.yaml"
+    # A version with nothing on disk has not been published, whatever the manifest
+    # remembers, so producing it adds artifacts rather than replacing any. That is
+    # what lets a finished run publish a differently culled version without
+    # retraining, and what lets a deleted export be regenerated. A version that does
+    # have files still hits the not-empty guard below.
+    republish = not (export_dir.is_dir() and any(export_dir.iterdir()))
+    if not begin_stage(run, "export", resume=resume, force=republish):
+        return run
+    save_run(scene_path, run)
     work = ensure_work_dir(scene_path, run.id)
     log_dir = work / "logs"
     try:
@@ -683,9 +905,24 @@ def export_run(
                 raise RuntimeError(
                     f"Expected one staged canonical PLY, found {len(canonical_ply)}"
                 )
+            frame = resolve_publish_frame(scene_path, run, config)
+            publish_metrics = dict(frame["metrics"])
             final_ply = export_dir / "splat-yup.ply"
             if not final_ply.is_file():
-                rotate_gaussian_ply_y_up(canonical_ply[0], final_ply)
+                spec = (
+                    CullSpec(
+                        cameras=frame["cameras_model"],
+                        trajectory_radius=frame["trajectory_radius"],
+                        distance_factor=cull.distance_factor,
+                        scale_factor=cull.scale_factor,
+                        max_removed_fraction=cull.max_removed_fraction,
+                    )
+                    if cull is not None and cull.enabled
+                    else None
+                )
+                publish_metrics.update(
+                    publish_gaussian_ply(canonical_ply[0], final_ply, frame["rotation"], spec)
+                )
             ply_files = [final_ply]
         else:
             ply_files = sorted(export_dir.glob("*.ply"))
@@ -731,15 +968,34 @@ def export_run(
             )
 
         dataset = ensure_within(scene_path / (run.selected_dataset or ""), scene_path)
-        transform_names = (
-            ("transforms.json",)
-            if y_up_export
-            else ("transforms.json", "dataparser_transforms.json")
-        )
-        for name in transform_names:
-            source = dataset / name
-            if source.is_file():
-                shutil.copy2(source, export_dir / name)
+        if y_up_export:
+            # The reconstruction's transforms.json is in COLMAP space, but the PLY
+            # comes out of training in the dataparser's normalised frame. Publishing
+            # both untouched hands over two files that cannot be overlaid, so the
+            # cameras are rewritten into the PLY's own frame and the raw pair is
+            # kept alongside for audit.
+            transform_names = (
+                "transforms.json",
+                "transforms-colmap.json",
+                "dataparser_transforms.json",
+            )
+            shutil.copy2(dataset / "transforms.json", export_dir / "transforms-colmap.json")
+            shutil.copy2(
+                Path(config).parent / "dataparser_transforms.json",
+                export_dir / "dataparser_transforms.json",
+            )
+            write_published_transforms(
+                dataset / "transforms.json",
+                export_dir / "transforms.json",
+                *frame["dataparser"],
+                frame["rotation"],
+            )
+        else:
+            transform_names = ("transforms.json", "dataparser_transforms.json")
+            for name in transform_names:
+                source = dataset / name
+                if source.is_file():
+                    shutil.copy2(source, export_dir / name)
 
         artifacts = [
             _artifact_record(ply_files[0], scene_path, "gaussian_ply", version),
@@ -757,7 +1013,43 @@ def export_run(
         export_metrics["gaussian_count_warning"] = (
             "below_2_million" if count < 2_000_000 else None
         )
-        run.artifacts = artifacts
+        if y_up_export:
+            cull_keys = {
+                "input_gaussians",
+                "published_gaussians",
+                "removed_total",
+                "removed_beyond_distance",
+                "removed_above_scale",
+                "removed_fraction",
+                "distance_factor",
+                "scale_factor",
+                "max_distance",
+                "max_scale",
+                "max_removed_fraction",
+                "camera_to_cloud_median",
+                "trajectory_radius",
+            }
+            export_metrics["cull"] = {
+                **(cull.as_metrics() if cull is not None else CullSettings(enabled=False).as_metrics()),
+                **{key: value for key, value in publish_metrics.items() if key in cull_keys},
+            }
+            export_metrics["publish_frame"] = {
+                key: value
+                for key, value in publish_metrics.items()
+                if key not in cull_keys and key != "rotation"
+            }
+            export_metrics["publish_frame"]["rotation"] = publish_metrics.get(
+                "rotation", [[float(v) for v in row] for row in frame["rotation"]]
+            )
+        # Versions accumulate: publishing v003 must not erase the v002 record.
+        kept = [item for item in run.artifacts if item.version != version]
+        run.artifacts = kept + artifacts
+        # The top-level block describes the newest export; the per-version copy is
+        # what each artifact manifest gets stamped with, so v002 keeps describing
+        # v002 after v003 is published.
+        export_metrics.setdefault("versions", {})[version] = {
+            key: value for key, value in export_metrics.items() if key != "versions"
+        }
         _record_resources(run, work, extra_path=export_dir)
         artifact_manifest = ArtifactManifest(
             location_id=run.location_id,
@@ -767,7 +1059,7 @@ def export_run(
             status=RunStatus.NEEDS_REVIEW,
             generated_at=utc_now(),
             artifacts=artifacts,
-            qa_metrics=run.metrics,
+            qa_metrics=metrics_for_version(run, version),
         )
         save_yaml(manifest_path, artifact_manifest)
         complete_stage(
@@ -935,6 +1227,63 @@ def write_qa_report(
             f"- PLY 轴向：`{run.metrics.get('export', {}).get('ply_axis', 'unknown')}`",
             "",
         ]
+        export_metrics = run.metrics.get("export", {})
+        cull_metrics = export_metrics.get("cull", {})
+        if cull_metrics.get("removed_total") is not None:
+            lines.extend(
+                [
+                    "## 外围高斯剔除",
+                    "",
+                    f"- 剔除总数：{int(cull_metrics['removed_total']):,} / "
+                    f"{int(cull_metrics['input_gaussians']):,}"
+                    f"（{float(cull_metrics['removed_fraction']):.2%}）",
+                    f"- 超出距离上限：{int(cull_metrics.get('removed_beyond_distance', 0)):,}"
+                    f"（> {float(cull_metrics.get('max_distance', 0)):.3f}）",
+                    f"- 超出尺度上限：{int(cull_metrics.get('removed_above_scale', 0)):,}"
+                    f"（> {float(cull_metrics.get('max_scale', 0)):.3f}）",
+                    f"- 剔除比例上限：{float(cull_metrics.get('max_removed_fraction', 0)):.2%}",
+                    "",
+                    "> 剔除只作用于发布产物，不改变训练结果；判据是到最近相机的距离与绝对尺度，"
+                    "不是不透明度——外围高斯球本身是完全不透明的。",
+                    "",
+                ]
+            )
+        frame_metrics = export_metrics.get("publish_frame", {})
+        if frame_metrics.get("up_vector") is not None:
+            lines.extend(
+                [
+                    "## 发布坐标系",
+                    "",
+                    f"- rig 恢复的重力方向逐图偏差：中位 "
+                    f"{float(frame_metrics.get('deviation_median_degrees', 0)):.2f}°、"
+                    f"p95 {float(frame_metrics.get('deviation_p95_degrees', 0)):.2f}°"
+                    f"（上限 {float(frame_metrics.get('deviation_limit_degrees', 0)):.1f}°）",
+                    f"- 发布后相机高度跨度占比："
+                    f"{float(frame_metrics.get('published_height_span_ratio', 0)):.2%}"
+                    f"（上限 {float(frame_metrics.get('published_height_span_limit', 0)):.0%}）",
+                    f"- 位姿归一化峰值："
+                    f"{float(frame_metrics.get('pose_normalisation_peak', 0)):.4f}（应约等于 1.0）",
+                    "",
+                ]
+            )
+        eval_curve = run.metrics.get("train", {}).get("eval_curve", [])
+        if eval_curve:
+            lines.extend(["## 训练评估曲线", "", "| 步数 | PSNR | SSIM | LPIPS |", "| ---: | ---: | ---: | ---: |"])
+            for point in eval_curve:
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        (
+                            f"{int(point['step']):,}",
+                            *(
+                                f"{point[name]:.4f}" if name in point else "-"
+                                for name in EVAL_SCALARS
+                            ),
+                        )
+                    )
+                    + " |"
+                )
+            lines.extend(["", "> 用于判断迭代步数的收益拐点；曲线走平之后的步数是可以省掉的。", ""])
         if int(snapshot["gaussian_count"]) < 2_000_000:
             lines.extend(
                 [
@@ -984,7 +1333,7 @@ def write_qa_report(
         for artifact_path in (scene_path / "exports").glob("*/artifact.yaml"):
             artifact = load_model(artifact_path, ArtifactManifest)
             if artifact.run_id == run.id:
-                artifact.qa_metrics = run.metrics
+                artifact.qa_metrics = metrics_for_version(run, artifact.version, artifact.qa_metrics)
                 artifact.status = RunStatus.NEEDS_REVIEW
                 save_yaml(artifact_path, artifact)
     except Exception as error:
