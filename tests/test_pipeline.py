@@ -9,9 +9,11 @@ from gsdb.pipeline import (
     _preview_render_command,
     _train_command,
     compare_quality_runs,
+    densification_schedule,
     metrics_for_version,
     preprocess_run,
     read_eval_curve,
+    training_image_count,
 )
 from gsdb.runs import begin_stage, create_run, load_run
 
@@ -280,3 +282,63 @@ def test_a_version_published_before_per_version_metrics_keeps_what_it_recorded()
     assert metrics_for_version(run, "v002", legacy)["export"] == legacy["export"]
     # With nothing to preserve, the block is simply absent rather than wrong.
     assert "export" not in metrics_for_version(run, "v002", None)
+
+
+def test_densification_schedule_reproduces_nerfstudio_defaults_at_the_baseline_size() -> None:
+    # The validated 90-second run is 135 frames x 8 views. Reproducing the upstream
+    # defaults exactly there means that run's behaviour is untouched.
+    assert densification_schedule(1080, 100_000) == {
+        "warmup_length": 500,
+        "stop_screen_size_at": 4000,
+        "stop_split_at": 15000,
+    }
+
+
+def test_densification_schedule_holds_per_view_coverage_as_a_scene_grows() -> None:
+    baseline = densification_schedule(1080, 100_000)
+    baseline_passes = baseline["stop_split_at"] / 1080
+    for images in (2160, 2520, 5128):
+        schedule = densification_schedule(images, 100_000)
+        assert schedule["stop_split_at"] / images == pytest.approx(baseline_passes, rel=1e-3)
+    # The 427-second capture is the case this exists for.
+    assert densification_schedule(5128, 100_000)["stop_split_at"] == 71_222
+
+
+def test_densification_always_leaves_a_refinement_tail() -> None:
+    # A dataset large enough to want more splitting steps than the run has must
+    # still stop splitting before the end, or nothing ever gets refined.
+    schedule = densification_schedule(100_000, 10_000)
+    assert schedule["stop_split_at"] <= 7_500
+    assert schedule["stop_screen_size_at"] < schedule["stop_split_at"]
+    assert schedule["warmup_length"] < schedule["stop_screen_size_at"]
+    with pytest.raises(ValueError, match="must be positive"):
+        densification_schedule(0, 100_000)
+
+
+def test_densification_ordering_survives_a_tiny_smoke_run() -> None:
+    schedule = densification_schedule(320, 5_000)
+    assert schedule["warmup_length"] < schedule["stop_screen_size_at"] < schedule["stop_split_at"]
+    assert schedule["stop_split_at"] < 5_000
+
+
+def test_train_command_scales_densification_with_the_configured_view_count() -> None:
+    run = _run()
+    run.config.reconstruction.primary.frame_count = 641
+    command = _train_command(run, Path("/data"), Path("/out"))
+    assert command[command.index("--pipeline.model.stop-split-at") + 1] == "71222"
+    assert command[command.index("--pipeline.model.stop-screen-size-at") + 1] == "18993"
+    assert command[command.index("--pipeline.model.warmup-length") + 1] == "2374"
+    # The baseline configuration still emits the upstream defaults.
+    baseline = _train_command(_run(), Path("/data"), Path("/out"))
+    assert baseline[baseline.index("--pipeline.model.stop-split-at") + 1] == "15000"
+
+
+def test_training_image_count_comes_from_configuration_not_from_reconstruction() -> None:
+    run = _run()
+    assert training_image_count(run) == 135 * 8
+    # Registered-image counts vary with how reconstruction went; the schedule must
+    # not depend on them or one config hash would stop meaning one model.
+    run.metrics["reconstruction"] = {"primary": {"registered_images": 1067}}
+    assert training_image_count(run) == 1080
+    run.fallback_attempted = True
+    assert training_image_count(run) == 180 * 14

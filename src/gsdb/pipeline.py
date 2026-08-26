@@ -73,6 +73,63 @@ VERSION_PATTERN = re.compile(r"^v\d{3}$")
 PUBLISHED_HEIGHT_SPAN_LIMIT = 0.10
 
 
+# Splatfacto's densification schedule is written in steps, but what actually
+# matters is how many times each training view is sampled before splitting stops.
+# Nerfstudio's defaults were tuned on datasets around this size, and the validated
+# 90-second run happens to sit exactly here (135 frames x 8 views), so the defaults
+# are reproduced unchanged at this count and scaled from it.
+DENSIFICATION_BASELINE_IMAGES = 1080
+DENSIFICATION_BASELINE_STEPS = {
+    "warmup_length": 500,
+    "stop_screen_size_at": 4000,
+    "stop_split_at": 15000,
+}
+# Densification must always leave a refinement tail, however large the dataset.
+DENSIFICATION_MAX_FRACTION = 0.75
+
+
+def densification_schedule(image_count: int, max_iterations: int) -> dict[str, int]:
+    """Step bounds that keep densification coverage constant as a scene grows.
+
+    A 427-second capture is 5,128 perspective views against the baseline's 1,080.
+    Left at the default 15,000 steps, splitting would stop after each view had been
+    sampled 2.8 times instead of 13.4, so most of the scene would never accumulate
+    enough positional gradient to densify at all -- the geometry would not be
+    under-refined, it would be missing. Scaling the schedule with the view count
+    keeps the per-view budget that the defaults assume.
+    """
+    if image_count < 1:
+        raise ValueError(f"Image count must be positive, got {image_count}")
+    ratio = image_count / DENSIFICATION_BASELINE_IMAGES
+    schedule = {
+        name: max(1, round(steps * ratio))
+        for name, steps in DENSIFICATION_BASELINE_STEPS.items()
+    }
+    schedule["stop_split_at"] = min(
+        schedule["stop_split_at"], max(1, int(max_iterations * DENSIFICATION_MAX_FRACTION))
+    )
+    schedule["stop_screen_size_at"] = min(
+        schedule["stop_screen_size_at"], max(1, schedule["stop_split_at"] - 1)
+    )
+    schedule["warmup_length"] = min(
+        schedule["warmup_length"], max(1, schedule["stop_screen_size_at"] - 1)
+    )
+    return schedule
+
+
+def training_image_count(run: RunManifest) -> int:
+    """Views the training set will hold, from configuration alone.
+
+    Deliberately not the registered-image count: that depends on how
+    reconstruction went, and the schedule must stay a pure function of the hashed
+    configuration so one config hash still means one model.
+    """
+    attempt = getattr(
+        run.config.reconstruction, "fallback" if run.fallback_attempted else "primary"
+    )
+    return int(attempt.frame_count) * int(attempt.images_per_equirect)
+
+
 @dataclass(frozen=True)
 class TrainSettings:
     """Instrumentation around training that does not change what is learned.
@@ -599,6 +656,13 @@ def _train_command(
             "--viewer.quit-on-train-completion",
             "True",
             *settings.command_arguments(),
+            *(
+                argument
+                for name, value in densification_schedule(
+                    training_image_count(run), run.config.train.max_iterations
+                ).items()
+                for argument in (f"--pipeline.model.{name.replace('_', '-')}", str(value))
+            ),
             "--pipeline.datamanager.cache-images",
             run.config.train.cache_images,
             "--pipeline.datamanager.cache-images-type",
@@ -694,6 +758,12 @@ def train_run(
             raise RuntimeError("Training finished without producing config.yml")
         run.metrics.setdefault("train", {})["config_path"] = selected_config.relative_to(scene_path).as_posix()
         run.metrics["train"]["instrumentation"] = settings.as_metrics()
+        run.metrics["train"]["densification"] = {
+            "training_images": training_image_count(run),
+            **densification_schedule(
+                training_image_count(run), run.config.train.max_iterations
+            ),
+        }
         run.metrics["train"]["eval_curve"] = read_eval_curve(selected_config.parent)
         run.metrics["train"]["checkpoints"] = sorted(
             int(match.group(1))
