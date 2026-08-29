@@ -1,0 +1,8 @@
+--- a/nerfstudio/data/dataparsers/nerfstudio_dataparser.py
++++ b/nerfstudio/data/dataparsers/nerfstudio_dataparser.py
+@@
+         if self.downscale_factor > 1:
+-            return data_dir / f"{downsample_folder_prefix}{self.downscale_factor}" / filepath.name
++            relative = Path(*filepath.parts[1:])
++            return data_dir / f"{downsample_folder_prefix}{self.downscale_factor}" / relative
+         return data_dir / filepath

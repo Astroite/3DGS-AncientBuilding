@@ -305,6 +305,7 @@ def preprocess(
             config = RunConfig(
                 capture_id=capture_id,
                 input_sha256=capture.stitched_video.sha256,
+                preprocess={"target_frames": target_frames},
                 masking={
                     "device": mask_device,
                     "score_threshold": mask_score_threshold,
@@ -334,7 +335,6 @@ def preprocess(
                     },
                 },
             )
-            config.preprocess.target_frames = target_frames
             if train_iterations is not None:
                 config.train.max_iterations = train_iterations
             run = create_run(path, location_id, scene_id, config)
@@ -428,6 +428,16 @@ def export_command(
         float,
         typer.Option(help="Refuse to publish if culling would remove more than this"),
     ] = 0.05,
+    allow_unsafe_publish_frame: Annotated[
+        bool,
+        typer.Option(
+            "--allow-unsafe-publish-frame",
+            help=(
+                "Explicitly bypass publish-frame gravity/height gates and mark the "
+                "artifact as requiring manual review"
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Export PLY, preview, thumbnail, transforms, and artifact manifest.
 
@@ -447,6 +457,7 @@ def export_command(
                 scale_factor=cull_scale_factor,
                 max_removed_fraction=cull_max_removed_fraction,
             ),
+            allow_unsafe_publish_frame=allow_unsafe_publish_frame,
         )
         published = run.metrics.get("export", {}).get("cull", {})
         console.print(f"Run [green]{run.id}[/green]: artifacts={len(run.artifacts)}")
@@ -456,6 +467,12 @@ def export_command(
                 f"{published['input_gaussians']:,} Gaussians "
                 f"({published['removed_fraction']:.2%}); published "
                 f"{published['published_gaussians']:,}"
+            )
+        publish_frame = run.metrics.get("export", {}).get("publish_frame", {})
+        if publish_frame.get("manual_review_required"):
+            console.print(
+                "[bold red]UNSAFE PUBLISH FRAME: manual viewer review is required; "
+                "see UNSAFE-PUBLISH-FRAME.txt[/bold red]"
             )
     except Exception as error:
         _fatal(error)

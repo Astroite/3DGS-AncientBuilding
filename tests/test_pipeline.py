@@ -6,8 +6,12 @@ from gsdb.models import ArtifactRecord, RunConfig, RunManifest, StageRecord, Sta
 from gsdb.pipeline import (
     CullSettings,
     TrainSettings,
+    _find_completed_training_config,
+    _log_reports_nested_downscale_path_failure,
+    _log_reports_memory_exhaustion,
     _preview_render_command,
     _train_command,
+    _unsafe_publish_marker,
     compare_quality_runs,
     densification_schedule,
     metrics_for_version,
@@ -51,6 +55,50 @@ def test_train_retry_uses_nerfstudio_dataparser_downscale() -> None:
     }
     for option, value in expected_options.items():
         assert command[command.index(option) + 1] == value
+
+
+def test_training_config_is_complete_only_when_the_final_checkpoint_exists(
+    tmp_path: Path,
+) -> None:
+    training = tmp_path / "attempt" / "unnamed" / "splatfacto" / "run"
+    checkpoints = training / "nerfstudio_models"
+    checkpoints.mkdir(parents=True)
+    config = training / "config.yml"
+    config.write_text("config\n", encoding="utf-8")
+
+    assert _find_completed_training_config(tmp_path / "attempt", 100_000) is None
+    (checkpoints / "step-000010000.ckpt").write_bytes(b"partial")
+    assert _find_completed_training_config(tmp_path / "attempt", 100_000) is None
+    (checkpoints / "step-000099999.ckpt").write_bytes(b"complete")
+    assert _find_completed_training_config(tmp_path / "attempt", 100_000) == config
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "RuntimeError: CUDA out of memory",
+        "OSError: [Errno 12] Cannot allocate memory",
+        "allocator failed with std::bad_alloc",
+    ],
+)
+def test_training_retry_recognizes_gpu_and_cpu_memory_exhaustion(
+    tmp_path: Path, message: str
+) -> None:
+    log = tmp_path / "train.log"
+    log.write_text(message, encoding="utf-8")
+    assert _log_reports_memory_exhaustion(log)
+
+
+def test_training_retry_recognizes_nerfstudio_nested_downscale_path_bug(
+    tmp_path: Path,
+) -> None:
+    log = tmp_path / "train.log"
+    log.write_text(
+        "FileNotFoundError: [Errno 2] No such file or directory: "
+        "'/data/images_2/frame_000001.jpg'",
+        encoding="utf-8",
+    )
+    assert _log_reports_nested_downscale_path_failure(log)
 
 
 def test_preview_render_uses_full_image_datamanager_compatible_path() -> None:
@@ -184,6 +232,24 @@ def test_cull_settings_report_themselves_for_the_artifact_manifest() -> None:
         "max_removed_fraction": 0.05,
     }
     assert CullSettings(enabled=False).as_metrics()["enabled"] is False
+
+
+def test_unsafe_publish_marker_is_unmistakable_and_preserves_gate_evidence() -> None:
+    run = _run()
+    metrics = {
+        "manual_review_required": True,
+        "deviation_p95_degrees": 5.2594,
+        "published_height_span_ratio": 0.1398,
+        "safety_warnings": ["gravity gate failed", "height gate failed"],
+    }
+
+    marker = _unsafe_publish_marker(run, "v001", metrics)
+
+    assert "UNSAFE PUBLISH FRAME - MANUAL REVIEW REQUIRED" in marker
+    assert run.id in marker
+    assert "gravity gate failed" in marker
+    assert "height gate failed" in marker
+    assert '"deviation_p95_degrees": 5.2594' in marker
 
 
 def test_eval_curve_is_optional_instrumentation_not_a_hard_dependency(tmp_path: Path) -> None:

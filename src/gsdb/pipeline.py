@@ -71,6 +71,7 @@ VERSION_PATTERN = re.compile(r"^v\d{3}$")
 # A walking capture holds a near-constant camera height, so a large spread along
 # the published vertical means the axis is wrong rather than the path steep.
 PUBLISHED_HEIGHT_SPAN_LIMIT = 0.10
+UNSAFE_PUBLISH_MARKER = "UNSAFE-PUBLISH-FRAME.txt"
 
 
 # Splatfacto's densification schedule is written in steps, but what actually
@@ -631,9 +632,61 @@ def reconstruct_run(scene_path: Path, run: RunManifest, resume: bool = False) ->
     return run
 
 
+def _training_checkpoint_steps(config: Path) -> list[int]:
+    return sorted(
+        int(match.group(1))
+        for path in (config.parent / "nerfstudio_models").glob("step-*.ckpt")
+        if (match := re.search(r"step-(\d+)\.ckpt$", path.name))
+    )
+
+
 def _find_training_config(output: Path) -> Path | None:
     configs = sorted(output.rglob("config.yml"), key=lambda item: item.stat().st_mtime)
     return configs[-1] if configs else None
+
+
+def _find_completed_training_config(output: Path, max_iterations: int) -> Path | None:
+    """Newest config whose final checkpoint proves training actually completed.
+
+    Nerfstudio writes ``config.yml`` before it loads the first image. Treating that
+    file alone as completion made ``--resume`` accept a run that had failed while
+    filling the CPU image cache. The trainer's final checkpoint is written at
+    ``max_iterations - 1`` (for example step 29,999 on a 30,000-step run), so it is
+    the durable completion marker we need here.
+    """
+    final_step = max_iterations - 1
+    configs = sorted(
+        output.rglob("config.yml"), key=lambda item: item.stat().st_mtime, reverse=True
+    )
+    return next(
+        (config for config in configs if final_step in _training_checkpoint_steps(config)),
+        None,
+    )
+
+
+def _log_reports_memory_exhaustion(log_path: Path) -> bool:
+    if not log_path.is_file():
+        return False
+    content = log_path.read_text(encoding="utf-8", errors="replace").lower()
+    return any(
+        marker in content
+        for marker in (
+            "out of memory",
+            "cannot allocate memory",
+            "errno 12",
+            "std::bad_alloc",
+        )
+    )
+
+
+def _log_reports_nested_downscale_path_failure(log_path: Path) -> bool:
+    """Nerfstudio 1.1.5 discarded view subdirectories for downscaled images."""
+    if not log_path.is_file():
+        return False
+    content = log_path.read_text(encoding="utf-8", errors="replace").lower()
+    return "filenotfounderror" in content and re.search(
+        r"images_\d+[/\\]frame_\d+\.(?:jpg|jpeg|png)", content
+    ) is not None
 
 
 def _train_command(
@@ -715,47 +768,92 @@ def train_run(
     training_root = work / "training"
     attempt_one = training_root / "attempt-1"
     log_one = work / "logs" / "train-attempt-1.log"
-    selected_config: Path | None = _find_training_config(attempt_one)
+    attempt_two = training_root / "attempt-2-downscaled"
+    log_two = work / "logs" / "train-attempt-2.log"
+    path_fix_attempt = training_root / "attempt-2-downscaled-path-fix"
+    path_fix_log = work / "logs" / "train-attempt-2-path-fix.log"
+    max_iterations = run.config.train.max_iterations
+    selected_config = _find_completed_training_config(path_fix_attempt, max_iterations)
+    selected_config = selected_config or _find_completed_training_config(
+        attempt_two, max_iterations
+    )
+    selected_config = selected_config or _find_completed_training_config(
+        attempt_one, max_iterations
+    )
     try:
         if selected_config is None:
-            try:
-                train_metrics = run_logged(
-                    _train_command(run, dataset, attempt_one, settings=settings),
-                    log_one,
-                    monitor_gpu=True,
+            retry_for_memory = _log_reports_memory_exhaustion(log_one)
+            incomplete_attempt_one = _find_training_config(attempt_one)
+            incomplete_attempt_two = _find_training_config(attempt_two)
+            incomplete_path_fix = _find_training_config(path_fix_attempt)
+            retry_output = attempt_two
+            retry_log = log_two
+            retry_name = "attempt-2-downscaled"
+            if incomplete_path_fix is not None:
+                raise RuntimeError(
+                    "The nested-path-fixed downscaled retry has an incomplete checkpoint "
+                    "set; automatic resume is not safe"
                 )
-                run.metrics.setdefault("train", {}).setdefault("attempts", []).append(
-                    {"name": "attempt-1", **train_metrics}
+            if incomplete_attempt_two is not None:
+                if _log_reports_nested_downscale_path_failure(log_two):
+                    # Preserve the failed retry and its log. The environment patch now
+                    # keeps view_XX in images_2/view_XX/frame.jpg, so a fresh timestamp
+                    # in a distinct output root is deterministic and safe.
+                    retry_output = path_fix_attempt
+                    retry_log = path_fix_log
+                    retry_name = "attempt-2-downscaled-path-fix"
+                else:
+                    raise RuntimeError(
+                        "The downscaled training retry has an incomplete checkpoint set; "
+                        "automatic resume is not safe"
+                    )
+            if incomplete_attempt_one is not None and not retry_for_memory:
+                raise RuntimeError(
+                    "Training has an incomplete checkpoint set and did not fail from "
+                    "memory exhaustion; automatic resume is not safe"
                 )
-            except CommandError as command_error:
-                run.metrics.setdefault("train", {}).setdefault("attempts", []).append(
-                    {"name": "attempt-1", **command_error.metrics}
-                )
-                content = log_one.read_text(encoding="utf-8", errors="replace")
-                if "out of memory" not in content.lower():
-                    raise
-                attempt_two = training_root / "attempt-2-downscaled"
-                log_two = work / "logs" / "train-attempt-2.log"
+            if not retry_for_memory:
+                try:
+                    train_metrics = run_logged(
+                        _train_command(run, dataset, attempt_one, settings=settings),
+                        log_one,
+                        monitor_gpu=True,
+                    )
+                    run.metrics.setdefault("train", {}).setdefault("attempts", []).append(
+                        {"name": "attempt-1", **train_metrics}
+                    )
+                except CommandError as command_error:
+                    run.metrics.setdefault("train", {}).setdefault("attempts", []).append(
+                        {"name": "attempt-1", **command_error.metrics}
+                    )
+                    if not _log_reports_memory_exhaustion(log_one):
+                        raise
+                    retry_for_memory = True
+                else:
+                    selected_config = _find_completed_training_config(
+                        attempt_one, max_iterations
+                    )
+            if retry_for_memory:
                 retry_metrics = run_logged(
                     _train_command(
                         run,
                         dataset,
-                        attempt_two,
+                        retry_output,
                         downscale=run.config.train.oom_retry_downscale,
                         settings=settings,
                     ),
-                    log_two,
+                    retry_log,
                     monitor_gpu=True,
                 )
                 run.metrics.setdefault("train", {}).setdefault("attempts", []).append(
-                    {"name": "attempt-2-downscaled", **retry_metrics}
+                    {"name": retry_name, **retry_metrics}
                 )
-                selected_config = _find_training_config(attempt_two)
+                selected_config = _find_completed_training_config(
+                    retry_output, max_iterations
+                )
                 run.metrics.setdefault("train", {})["oom_retry"] = True
-            else:
-                selected_config = _find_training_config(attempt_one)
         if selected_config is None:
-            raise RuntimeError("Training finished without producing config.yml")
+            raise RuntimeError("Training finished without producing its final checkpoint")
         run.metrics.setdefault("train", {})["config_path"] = selected_config.relative_to(scene_path).as_posix()
         run.metrics["train"]["instrumentation"] = settings.as_metrics()
         run.metrics["train"]["densification"] = {
@@ -765,11 +863,7 @@ def train_run(
             ),
         }
         run.metrics["train"]["eval_curve"] = read_eval_curve(selected_config.parent)
-        run.metrics["train"]["checkpoints"] = sorted(
-            int(match.group(1))
-            for path in (selected_config.parent / "nerfstudio_models").glob("step-*.ckpt")
-            if (match := re.search(r"step-(\d+)\.ckpt$", path.name))
-        )
+        run.metrics["train"]["checkpoints"] = _training_checkpoint_steps(selected_config)
         attempts = run.metrics.get("train", {}).get("attempts", [])
         for item in attempts:
             _record_resources(run, work, item)
@@ -875,7 +969,10 @@ def _preview_render_command(config: Path, preview: Path) -> list[str]:
 
 
 def resolve_publish_frame(
-    scene_path: Path, run: RunManifest, training_config: Path
+    scene_path: Path,
+    run: RunManifest,
+    training_config: Path,
+    allow_unsafe: bool = False,
 ) -> dict[str, Any]:
     """Work out the published orientation and the camera path, in the model's frame.
 
@@ -890,7 +987,12 @@ def resolve_publish_frame(
         run.config.reconstruction, "fallback" if run.fallback_attempted else "primary"
     )
     rotation_matrix, translation, scale = load_dataparser_transform(training_config)
-    up_colmap, gravity_metrics = rig_gravity(_selected_model_dir(dataset), attempt)
+    up_colmap, gravity_metrics = rig_gravity(
+        _selected_model_dir(dataset), attempt, allow_unsafe=allow_unsafe
+    )
+    safety_warnings = []
+    if warning := gravity_metrics.get("deviation_warning"):
+        safety_warnings.append(str(warning))
 
     transforms_path = dataset / "transforms.json"
     cameras_nerfstudio = camera_positions(transforms_path)
@@ -905,11 +1007,15 @@ def resolve_publish_frame(
     published_cameras = cameras_model @ rotation.T
     heights = published_cameras[:, 1]
     height_ratio = float((heights.max() - heights.min()) / (2.0 * trajectory["radius"]))
-    if height_ratio > PUBLISHED_HEIGHT_SPAN_LIMIT:
-        raise RuntimeError(
+    height_gate_passed = height_ratio <= PUBLISHED_HEIGHT_SPAN_LIMIT
+    if not height_gate_passed:
+        warning = (
             f"Published cameras vary {height_ratio:.1%} in height across the capture, "
             f"above the {PUBLISHED_HEIGHT_SPAN_LIMIT:.0%} limit; the vertical axis is wrong"
         )
+        if not allow_unsafe:
+            raise RuntimeError(warning)
+        safety_warnings.append(warning)
     return {
         "rotation": rotation,
         "cameras_model": cameras_model,
@@ -921,9 +1027,39 @@ def resolve_publish_frame(
             "up_in_model_frame": [float(value) for value in up_model],
             "published_height_span_ratio": height_ratio,
             "published_height_span_limit": PUBLISHED_HEIGHT_SPAN_LIMIT,
+            "published_height_gate_passed": height_gate_passed,
+            "unsafe_override_requested": allow_unsafe,
+            "manual_review_required": bool(safety_warnings),
+            "safety_warnings": safety_warnings,
             "trajectory_radius": trajectory["radius"],
         },
     }
+
+
+def _unsafe_publish_marker(
+    run: RunManifest, version: str, publish_metrics: dict[str, Any]
+) -> str:
+    """Human-readable stop sign placed beside every deliberately unsafe export."""
+    warnings = publish_metrics.get("safety_warnings", [])
+    lines = [
+        "UNSAFE PUBLISH FRAME - MANUAL REVIEW REQUIRED",
+        "=============================================",
+        "",
+        f"Run: {run.id}",
+        f"Version: {version}",
+        "",
+        "This export explicitly bypassed publish-frame safety gates.",
+        "Do not accept or distribute it until a viewer confirms orientation,",
+        "camera alignment, scale, and scene usability.",
+        "",
+        "Triggered safety warnings:",
+        *(f"- {warning}" for warning in warnings),
+        "",
+        "Measured publish-frame metrics:",
+        json.dumps(publish_metrics, indent=2, ensure_ascii=False, sort_keys=True),
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def export_run(
@@ -932,6 +1068,7 @@ def export_run(
     version: str = "v001",
     resume: bool = False,
     cull: CullSettings | None = None,
+    allow_unsafe_publish_frame: bool = False,
 ) -> RunManifest:
     if not VERSION_PATTERN.match(version):
         raise ValueError("Artifact version must look like v001")
@@ -975,7 +1112,12 @@ def export_run(
                 raise RuntimeError(
                     f"Expected one staged canonical PLY, found {len(canonical_ply)}"
                 )
-            frame = resolve_publish_frame(scene_path, run, config)
+            frame = resolve_publish_frame(
+                scene_path,
+                run,
+                config,
+                allow_unsafe=allow_unsafe_publish_frame,
+            )
             publish_metrics = dict(frame["metrics"])
             final_ply = export_dir / "splat-yup.ply"
             if not final_ply.is_file():
@@ -1060,6 +1202,11 @@ def export_run(
                 *frame["dataparser"],
                 frame["rotation"],
             )
+            if frame["metrics"].get("manual_review_required"):
+                (export_dir / UNSAFE_PUBLISH_MARKER).write_text(
+                    _unsafe_publish_marker(run, version, frame["metrics"]),
+                    encoding="utf-8",
+                )
         else:
             transform_names = ("transforms.json", "dataparser_transforms.json")
             for name in transform_names:
@@ -1076,6 +1223,11 @@ def export_run(
             target = export_dir / name
             if target.is_file():
                 artifacts.append(_artifact_record(target, scene_path, name.removesuffix(".json"), version))
+        unsafe_marker = export_dir / UNSAFE_PUBLISH_MARKER
+        if unsafe_marker.is_file():
+            artifacts.append(
+                _artifact_record(unsafe_marker, scene_path, "safety_warning", version)
+            )
         count = gaussian_count(ply_files[0])
         export_metrics = run.metrics.setdefault("export", {})
         export_metrics["gaussian_count"] = count

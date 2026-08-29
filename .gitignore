@@ -52,3 +52,6 @@ locations/*/scenes/*/exports/**
 !locations/*/scenes/*/exports/*/preview.mp4
 !locations/*/scenes/*/exports/*/thumbnail.jpg
 !locations/*/scenes/*/exports/*/transforms.json
+!locations/*/scenes/*/exports/*/transforms-colmap.json
+!locations/*/scenes/*/exports/*/dataparser_transforms.json
+!locations/*/scenes/*/exports/*/UNSAFE-PUBLISH-FRAME.txt

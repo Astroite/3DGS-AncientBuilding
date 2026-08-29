@@ -92,7 +92,9 @@ def applied_transform(transforms_path: Path) -> np.ndarray:
     return np.asarray(payload["applied_transform"], dtype=np.float64)[:3, :3]
 
 
-def rig_gravity(model_dir: Path, attempt: Any) -> tuple[np.ndarray, dict[str, float]]:
+def rig_gravity(
+    model_dir: Path, attempt: Any, allow_unsafe: bool = False
+) -> tuple[np.ndarray, dict[str, Any]]:
     """Recover the capture's vertical in COLMAP space from the panorama rig.
 
     Every perspective view was cut from a gravity-stabilised equirectangular frame
@@ -125,13 +127,20 @@ def rig_gravity(model_dir: Path, attempt: Any) -> tuple[np.ndarray, dict[str, fl
         "deviation_max_degrees": float(angles.max()),
         "deviation_limit_degrees": MAX_GRAVITY_DEVIATION_DEGREES,
     }
-    if metrics["deviation_p95_degrees"] > MAX_GRAVITY_DEVIATION_DEGREES:
-        raise RuntimeError(
+    deviation_passed = (
+        metrics["deviation_p95_degrees"] <= MAX_GRAVITY_DEVIATION_DEGREES
+    )
+    metrics["deviation_gate_passed"] = deviation_passed
+    if not deviation_passed:
+        warning = (
             "Per-frame rig verticals disagree by "
             f"{metrics['deviation_p95_degrees']:.2f} degrees at p95, above the "
             f"{MAX_GRAVITY_DEVIATION_DEGREES} degree limit; the source panoramas are "
             "not gravity-stabilised and the published axis would be wrong"
         )
+        metrics["deviation_warning"] = warning
+        if not allow_unsafe:
+            raise RuntimeError(warning)
     return up, metrics
 
 
