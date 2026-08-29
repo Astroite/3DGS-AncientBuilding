@@ -24,6 +24,7 @@ from gsdb.reconstruction import (
     center_spread_metrics,
     cross_view_pair_names,
     interleaved_image_names,
+    latest_mapper_snapshot,
     pinhole_camera_parameters,
     pyramid_level_marker,
     select_colmap_attempt,
@@ -74,6 +75,29 @@ def test_colmap_commands_use_gpu_fixed_intrinsics_rig_cameras_and_image_list(
     assert cross_view[1] == "matches_importer"
     assert cross_view[cross_view.index("--match_type") + 1] == "pairs"
     assert cross_view[cross_view.index("--SiftMatching.gpu_index") + 1] == "0"
+    fresh_mapping = commands["mapping"]
+    assert fresh_mapping[fresh_mapping.index("--output_path") + 1] == str(
+        dataset / "colmap" / "attempt-001" / "sparse"
+    )
+    assert "--input_path" not in fresh_mapping
+    assert fresh_mapping[fresh_mapping.index("--Mapper.snapshot_path") + 1] == str(
+        dataset / "colmap" / "attempt-001" / "snapshots"
+    )
+    assert int(fresh_mapping[fresh_mapping.index("--Mapper.snapshot_images_freq") + 1]) > 0
+    # Global BA ran to the 50-iteration cap on every trigger because COLMAP leaves the
+    # cost-based convergence test switched off; these are the knobs that stop it.
+    assert float(
+        fresh_mapping[fresh_mapping.index("--Mapper.ba_global_function_tolerance") + 1]
+    ) > 0
+    assert int(
+        fresh_mapping[fresh_mapping.index("--Mapper.ba_global_max_refinements") + 1]
+    ) < 5
+    assert float(
+        fresh_mapping[fresh_mapping.index("--Mapper.ba_global_images_ratio") + 1]
+    ) > 1.1
+    # The frequency triggers are independent of the ratio and become the binding one
+    # if they stay at their defaults.
+    assert int(fresh_mapping[fresh_mapping.index("--Mapper.ba_global_images_freq") + 1]) > 500
     retry_commands = build_colmap_commands(
         dataset, attempt, ReconstructionConfig(), mapper_num_threads=1
     )
@@ -281,7 +305,104 @@ def test_center_spread_gate_excludes_frames_without_reference_camera() -> None:
     assert metrics["median_interframe_baseline"] == pytest.approx(1.0)
 
 
+def _mapper_snapshot(attempt_dir: Path, name: str, image_count: int) -> Path:
+    snapshot = attempt_dir / "snapshots" / name
+    snapshot.mkdir(parents=True, exist_ok=True)
+    (snapshot / "cameras.bin").write_bytes(b"cameras")
+    (snapshot / "points3D.bin").write_bytes(b"points")
+    (snapshot / "images.bin").write_bytes(image_count.to_bytes(8, "little") + b"payload")
+    return snapshot
+
+
+def test_mapper_snapshot_selection_prefers_registered_count_over_directory_name(
+    tmp_path: Path,
+) -> None:
+    attempt_dir = tmp_path / "attempt-001"
+    _mapper_snapshot(attempt_dir, "500", 500)
+    furthest = _mapper_snapshot(attempt_dir, "1000", 1000)
+    (attempt_dir / "snapshots" / "partial").mkdir()
+
+    assert latest_mapper_snapshot(attempt_dir) == furthest
+    assert latest_mapper_snapshot(tmp_path / "attempt-002") is None
+
+
+def test_colmap_mapper_retry_keeps_all_threads_and_resumes_after_a_snapshot(
+    tmp_path: Path,
+) -> None:
+    colmap_root = tmp_path / "colmap"
+    attempt_dir = colmap_root / "attempt-001"
+    (attempt_dir / "sparse").mkdir(parents=True)
+    (attempt_dir / ".features-complete").write_text("complete\n", encoding="utf-8")
+    (attempt_dir / ".matching-complete").write_text("complete\n", encoding="utf-8")
+    snapshot = _mapper_snapshot(attempt_dir, "2500", 2500)
+
+    selected, mapper_num_threads = select_colmap_attempt(colmap_root)
+
+    assert selected == attempt_dir
+    # A mapper that snapshotted was working; it was killed from outside, and one
+    # thread would be the wrong answer to that.
+    assert mapper_num_threads is None
+    assert latest_mapper_snapshot(selected) == snapshot
+
+
+def test_resumed_mapping_command_continues_the_snapshot_into_a_component_directory(
+    tmp_path: Path,
+) -> None:
+    dataset = tmp_path / "dataset"
+    (dataset / "images" / "view_00").mkdir(parents=True)
+    (dataset / "masks").mkdir()
+    assert cv2.imwrite(
+        str(dataset / "images" / "view_00" / "frame_000001.jpg"),
+        np.zeros((100, 100, 3), dtype=np.uint8),
+    )
+    attempt_dir = dataset / "colmap" / "attempt-001"
+    snapshot = _mapper_snapshot(attempt_dir, "2500", 2500)
+    (attempt_dir / ".features-complete").write_text("complete\n", encoding="utf-8")
+    (attempt_dir / ".matching-complete").write_text("complete\n", encoding="utf-8")
+
+    commands = build_colmap_commands(
+        dataset,
+        _attempt(),
+        ReconstructionConfig(),
+        attempt_dir,
+        mapper_input_path=snapshot,
+    )
+
+    mapping = commands["mapping"]
+    assert mapping[mapping.index("--input_path") + 1] == str(snapshot)
+    # COLMAP writes a continued model flat into --output_path, so the resumed run has
+    # to name the component directory that _colmap_components looks for, and it has to
+    # exist before the mapper starts.
+    assert mapping[mapping.index("--output_path") + 1] == str(
+        attempt_dir / "sparse" / "0"
+    )
+    assert (attempt_dir / "sparse" / "0").is_dir()
+    # The empty component directory must not read as output worth preserving, or the
+    # next retry throws away hours of completed features and matches.
+    selected, mapper_num_threads = select_colmap_attempt(dataset / "colmap")
+    assert selected == attempt_dir
+    assert mapper_num_threads is None
+
+
 def test_colmap_mapper_retry_reuses_completed_database_single_threaded(
+    tmp_path: Path,
+) -> None:
+    colmap_root = tmp_path / "colmap"
+    attempt_dir = colmap_root / "attempt-001"
+    (attempt_dir / "sparse").mkdir(parents=True)
+    # An empty snapshot directory is what a mapper that died before its first 500
+    # registrations leaves behind, which is the shape of a reproducible crash.
+    (attempt_dir / "snapshots").mkdir(parents=True)
+    (attempt_dir / ".features-complete").write_text("complete\n", encoding="utf-8")
+    (attempt_dir / ".matching-complete").write_text("complete\n", encoding="utf-8")
+
+    selected, mapper_num_threads = select_colmap_attempt(colmap_root)
+
+    assert selected == attempt_dir
+    assert mapper_num_threads == 1
+
+
+def test_colmap_mapper_retry_keeps_all_threads_for_an_attempt_that_predates_snapshots(
     tmp_path: Path,
 ) -> None:
     colmap_root = tmp_path / "colmap"
@@ -293,7 +414,8 @@ def test_colmap_mapper_retry_reuses_completed_database_single_threaded(
     selected, mapper_num_threads = select_colmap_attempt(colmap_root)
 
     assert selected == attempt_dir
-    assert mapper_num_threads == 1
+    # No snapshot directory at all is no evidence, not evidence of a crash.
+    assert mapper_num_threads is None
 
 
 def test_colmap_mapper_retry_does_not_overwrite_partial_sparse_output(

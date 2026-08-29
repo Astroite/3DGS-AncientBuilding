@@ -4,6 +4,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sqlite3
 import struct
 import tempfile
@@ -422,6 +423,81 @@ def build_image_pyramid(
         )
 
 
+# COLMAP 3.8 ships ``ba_global_function_tolerance`` at 0, which switches off Ceres'
+# cost-based convergence test, so every global bundle adjustment runs the full 50
+# iterations and reports ``No convergence``. On the 5,128-image Yunxiu run that was
+# 6.5 of the 8 hours the mapper survived, and the extra iterations bought nothing
+# measurable: its last global BA spent 4.2 minutes moving the cost by 0.01%. Replaying
+# that log's Ceres tables against a 1e-5 tolerance puts the same 48 expensive passes at
+# 1.7 hours instead of 6.5. The trigger knobs matter as much as the tolerance -- at
+# ``images_ratio`` 1.1 the mapper called global BA 166 times for 2,755 registrations,
+# three or four of them per trigger because ``max_refinements`` is 5 and the 0.0005
+# change threshold is essentially never met. ``images_freq``/``points_freq`` are a
+# second, independent trigger and have to move with the ratio, or past roughly 1,700
+# registered images they become the binding one and the ratio change does nothing.
+#
+# Local BA deliberately keeps COLMAP's defaults: it was 7.8% of BA time at 0.24 s per
+# call, and it is what keeps incremental registration honest.
+MAPPER_SOLVER_OPTIONS = [
+    "--Mapper.ba_global_function_tolerance",
+    "1e-5",
+    "--Mapper.ba_global_max_num_iterations",
+    "30",
+    "--Mapper.ba_global_max_refinements",
+    "2",
+    "--Mapper.ba_global_images_ratio",
+    "1.3",
+    "--Mapper.ba_global_points_ratio",
+    "1.3",
+    "--Mapper.ba_global_images_freq",
+    "1500",
+    "--Mapper.ba_global_points_freq",
+    "1000000",
+]
+
+# The mapper writes nothing until it finishes, so a host that goes down mid-run loses
+# everything: the Yunxiu run lost eight hours and 2,755 registered images to an unclean
+# WSL shutdown. Snapshots land beside ``sparse`` rather than inside it so component
+# selection keeps seeing only finished models.
+MAPPER_SNAPSHOT_DIRNAME = "snapshots"
+MAPPER_SNAPSHOT_IMAGES_FREQ = 500
+
+
+def _colmap_model_image_count(model_dir: Path) -> int | None:
+    """Registered image count from a COLMAP model, without decoding the whole file.
+
+    ``images.bin`` opens with a little-endian uint64 count, so a snapshot can be sized
+    without paying to read the hundreds of megabytes that follow it.
+    """
+    required = [model_dir / name for name in ("cameras.bin", "images.bin", "points3D.bin")]
+    if not all(path.is_file() for path in required):
+        return None
+    with (model_dir / "images.bin").open("rb") as stream:
+        header = stream.read(8)
+    if len(header) < 8:
+        return None
+    return struct.unpack("<Q", header)[0]
+
+
+def latest_mapper_snapshot(colmap_attempt_dir: Path) -> Path | None:
+    """The furthest-along snapshot a previous mapper run left behind, if any.
+
+    Snapshots are ranked by their own registered image count rather than by directory
+    name so the choice does not depend on how COLMAP happens to name them.
+    """
+    snapshots = colmap_attempt_dir / MAPPER_SNAPSHOT_DIRNAME
+    if not snapshots.is_dir():
+        return None
+    sized = [
+        (count, path)
+        for path in sorted(item for item in snapshots.iterdir() if item.is_dir())
+        if (count := _colmap_model_image_count(path)) is not None
+    ]
+    if not sized:
+        return None
+    return max(sized, key=lambda item: item[0])[1]
+
+
 def pinhole_camera_parameters(image_path: Path, fov_degrees: float) -> str:
     height, width = image_dimensions(image_path)
     focal = width / (2.0 * math.tan(math.radians(fov_degrees) / 2.0))
@@ -467,6 +543,7 @@ def build_colmap_commands(
     settings: ReconstructionSettings | None = None,
     colmap_attempt_dir: Path | None = None,
     mapper_num_threads: int | None = None,
+    mapper_input_path: Path | None = None,
 ) -> dict[str, list[str]]:
     images_dir = dataset / "images"
     masks_dir = dataset / "masks"
@@ -478,6 +555,16 @@ def build_colmap_commands(
     sparse = colmap_attempt_dir / "sparse"
     image_list = colmap_attempt_dir / "image-list.txt"
     image_list.parent.mkdir(parents=True, exist_ok=True)
+    snapshots = colmap_attempt_dir / MAPPER_SNAPSHOT_DIRNAME
+    snapshots.mkdir(parents=True, exist_ok=True)
+    # ``--input_path`` continues a single model and writes it flat into
+    # ``--output_path``, where a fresh run writes numbered components below it. A
+    # resumed run therefore has to name the component directory itself, or
+    # :func:`_colmap_components` finds nothing to select. COLMAP 3.8 refuses to start
+    # when that directory does not already exist ("`output_path` is not a directory"),
+    # so it is created here rather than left to the mapper.
+    mapper_output = sparse / "0" if mapper_input_path is not None else sparse
+    mapper_output.mkdir(parents=True, exist_ok=True)
     names = interleaved_image_names(images_dir)
     image_list.write_text("".join(f"{name}\n" for name in names), encoding="utf-8")
     camera_params = pinhole_camera_parameters(images[0], projection_fov_degrees(attempt))
@@ -540,7 +627,12 @@ def build_colmap_commands(
             "--image_path",
             str(images_dir),
             "--output_path",
-            str(sparse),
+            str(mapper_output),
+            "--Mapper.snapshot_path",
+            str(snapshots),
+            "--Mapper.snapshot_images_freq",
+            str(MAPPER_SNAPSHOT_IMAGES_FREQ),
+            *MAPPER_SOLVER_OPTIONS,
         ],
     ]
     named = dict(
@@ -565,6 +657,8 @@ def build_colmap_commands(
                 "0",
             ]
         )
+    if mapper_input_path is not None:
+        named["mapping"].extend(["--input_path", str(mapper_input_path)])
     if mapper_num_threads is not None:
         named["mapping"].extend(["--Mapper.num_threads", str(mapper_num_threads)])
     return named
@@ -1202,8 +1296,24 @@ def select_colmap_attempt(colmap_root: Path) -> tuple[Path, int | None]:
         for name in ("features", "matching")
     )
     sparse_root = latest / "sparse"
-    sparse_has_output = sparse_root.is_dir() and any(sparse_root.iterdir())
+    # A resumed mapper needs its component directory to exist before it starts, so an
+    # empty ``sparse/0`` means "nothing written yet", not "output to preserve". Only
+    # actual model files count as output worth refusing to overwrite.
+    sparse_has_output = sparse_root.is_dir() and any(
+        item.is_file() for item in sparse_root.rglob("*")
+    )
     if prerequisites_complete and not sparse_has_output:
+        # Dropping to one thread is for a mapper that dies the same way every time,
+        # which is a threading bug and surfaces long before the first snapshot. A run
+        # that got far enough to snapshot was working and was killed from outside --
+        # the Yunxiu mapper died at eight hours to an unclean WSL shutdown -- and
+        # single-threading that retry would leave 31 of this host's 32 cores idle
+        # through the longest stage in the pipeline. An attempt with no snapshot
+        # directory at all predates snapshotting and carries no evidence either way,
+        # so it is not made to pay that price on a guess.
+        snapshot_dir = latest / MAPPER_SNAPSHOT_DIRNAME
+        if not snapshot_dir.is_dir() or latest_mapper_snapshot(latest) is not None:
+            return latest, None
         return latest, 1
 
     next_number = int(latest.name.rsplit("-", 1)[1]) + 1
@@ -1487,12 +1597,14 @@ def run_masked_colmap(
     sparse_root = colmap_attempt / "sparse"
     colmap_attempt.mkdir(parents=True, exist_ok=True)
     sparse_root.mkdir(parents=True, exist_ok=True)
+    mapper_input_path = latest_mapper_snapshot(colmap_attempt)
     commands = build_colmap_commands(
         dataset,
         attempt,
         settings,
         colmap_attempt,
         mapper_num_threads=mapper_num_threads,
+        mapper_input_path=mapper_input_path,
     )
     rig_enabled = isinstance(attempt, ReconstructionAttempt) and attempt.use_rig
     rig_config_path = colmap_attempt / "rig-config.json"
@@ -1528,12 +1640,20 @@ def run_masked_colmap(
 
     mapping_marker = colmap_attempt / ".mapping-complete"
     if not mapping_marker.is_file():
+        if mapper_input_path is not None:
+            print(
+                f"COLMAP mapper: continuing from snapshot {mapper_input_path.name} "
+                f"({_colmap_model_image_count(mapper_input_path)} registered images)",
+                flush=True,
+            )
         run_logged(commands["mapping"], log_dir / colmap_attempt.name / "colmap-mapping.log")
 
     components = _colmap_components(sparse_root)
     if not components:
         raise RuntimeError("COLMAP mapper completed without a valid sparse model")
     mapping_marker.write_text("complete\n", encoding="utf-8")
+    # The finished model makes its own snapshots redundant, and they are gigabytes.
+    shutil.rmtree(colmap_attempt / MAPPER_SNAPSHOT_DIRNAME, ignore_errors=True)
     mapper_components = [item for item in components if item[0].name.isdigit()]
     selection_pool = mapper_components or components
     selected_dir, _ = max(selection_pool, key=lambda item: len(item[1]))
