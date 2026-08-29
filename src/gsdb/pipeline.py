@@ -88,6 +88,23 @@ DENSIFICATION_BASELINE_STEPS = {
 # Densification must always leave a refinement tail, however large the dataset.
 DENSIFICATION_MAX_FRACTION = 0.75
 
+# gsplat's DefaultStrategy (wired up in nerfstudio's SplatfactoModel) pauses ALL
+# refinement -- both growth and opacity-based pruning -- for
+# ``num_train_data + refine_every`` steps after every opacity reset, and resets fire
+# every ``reset_alpha_every * refine_every`` steps. On the Yunxiu run (5,128 images)
+# that pause (~5,228 steps) outlasted the reset interval at nerfstudio's default
+# reset_alpha_every=30 (3,000 steps), so each reset re-armed the pause before the
+# last one expired and refinement locked up for good around step 3,000: the model
+# trained to completion with 1,363,440 gaussians frozen since shortly after warmup,
+# 98.6% of them decayed to near-zero opacity and never pruned because pruning was
+# paused too, and the exporter's own opacity filter -- not gsdb's culling -- is what
+# actually dropped them, down to 19,705. Splatfacto's default refine_every (100) is
+# pinned explicitly here because reset_alpha_every is derived assuming this exact
+# value; if nerfstudio ever changes its own default, this schedule must not silently
+# drift out of sync with it.
+SPLATFACTO_REFINE_EVERY = 100
+SPLATFACTO_DEFAULT_RESET_ALPHA_EVERY = 30
+
 
 def densification_schedule(image_count: int, max_iterations: int) -> dict[str, int]:
     """Step bounds that keep densification coverage constant as a scene grows.
@@ -115,6 +132,15 @@ def densification_schedule(image_count: int, max_iterations: int) -> dict[str, i
     schedule["warmup_length"] = min(
         schedule["warmup_length"], max(1, schedule["stop_screen_size_at"] - 1)
     )
+    # image_count over-estimates nerfstudio's actual num_train_data (it applies its
+    # own train/eval split on top of this), which only makes the margin below safer.
+    minimum_reset_alpha_every = (
+        math.ceil((image_count + SPLATFACTO_REFINE_EVERY) / SPLATFACTO_REFINE_EVERY) + 1
+    )
+    schedule["reset_alpha_every"] = max(
+        SPLATFACTO_DEFAULT_RESET_ALPHA_EVERY, minimum_reset_alpha_every
+    )
+    schedule["refine_every"] = SPLATFACTO_REFINE_EVERY
     return schedule
 
 

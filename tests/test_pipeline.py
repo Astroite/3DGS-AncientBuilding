@@ -357,7 +357,28 @@ def test_densification_schedule_reproduces_nerfstudio_defaults_at_the_baseline_s
         "warmup_length": 500,
         "stop_screen_size_at": 4000,
         "stop_split_at": 15000,
+        "reset_alpha_every": 30,
+        "refine_every": 100,
     }
+
+
+def test_densification_schedule_keeps_the_reset_interval_ahead_of_the_refine_pause() -> None:
+    # gsplat's DefaultStrategy pauses growth AND pruning for image_count + refine_every
+    # steps after every opacity reset. If resets (reset_alpha_every * refine_every apart)
+    # arrive faster than that pause expires, refinement locks up permanently -- this is
+    # what actually happened on the 5,128-image Yunxiu run: it trained to completion with
+    # 1,363,440 gaussians frozen since shortly after warmup, 98.6% of them decayed to
+    # near-zero opacity and never pruned, and only nerfstudio's own export-time opacity
+    # filter -- not gsdb's culling -- caught it, dropping to 19,705.
+    for image_count in (1080, 2160, 2520, 5128, 20_000):
+        schedule = densification_schedule(image_count, 100_000)
+        reset_interval = schedule["reset_alpha_every"] * schedule["refine_every"]
+        refine_pause = image_count + schedule["refine_every"]
+        assert reset_interval > refine_pause, image_count
+    # The baseline reproduces nerfstudio's own defaults unchanged.
+    assert densification_schedule(1080, 100_000)["reset_alpha_every"] == 30
+    # The Yunxiu run needed more than the default to stay safe.
+    assert densification_schedule(5128, 100_000)["reset_alpha_every"] == 54
 
 
 def test_densification_schedule_holds_per_view_coverage_as_a_scene_grows() -> None:
@@ -394,9 +415,13 @@ def test_train_command_scales_densification_with_the_configured_view_count() -> 
     assert command[command.index("--pipeline.model.stop-split-at") + 1] == "71222"
     assert command[command.index("--pipeline.model.stop-screen-size-at") + 1] == "18993"
     assert command[command.index("--pipeline.model.warmup-length") + 1] == "2374"
+    # Scaled past nerfstudio's default so opacity resets cannot outrun the refine pause.
+    assert command[command.index("--pipeline.model.reset-alpha-every") + 1] == "54"
+    assert command[command.index("--pipeline.model.refine-every") + 1] == "100"
     # The baseline configuration still emits the upstream defaults.
     baseline = _train_command(_run(), Path("/data"), Path("/out"))
     assert baseline[baseline.index("--pipeline.model.stop-split-at") + 1] == "15000"
+    assert baseline[baseline.index("--pipeline.model.reset-alpha-every") + 1] == "30"
 
 
 def test_training_image_count_comes_from_configuration_not_from_reconstruction() -> None:
