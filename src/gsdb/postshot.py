@@ -28,7 +28,7 @@ from .masking import (
     mask_path_for_image,
 )
 from .models import RunManifest, StageStatus
-from .paths import ensure_within, ensure_work_dir, host_path, wsl_to_windows
+from .paths import ensure_run_dir, ensure_within, host_path, wsl_to_windows
 from .mask_finalize import expected_reconstruction_images, validate_mask_finalization
 from .processes import CommandError, run_logged
 from .reconstruction import _selected_model_dir
@@ -53,11 +53,7 @@ class ColmapImage:
 
 
 def default_postshot_dataset(scene_path: Path, run: RunManifest) -> Path:
-    """Keep v3 staging on a Windows-visible project volume; preserve legacy paths."""
-
-    if getattr(run.config, "schema_version", 1) == 3:
-        return scene_path / "inputs" / "postshot" / run.id
-    return ensure_work_dir(scene_path, run.id) / "postshot"
+    return ensure_run_dir(scene_path, run.id) / "postshot"
 
 
 def _validate_v3_quality_gates(
@@ -72,7 +68,7 @@ def _validate_v3_quality_gates(
     )
     mask_final = validate_mask_finalization(dataset, expected)
     timestamps = timestamps_from_metrics(
-        ensure_work_dir(scene_path, run.id)
+        ensure_run_dir(scene_path, run.id)
         / f"selected-{selected_label}-metrics.jsonl"
     )
     validate_trajectory_qa(
@@ -888,38 +884,9 @@ def _training_targets(
     logical = (
         requested.absolute()
         if requested is not None
-        else ensure_work_dir(scene_path, run.id)
-        / "postshot-training"
-        / "model.psht"
+        else ensure_run_dir(scene_path, run.id) / "postshot-training" / "model.psht"
     )
-    execution = logical
-    if requested is None:
-        try:
-            _windows_argument(logical)
-        except RuntimeError:
-            execution = (
-                scene_path
-                / "inputs"
-                / "postshot-training"
-                / run.id
-                / "model.psht"
-            ).absolute()
-    return logical, execution
-
-
-def _publish_training_output(execution: Path, logical: Path) -> None:
-    if execution.resolve() == logical.resolve(strict=False):
-        return
-    if logical.exists():
-        if _sha256(logical) != _sha256(execution):
-            raise RuntimeError(f"Logical Postshot output already differs: {logical}")
-        return
-    logical.parent.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        logical.parent.symlink_to(execution.parent, target_is_directory=True)
-    except OSError:
-        logical.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_copy(execution, logical)
+    return logical, logical
 
 
 def _training_sidecars(target: Path) -> tuple[Path, Path]:
@@ -1034,7 +1001,6 @@ def train_postshot(
                 "path": str(export_path.absolute()),
                 "sha256": _sha256(export_path),
             }
-        _publish_training_output(execution_target, logical_target)
         result.update(
             {
                 "status": "succeeded",

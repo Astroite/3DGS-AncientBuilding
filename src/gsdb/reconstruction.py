@@ -1396,9 +1396,13 @@ def _selected_sparse_root(dataset: Path) -> Path:
 
 
 def _selected_model_dir(dataset: Path) -> Path:
+    # RealityScan (the live backend) always writes one model directly into
+    # colmap/, recorded as model="." -- no attempt/component indirection like the
+    # dead COLMAP-mapper cluster below, which still writes its own
+    # colmap/attempt-NNN/sparse/N convention and is unreachable from the CLI.
     selection = dataset / "colmap" / "selected-attempt.json"
     payload = json.loads(selection.read_text(encoding="utf-8"))
-    model = dataset / "colmap" / str(payload["attempt"]) / str(payload["model"])
+    model = dataset / "colmap" / str(payload["model"])
     required = [model / name for name in ("cameras.bin", "images.bin", "points3D.bin")]
     if not all(path.is_file() for path in required):
         raise RuntimeError(f"Selected COLMAP model is incomplete: {model}")

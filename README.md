@@ -23,7 +23,7 @@
   只读解码本次选中的帧。X6 已随 MediaSDK 一并验证，可直接走 `insta360_insv`
   源类型，不再要求 Insta360 Studio 手动导出。
 - Insta360 Studio 手工拼接得到的标准 2:1 MP4 和全部派生数据放在地点子项目内，由 Git 忽略。
-- YAML 是权威数据源；`catalog/catalog.sqlite` 只能通过 `gsdb catalog build` 重建。
+- YAML 是权威数据源；`Data/catalog/catalog.sqlite` 只能通过 `gsdb catalog build` 重建。
 - 帧、检查点、COLMAP 数据库、训练输出和 Z-up 中间 PLY 不进入 Git；人工预览用的版本化 Y-up PLY 与 MP4 才通过 Git LFS 发布。
 
 ## 1. 在 Insta360 Studio 导出试点输入
@@ -177,8 +177,7 @@ COLMAP 3.8 使用 GPU SIFT，`doctor` 不允许静默退回 CPU。每个 `view_X
 .\gsdb.ps1 postshot-prepare LOCATION_ID SCENE_ID RUN_ID
 ```
 
-新 v3 run 默认输出到 `locations/<location>/scenes/<scene>/inputs/postshot/<run>/`；
-旧 run 仍保留 `work/<run>/postshot/`。数据集包含平铺且唯一命名的
+默认输出到 `Data/<location>/<scene>/<run>/postshot/`。数据集包含平铺且唯一命名的
 `images/`、Postshot 白色忽略语义的 `masks/`、同步改名后的 `colmap/`
 二进制模型、`image-map.csv`、`dataset.json` 和 `IMPORT.md`。只导出最终模型中
 已注册的图像；原始图像、遮罩和 COLMAP 模型保持只读。中断后使用 `--resume`

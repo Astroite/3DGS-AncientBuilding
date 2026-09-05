@@ -85,12 +85,12 @@ def _colmap_cuda_build() -> tuple[bool, str]:
         return False, str(error)
 
 
-def _colmap_gpu_sift_smoke(project_root: Path, gpu_index: int = 0) -> tuple[bool, str]:
+def _colmap_gpu_sift_smoke(data_root: Path, gpu_index: int = 0) -> tuple[bool, str]:
     try:
         import cv2
         import numpy as np
 
-        with tempfile.TemporaryDirectory(dir=project_root, prefix=".gsdb-colmap-gpu-") as name:
+        with tempfile.TemporaryDirectory(dir=data_root, prefix=".gsdb-colmap-gpu-") as name:
             root = Path(name)
             images = root / "images" / "view_00"
             images.mkdir(parents=True)
@@ -159,7 +159,7 @@ def _wsl_memory_check(minimum_gib: float = 28.0) -> tuple[bool, str]:
 
 
 def run_doctor(
-    project_root: Path,
+    data_root: Path,
     minimum_free_gib: float = 20.0,
     require: set[str] | None = None,
 ) -> dict[str, Any]:
@@ -172,7 +172,7 @@ def run_doctor(
     checks["ffprobe"] = _version(["ffprobe", "-version"])
     checks["colmap_cuda_build"] = _colmap_cuda_build()
     checks["colmap_gpu_sift"] = (
-        _colmap_gpu_sift_smoke(project_root)
+        _colmap_gpu_sift_smoke(data_root)
         if checks["colmap_cuda_build"][0]
         else (False, "CUDA COLMAP build is required before the GPU SIFT smoke test")
     )
@@ -211,14 +211,14 @@ def run_doctor(
         checks["person_segmenter"] = (False, str(error))
 
     try:
-        with tempfile.NamedTemporaryFile(dir=project_root, prefix=".gsdb-doctor-", delete=True) as stream:
+        with tempfile.NamedTemporaryFile(dir=data_root, prefix=".gsdb-doctor-", delete=True) as stream:
             stream.write(b"ok")
             stream.flush()
-        checks["project_writable"] = (True, str(project_root))
+        checks["data_writable"] = (True, str(data_root))
     except Exception as error:
-        checks["project_writable"] = (False, str(error))
+        checks["data_writable"] = (False, str(error))
 
-    usage = shutil.disk_usage(project_root)
+    usage = shutil.disk_usage(data_root)
     free_gib = usage.free / 1024**3
     checks["disk_free"] = (
         free_gib >= minimum_free_gib,
@@ -228,7 +228,7 @@ def run_doctor(
         from .sources import media_capabilities
 
         with tempfile.TemporaryDirectory(
-            dir=project_root, prefix=".gsdb-mediasdk-doctor-"
+            dir=data_root, prefix=".gsdb-mediasdk-doctor-"
         ) as name:
             capabilities = media_capabilities(Path(name))
         checks["mediasdk"] = (

@@ -130,8 +130,7 @@ def test_stage_start_is_saved_before_interrupt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     scene = tmp_path / "scene"
-    (scene / "runs").mkdir(parents=True)
-    (scene / "work").mkdir()
+    scene.mkdir(parents=True)
     run = create_run(
         scene,
         "site-001",
@@ -202,9 +201,8 @@ def test_fallback_waits_for_review_and_resumes_only_after_valid_finalization(
     )
     run.stages["preprocess"] = StageRecord(status=StageStatus.SUCCEEDED)
     run.stages["mask"] = StageRecord(status=StageStatus.SUCCEEDED)
-    work = scene / "work" / run.id
+    work = scene / run.id
     work.mkdir(parents=True)
-    (scene / "runs").mkdir(parents=True)
     records = [
         {
             "file": f"frame_{index:06d}.jpg",

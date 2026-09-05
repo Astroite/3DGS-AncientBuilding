@@ -57,7 +57,7 @@ from .frames import (
     upright_rotation,
     write_published_transforms,
 )
-from .paths import ensure_within, ensure_work_dir, host_path
+from .paths import ensure_run_dir, ensure_within, host_path
 from .ply import CullSpec, gaussian_count, publish_gaussian_ply, rotate_gaussian_ply_y_up
 from .postshot import prepare_postshot_dataset, train_postshot
 from .processes import CommandError, run_logged
@@ -285,7 +285,7 @@ def ingest_capture(
                 "Schema 2 sources are immutable and already explicit; omit --stitched"
             )
         probe = probe_capture_source(
-            capture, scene_path / "inputs" / "prepared" / ".protocol"
+            capture, scene_path / "prepared" / ".protocol"
         )
         capture.source.probe = type(capture.source.probe)(
             **{
@@ -345,7 +345,7 @@ def preprocess_run(scene_path: Path, run: RunManifest, resume: bool = False) -> 
     if not begin_stage(run, "preprocess", resume=resume):
         return run
     save_run(scene_path, run)
-    work = ensure_work_dir(scene_path, run.id)
+    work = ensure_run_dir(scene_path, run.id)
     log_path = work / "logs" / "preprocess.log"
     try:
         if not run.tool_versions:
@@ -626,7 +626,7 @@ def mask_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunMan
     if not begin_stage(run, "mask", resume=resume):
         return run
     save_run(scene_path, run)
-    work = ensure_work_dir(scene_path, run.id)
+    work = ensure_run_dir(scene_path, run.id)
     log_path = work / "logs" / "mask.log"
     try:
         primary = _prepare_masked_dataset(
@@ -665,7 +665,7 @@ def reconstruct_run(scene_path: Path, run: RunManifest, resume: bool = False) ->
     if not begin_stage(run, "reconstruct", resume=resume):
         return run
     save_run(scene_path, run)
-    work = ensure_work_dir(scene_path, run.id)
+    work = ensure_run_dir(scene_path, run.id)
     metrics_records = [
         json.loads(line)
         for line in (work / "frame-metrics.jsonl").read_text(encoding="utf-8").splitlines()
@@ -955,7 +955,7 @@ def postshot_prepare_run(
     if not begin_stage(run, "postshot_prepare", resume=resume):
         return run
     save_run(scene_path, run)
-    work = ensure_work_dir(scene_path, run.id)
+    work = ensure_run_dir(scene_path, run.id)
     log_path = work / "logs" / "postshot-prepare.log"
     try:
         result = prepare_postshot_dataset(scene_path, run, output=output, resume=resume)
@@ -1037,7 +1037,7 @@ def postshot_train_run(
     if not begin_stage(run, "train", resume=resume):
         return run, {"skipped": True}
     save_run(scene_path, run)
-    work = ensure_work_dir(scene_path, run.id)
+    work = ensure_run_dir(scene_path, run.id)
     log_path = work / "logs" / "postshot-train.log"
     try:
         result = train_postshot(
@@ -1083,7 +1083,7 @@ def train_run(
     save_run(scene_path, run)
     assert run.selected_dataset is not None
     dataset = ensure_within(scene_path / run.selected_dataset, scene_path)
-    work = ensure_work_dir(scene_path, run.id)
+    work = ensure_run_dir(scene_path, run.id)
     training_root = work / "training"
     attempt_one = training_root / "attempt-1"
     log_one = work / "logs" / "train-attempt-1.log"
@@ -1420,7 +1420,7 @@ def export_run(
     if not begin_stage(run, "export", resume=resume, force=republish):
         return run
     save_run(scene_path, run)
-    work = ensure_work_dir(scene_path, run.id)
+    work = ensure_run_dir(scene_path, run.id)
     log_dir = work / "logs"
     try:
         if export_dir.exists() and any(export_dir.iterdir()) and not resume:

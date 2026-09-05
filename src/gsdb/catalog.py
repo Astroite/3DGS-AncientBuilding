@@ -101,7 +101,7 @@ def build_catalog(root: Path, output_path: Path | None = None) -> dict[str, int]
     connection = sqlite3.connect(temporary)
     try:
         connection.executescript(SCHEMA)
-        for location_path in sorted((root / "locations").glob("*/location.yaml")):
+        for location_path in sorted(root.glob("*/location.yaml")):
             location = load_model(location_path, LocationManifest)
             connection.execute(
                 "INSERT INTO locations VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -125,7 +125,7 @@ def build_catalog(root: Path, output_path: Path | None = None) -> dict[str, int]
             counts["locations"] += 1
 
             location_root = location_path.parent
-            for scene_path in sorted((location_root / "scenes").glob("*/scene.yaml")):
+            for scene_path in sorted(location_root.glob("*/scene.yaml")):
                 scene = load_model(scene_path, SceneManifest)
                 connection.execute(
                     "INSERT INTO scenes VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -173,10 +173,10 @@ def build_catalog(root: Path, output_path: Path | None = None) -> dict[str, int]
                     )
                     counts["captures"] += 1
 
-                for run_path in sorted((scene_root / "runs").glob("*.yaml")):
+                for run_path in sorted(scene_root.glob("*/manifest.yaml")):
                     # Catalogs are derived indexes, so never index a run whose
                     # immutable configuration no longer matches its stored hash.
-                    run = load_run(scene_root, run_path.stem)
+                    run = load_run(scene_root, run_path.parent.name)
                     connection.execute(
                         "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (

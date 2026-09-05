@@ -33,7 +33,7 @@ from .models import (
     SourceProbe,
     TimeSelection,
 )
-from .paths import find_project_root, host_path, location_dir, scene_dir, wsl_to_windows
+from .paths import find_data_root, host_path, location_dir, scene_dir, wsl_to_windows
 from .postshot import default_postshot_dataset
 from .pipeline import (
     CullSettings,
@@ -105,12 +105,12 @@ def apply_smoke_profile(settings: dict[str, int | None]) -> dict[str, int | None
     }
 
 
-def _root() -> Path:
-    return find_project_root()
+def _data_root() -> Path:
+    return find_data_root()
 
 
 def _scene(location_id: str, scene_id: str) -> Path:
-    path = scene_dir(_root(), location_id, scene_id)
+    path = scene_dir(_data_root(), location_id, scene_id)
     if not (path / "scene.yaml").is_file():
         raise typer.BadParameter(f"Scene does not exist: {location_id}/{scene_id}")
     return path
@@ -131,7 +131,7 @@ def doctor(
 ) -> None:
     """Verify project write access, command-line tools, CUDA, and gsplat."""
     checks = run_doctor(
-        _root(), minimum_free_gib=minimum_free_gib, require=set(require or [])
+        _data_root(), minimum_free_gib=minimum_free_gib, require=set(require or [])
     )
     table = Table("Check", "Result", "Detail")
     for name, result in checks.items():
@@ -232,7 +232,7 @@ def capture_init(
             ),
         )
         probe = probe_capture_source(
-            provisional, path / "inputs" / "prepared" / ".protocol"
+            provisional, path / "prepared" / ".protocol"
         )
         allowed_probe_fields = {
             name: value
@@ -259,7 +259,7 @@ def capture_init(
         )
         save_yaml(manifest_path, provisional)
         console.print(
-            f"Created [green]{manifest_path.relative_to(_root())}[/green]; "
+            f"Created [green]{manifest_path.relative_to(_data_root())}[/green]; "
             f"source={source_type}; files={len(records)}"
         )
     except Exception as error:
@@ -282,7 +282,7 @@ def media_probe(
             result = probe_video(path / capture.stitched_video.relative_path)
         else:
             result = probe_capture_source(
-                capture, path / "inputs" / "prepared" / ".protocol"
+                capture, path / "prepared" / ".protocol"
             )
         console.print_json(json.dumps(result, ensure_ascii=False))
     except Exception as error:
@@ -299,7 +299,7 @@ def location_init(
 ) -> None:
     """Create a location manifest without any media files."""
     try:
-        root = _root()
+        root = _data_root()
         path = location_dir(root, location_id)
         manifest_path = path / "location.yaml"
         if manifest_path.exists():
@@ -312,7 +312,6 @@ def location_init(
             rights=Rights(),
         )
         save_yaml(manifest_path, manifest)
-        (path / "scenes").mkdir(parents=True, exist_ok=True)
         console.print(f"Created [green]{manifest_path.relative_to(root)}[/green]")
     except Exception as error:
         _fatal(error)
@@ -327,7 +326,7 @@ def scene_init(
 ) -> None:
     """Create an independently reconstructable scene under a location."""
     try:
-        root = _root()
+        root = _data_root()
         location_path = location_dir(root, location_id)
         load_model(location_path / "location.yaml", LocationManifest)
         path = scene_dir(root, location_id, scene_id)
@@ -343,9 +342,7 @@ def scene_init(
         save_yaml(manifest_path, manifest)
         for relative in (
             "captures",
-            "inputs/stitched",
-            "work",
-            "runs",
+            "stitched",
             "exports",
             "qa",
         ):
@@ -368,7 +365,7 @@ def ingest(
 ) -> None:
     """Validate and fingerprint a manually stitched 360 MP4."""
     try:
-        root = _root()
+        root = _data_root()
         path = _scene(location_id, scene_id)
         capture_manifest = load_capture_manifest(
             path / "captures" / f"{capture_id}.yaml"
@@ -653,7 +650,7 @@ def reconstruct(
 def _mask_attempt_path(path: Path, run_id: str, attempt: str) -> Path:
     if attempt not in {"primary", "fallback"}:
         raise ValueError("Attempt must be primary or fallback")
-    dataset = path / "work" / run_id / f"reconstruction-{attempt}"
+    dataset = path / run_id / f"reconstruction-{attempt}"
     if not (dataset / "images").is_dir() or not (dataset / "masks").is_dir():
         raise FileNotFoundError(f"Masked {attempt} dataset is missing: {dataset}")
     return dataset
@@ -739,7 +736,7 @@ def postshot_prepare(
 ) -> None:
     """Prepare registered images, poses, points and occluder masks for Postshot."""
     try:
-        root = _root()
+        root = _data_root()
         path = _scene(location_id, scene_id)
         target = host_path(output) if output is not None else None
         if target is not None and not target.is_absolute():
@@ -775,7 +772,7 @@ def postshot_review(
     """Review Postshot images and occluder masks in a local web interface."""
     server = None
     try:
-        root = _root()
+        root = _data_root()
         path = _scene(location_id, scene_id)
         run = load_run(path, run_id)
         target = (
@@ -830,7 +827,7 @@ def postshot_train(
 ) -> None:
     """Validate and launch Postshot with imported COLMAP poses and occluder masks."""
     try:
-        root = _root()
+        root = _data_root()
         path = _scene(location_id, scene_id)
         def resolved(value: Path | None) -> Path | None:
             if value is None:
@@ -999,7 +996,7 @@ def qa_reject(
 def catalog_build() -> None:
     """Atomically rebuild catalog/catalog.sqlite from YAML manifests."""
     try:
-        root = _root()
+        root = _data_root()
         counts = build_catalog(root)
         console.print("Catalog rebuilt: " + json.dumps(counts, ensure_ascii=False))
     except Exception as error:
@@ -1012,9 +1009,11 @@ def clean(
     scene_id: Annotated[str, typer.Argument()],
 ) -> None:
     """Preview generated work data that could be cleaned; never deletes files in v1."""
-    path = _scene(location_id, scene_id) / "work"
+    path = _scene(location_id, scene_id)
     total = 0
-    for run_path in sorted(item for item in path.iterdir() if item.is_dir()):
+    for run_path in sorted(
+        item for item in path.iterdir() if item.is_dir() and (item / "manifest.yaml").is_file()
+    ):
         size = sum(item.stat().st_size for item in run_path.rglob("*") if item.is_file())
         total += size
         console.print(f"{run_path.name}: {size / 1024**3:.2f} GiB")

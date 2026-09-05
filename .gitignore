@@ -16,24 +16,6 @@ condaenv.*.requirements.txt
 .DS_Store
 Thumbs.db
 
-# Generated catalog
-catalog/*.sqlite
-catalog/*.sqlite-*
-catalog/*.db
-
-# Heavy scene data. Manifests, QA summaries, and placeholder files remain tracked.
-locations/*/scenes/*/inputs/stitched/*
-!locations/*/scenes/*/inputs/stitched/.gitkeep
-locations/*/scenes/*/inputs/prepared/**
-locations/*/scenes/*/inputs/postshot/**
-locations/*/scenes/*/inputs/postshot-training/**
-locations/*/scenes/*/work/*
-!locations/*/scenes/*/work/.gitkeep
-locations/*/scenes/*/exports/**
-!locations/*/scenes/*/exports/.gitkeep
-!locations/*/scenes/*/exports/*/
-!locations/*/scenes/*/exports/*/artifact.yaml
-
 # Common reconstruction/training artifacts if created elsewhere
 *.mp4
 *.mov
@@ -56,12 +38,5 @@ tools/mediasdk-helper/**/*.dll
 tools/mediasdk-helper/**/*.lib
 tools/mediasdk-helper/**/*.exe
 
-# Published scene artifacts are versioned; large PLY/MP4 files use Git LFS.
-!locations/*/scenes/*/exports/*/splat.ply
-!locations/*/scenes/*/exports/*/splat-yup.ply
-!locations/*/scenes/*/exports/*/preview.mp4
-!locations/*/scenes/*/exports/*/thumbnail.jpg
-!locations/*/scenes/*/exports/*/transforms.json
-!locations/*/scenes/*/exports/*/transforms-colmap.json
-!locations/*/scenes/*/exports/*/dataparser_transforms.json
-!locations/*/scenes/*/exports/*/UNSAFE-PUBLISH-FRAME.txt
+# The Insta360 MediaSDK payload is an external licensed dependency; never commit it.
+sdks/

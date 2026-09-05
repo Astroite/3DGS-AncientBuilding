@@ -9,6 +9,12 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+if ($env:GSDB_DATA_ROOT) {
+    $DataRoot = (Resolve-Path -LiteralPath $env:GSDB_DATA_ROOT).Path
+}
+else {
+    $DataRoot = (Resolve-Path -LiteralPath (Join-Path $ProjectRoot '..\Data')).Path
+}
 if (-not $env:GSDB_MEDIA_HELPER) {
     throw 'Set GSDB_MEDIA_HELPER to the approved Windows x64 helper first.'
 }
@@ -63,8 +69,8 @@ if ($RunLines.Count -ne 1) {
     throw 'Could not determine the run ID from preprocess output.'
 }
 $RunId = [regex]::Match($RunLines[0], '^RUN_ID=(.+)$').Groups[1].Value
-$SceneRoot = Join-Path $ProjectRoot "locations\$LocationId\scenes\$SceneId"
-$RunManifestPath = Join-Path $SceneRoot "runs\$RunId.yaml"
+$SceneRoot = Join-Path $DataRoot "$LocationId\$SceneId"
+$RunManifestPath = Join-Path $SceneRoot "$RunId\manifest.yaml"
 $PreparedMatch = Select-String -LiteralPath $RunManifestPath `
     -Pattern '^\s*prepared_relative_path:\s*(.+?)\s*$'
 if ($PreparedMatch.Count -ne 1) {

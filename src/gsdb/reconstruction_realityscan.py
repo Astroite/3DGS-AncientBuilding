@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import ReconstructionAttempt, ReconstructionConfig, ReconstructionConfigV3
-from .paths import host_path, wsl_to_windows
+from .paths import find_app_root, host_path, wsl_to_windows
 from .processes import run_logged
 from .reconstruction import (
     _write_colmap_binary_model,
@@ -62,9 +62,7 @@ def realityscan_executable() -> Path:
 
 
 def _default_export_params_path() -> Path:
-    # src/gsdb/reconstruction_realityscan.py -> src/gsdb -> src -> <repo root>
-    repo_root = Path(__file__).resolve().parents[2]
-    return repo_root / "tools" / "realityscan-setup" / "colmap-export-params.xml"
+    return find_app_root() / "tools" / "realityscan-setup" / "colmap-export-params.xml"
 
 
 def export_params_file() -> Path:
@@ -199,12 +197,10 @@ def run_realityscan_alignment(
             pass
 
     colmap_root = dataset / "colmap"
-    attempt_dir = colmap_root / "attempt-001"
-    component_dir = attempt_dir / "sparse" / "0"
     log_dir.mkdir(parents=True, exist_ok=True)
-    component_dir.mkdir(parents=True, exist_ok=True)
+    colmap_root.mkdir(parents=True, exist_ok=True)
 
-    export_dir = attempt_dir / "realityscan-export"
+    export_dir = colmap_root / "realityscan-export"
     export_dir.mkdir(parents=True, exist_ok=True)
 
     command = build_realityscan_align_command(
@@ -212,7 +208,7 @@ def run_realityscan_alignment(
         dataset / "images",
         log_dir / "crash-reports",
         export_dir / "images.txt",
-        attempt_dir / "project.rsproj",
+        colmap_root / "project.rsproj",
     )
     run_logged(command, log_dir / "realityscan-align.log")
 
@@ -221,21 +217,18 @@ def run_realityscan_alignment(
             f"RealityScan did not produce a registration export in {export_dir}; "
             f"see {log_dir / 'realityscan-align.log'}"
         )
-    convert_colmap_text_to_binary(export_dir, component_dir)
-    (attempt_dir / ".mapping-complete").write_text("complete\n", encoding="utf-8")
+    convert_colmap_text_to_binary(export_dir, colmap_root)
+    (colmap_root / ".mapping-complete").write_text("complete\n", encoding="utf-8")
 
     from nerfstudio.process_data.colmap_utils import colmap_to_json
 
-    colmap_to_json(component_dir, dataset, use_single_camera_mode=False)
+    colmap_to_json(colmap_root, dataset, use_single_camera_mode=False)
     attach_frame_masks(transforms, dataset / "masks")
 
-    colmap_root.mkdir(parents=True, exist_ok=True)
     (colmap_root / "selected-attempt.json").write_text(
         json.dumps(
             {
-                "attempt": attempt_dir.name,
-                "component": component_dir.name,
-                "model": component_dir.relative_to(attempt_dir).as_posix(),
+                "model": ".",
                 "rig": {"enabled": False, "backend": "realityscan"},
             },
             indent=2,
@@ -243,5 +236,5 @@ def run_realityscan_alignment(
         + "\n",
         encoding="utf-8",
     )
-    (attempt_dir / ".conversion-complete").write_text("complete\n", encoding="utf-8")
+    (colmap_root / ".conversion-complete").write_text("complete\n", encoding="utf-8")
     return reconstruction_metrics(dataset, attempt, settings)

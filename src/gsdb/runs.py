@@ -13,7 +13,7 @@ from .models import (
     StageStatus,
     utc_now,
 )
-from .paths import ensure_work_dir
+from .paths import ensure_run_dir
 
 
 STAGE_ORDER = (
@@ -28,7 +28,7 @@ STAGE_ORDER = (
 
 
 def run_manifest_path(scene_path: Path, run_id: str) -> Path:
-    return scene_path / "runs" / f"{run_id}.yaml"
+    return scene_path / run_id / "manifest.yaml"
 
 
 def load_run(scene_path: Path, run_id: str) -> RunManifest:
@@ -56,8 +56,7 @@ def create_run(
     created_at = now or utc_now()
     digest = canonical_hash(config)
     run_id = f"{created_at.strftime('%Y%m%dT%H%M%SZ')}-{digest[:8]}"
-    path = run_manifest_path(scene_path, run_id)
-    if path.exists():
+    if (scene_path / run_id).exists():
         raise FileExistsError(
             f"Run already exists: {run_id}. Wait one second or use --run-id with --resume."
         )
@@ -70,8 +69,8 @@ def create_run(
         created_at=created_at,
         updated_at=created_at,
     )
+    ensure_run_dir(scene_path, run_id, exist_ok=False)
     save_run(scene_path, run)
-    ensure_work_dir(scene_path, run_id, exist_ok=False)
     return run
 
 

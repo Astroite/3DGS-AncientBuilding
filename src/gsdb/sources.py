@@ -671,7 +671,7 @@ def prepare_capture_input(
     target_frames: int = 270,
     resume: bool = False,
 ) -> CandidateFrameSet:
-    protocol_dir = scene_path / "inputs" / "prepared" / ".protocol"
+    protocol_dir = scene_path / "prepared" / ".protocol"
     probe = probe_capture_source(capture, protocol_dir)
     paths = source_paths(capture)
     if capture.selection.end_seconds > float(probe["duration_seconds"]) + 0.5:
@@ -711,7 +711,7 @@ def prepare_capture_input(
         "sdk_version": probe.get("sdk_version"),
     }
     preparation_hash = canonical_hash(preparation)
-    target = scene_path / "inputs" / "prepared" / capture.id / preparation_hash
+    target = scene_path / "prepared" / capture.id / preparation_hash
     if (target / "dataset.json").is_file():
         try:
             return _dataset_from_manifest(target)

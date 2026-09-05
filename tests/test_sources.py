@@ -308,7 +308,7 @@ def test_interrupted_insv_export_resumes_only_missing_frames(
     scene = tmp_path / "scene"
     with pytest.raises(RuntimeError, match="interrupted_export"):
         prepare_capture_input(scene, capture, target_frames=5)
-    building = next((scene / "inputs/prepared/capture-001").glob("*.building"))
+    building = next((scene / "prepared/capture-001").glob("*.building"))
     assert len(list((building / "frames").glob("*.jpg"))) == 2
 
     monkeypatch.delenv("GSDB_FAKE_HELPER_FAIL_AFTER")
@@ -364,7 +364,7 @@ def test_insv_export_rejects_protocol_or_source_integrity_changes(
     )
     with pytest.raises(RuntimeError, match=message):
         prepare_capture_input(tmp_path / "scene", capture, target_frames=5)
-    capture_cache = tmp_path / "scene/inputs/prepared/capture-001"
+    capture_cache = tmp_path / "scene/prepared/capture-001"
     assert not any(
         item.is_dir() and not item.name.endswith(".building")
         for item in capture_cache.iterdir()

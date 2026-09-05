@@ -278,7 +278,7 @@ def test_postshot_dry_run_does_not_create_project(
 ) -> None:
     scene = tmp_path / "scene"
     run = _run("run-001")
-    dataset = scene / "work/run-001/postshot"
+    dataset = scene / "run-001/postshot"
     dataset.mkdir(parents=True)
     (dataset / "dataset.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(
@@ -293,7 +293,7 @@ def test_postshot_dry_run_does_not_create_project(
     monkeypatch.setattr("gsdb.postshot.postshot_version", lambda _: ((1, 1, 69), "1.1.69"))
     monkeypatch.setattr("gsdb.postshot.available_vram_mib", lambda _: 12000)
     monkeypatch.setattr("gsdb.postshot._windows_argument", lambda path: str(path))
-    target = scene / "work/run-001/postshot-training/model.psht"
+    target = scene / "run-001/postshot-training/model.psht"
     result = train_postshot(scene, run, dry_run=True, output=target)
     assert result["dry_run"] is True
     assert not target.exists()

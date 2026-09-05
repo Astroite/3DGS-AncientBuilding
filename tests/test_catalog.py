@@ -12,11 +12,9 @@ from gsdb.runs import create_run
 
 def test_catalog_rebuild_is_idempotent(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("[project]\nname='fixture'\n", encoding="utf-8")
-    location_path = tmp_path / "locations" / "site-001"
-    scene_path = location_path / "scenes" / "scene-001"
+    location_path = tmp_path / "site-001"
+    scene_path = location_path / "scene-001"
     (scene_path / "captures").mkdir(parents=True)
-    (scene_path / "runs").mkdir()
-    (scene_path / "work").mkdir()
     (scene_path / "exports").mkdir()
     save_yaml(
         location_path / "location.yaml",
@@ -50,8 +48,8 @@ def test_catalog_rebuild_is_idempotent(tmp_path: Path) -> None:
     ).fetchone() == ("site-001",)
     connection.close()
 
-    payload = load_yaml(scene_path / "runs" / f"{run.id}.yaml")
+    payload = load_yaml(scene_path / run.id / "manifest.yaml")
     payload["config"]["input_sha256"] = "d" * 64
-    save_yaml(scene_path / "runs" / f"{run.id}.yaml", payload)
+    save_yaml(scene_path / run.id / "manifest.yaml", payload)
     with pytest.raises(RuntimeError, match="config hash mismatch"):
         build_catalog(tmp_path)

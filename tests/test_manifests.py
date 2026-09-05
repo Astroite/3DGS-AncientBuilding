@@ -48,7 +48,7 @@ def test_repository_manifests_validate() -> None:
         "night-walk-4k": "capture-009-4k",
     }
     for scene_id, capture_id in scenes.items():
-        scene = location / "scenes" / scene_id
+        scene = location / scene_id
         scene_manifest = load_model(scene / "scene.yaml", SceneManifest)
         capture_manifest = load_model(
             scene / "captures" / f"{capture_id}.yaml", CaptureManifest
