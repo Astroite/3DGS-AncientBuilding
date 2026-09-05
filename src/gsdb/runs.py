@@ -6,6 +6,7 @@ from pathlib import Path
 from .manifests import canonical_hash, load_model, save_yaml
 from .models import (
     RunConfig,
+    RunConfigV3,
     RunManifest,
     RunStatus,
     StageRecord,
@@ -15,7 +16,15 @@ from .models import (
 from .paths import ensure_work_dir
 
 
-STAGE_ORDER = ("preprocess", "mask", "reconstruct", "train", "export", "qa")
+STAGE_ORDER = (
+    "preprocess",
+    "mask",
+    "reconstruct",
+    "postshot_prepare",
+    "train",
+    "export",
+    "qa",
+)
 
 
 def run_manifest_path(scene_path: Path, run_id: str) -> Path:
@@ -41,7 +50,7 @@ def create_run(
     scene_path: Path,
     location_id: str,
     scene_id: str,
-    config: RunConfig,
+    config: RunConfig | RunConfigV3,
     now: datetime | None = None,
 ) -> RunManifest:
     created_at = now or utc_now()

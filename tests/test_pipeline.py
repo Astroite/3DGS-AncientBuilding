@@ -2,7 +2,18 @@ from pathlib import Path
 
 import pytest
 
-from gsdb.models import ArtifactRecord, RunConfig, RunManifest, StageRecord, StageStatus, utc_now
+from gsdb.manifests import canonical_hash
+from gsdb.mask_finalize import MaskFinalizationMissingError
+from gsdb.models import (
+    ArtifactRecord,
+    RunConfig,
+    RunConfigV3,
+    RunManifest,
+    RunStatus,
+    StageRecord,
+    StageStatus,
+    utc_now,
+)
 from gsdb.pipeline import (
     CullSettings,
     TrainSettings,
@@ -17,9 +28,10 @@ from gsdb.pipeline import (
     metrics_for_version,
     preprocess_run,
     read_eval_curve,
+    reconstruct_run,
     training_image_count,
 )
-from gsdb.runs import begin_stage, create_run, load_run
+from gsdb.runs import begin_stage, create_run, load_run, save_run
 
 
 def test_train_retry_uses_nerfstudio_dataparser_downscale() -> None:
@@ -136,6 +148,140 @@ def test_stage_start_is_saved_before_interrupt(
     persisted = load_run(scene, run.id)
     assert persisted.active_stage == "preprocess"
     assert persisted.stages["preprocess"].status == StageStatus.PROCESSING
+
+
+def test_fallback_waits_for_review_and_resumes_only_after_valid_finalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scene = tmp_path / "scene"
+    config = RunConfigV3(
+        capture_id="capture-001",
+        input_dataset_sha256="b" * 64,
+        prepared_relative_path="inputs/prepared/capture-001/hash",
+        input={
+            "source_kind": "equirect_sequence",
+            "source_sha256": ["a" * 64],
+            "source_probe": {
+                "width": 40,
+                "height": 20,
+                "fps": 1,
+                "frame_count": 3,
+                "duration_seconds": 3,
+            },
+            "normalization": {"width": 40, "height": 20},
+            "selection": {"end_seconds": 3},
+            "candidate_frame_indices": [0, 1, 2],
+        },
+        preprocess={"target_frames": 3, "minimum_free_gib": 1},
+        reconstruction={
+            "primary": {
+                "frame_count": 2,
+                "images_per_equirect": 8,
+                "projection_fov_degrees": 120,
+                "projection_size": 256,
+                "crop_bottom": 0.2,
+            },
+            "fallback": {
+                "frame_count": 3,
+                "images_per_equirect": 14,
+                "projection_fov_degrees": 110,
+                "projection_size": 256,
+                "crop_bottom": 0.15,
+            },
+        },
+    )
+    now = utc_now()
+    run = RunManifest(
+        id="20260903T000000Z-fallback",
+        location_id="site-001",
+        scene_id="scene-001",
+        config_hash=canonical_hash(config),
+        config=config,
+        created_at=now,
+        updated_at=now,
+    )
+    run.stages["preprocess"] = StageRecord(status=StageStatus.SUCCEEDED)
+    run.stages["mask"] = StageRecord(status=StageStatus.SUCCEEDED)
+    work = scene / "work" / run.id
+    work.mkdir(parents=True)
+    (scene / "runs").mkdir(parents=True)
+    records = [
+        {
+            "file": f"frame_{index:06d}.jpg",
+            "timestamp_seconds": float(index),
+            "selection_score": float(4 - index),
+        }
+        for index in range(1, 4)
+    ]
+    (work / "frame-metrics.jsonl").write_text(
+        "".join(__import__("json").dumps(item) + "\n" for item in records),
+        encoding="utf-8",
+    )
+    save_run(scene, run)
+
+    monkeypatch.setattr(
+        "gsdb.pipeline.create_blur_aware_subset", lambda *args, **kwargs: []
+    )
+    monkeypatch.setattr(
+        "gsdb.pipeline.select_blur_aware_records",
+        lambda items, target, **kwargs: items[:target],
+    )
+    monkeypatch.setattr(
+        "gsdb.pipeline._prepare_masked_dataset",
+        lambda *args, **kwargs: {"planar_images": 42},
+    )
+    alignment_calls: list[str] = []
+
+    def fake_alignment(output: Path, *args, **kwargs) -> dict[str, float]:
+        alignment_calls.append(output.name)
+        score = 0.5 if output.name.endswith("primary") else 0.9
+        return {"registration_ratio": score, "largest_component_coverage": score}
+
+    monkeypatch.setattr("gsdb.pipeline.run_realityscan_alignment", fake_alignment)
+    finalization = {"state": "missing"}
+
+    def fake_finalization(path: Path, expected) -> dict[str, str]:
+        if path.name.endswith("fallback"):
+            if finalization["state"] == "missing":
+                raise MaskFinalizationMissingError("fallback review is pending")
+            if finalization["state"] == "corrupt":
+                raise RuntimeError("mask-final is stale or corrupt")
+        return {"status": "passed"}
+
+    monkeypatch.setattr("gsdb.pipeline.validate_mask_finalization", fake_finalization)
+    monkeypatch.setattr(
+        "gsdb.pipeline.write_trajectory_qa",
+        lambda *args, **kwargs: {"blocking": [], "warnings": [], "samples": []},
+    )
+
+    waiting = reconstruct_run(scene, run)
+    assert waiting.status == RunStatus.WAITING_REVIEW
+    assert waiting.active_stage == "reconstruct"
+    assert waiting.stages["reconstruct"].status == StageStatus.PROCESSING
+    assert waiting.fallback_attempted is True
+    assert waiting.selected_dataset is None
+    assert waiting.metrics["reconstruction"]["primary"]["registration_ratio"] == 0.5
+
+    # Resume through the persisted manifest, as separate CLI invocations do.
+    waiting = load_run(scene, run.id)
+    finalization["state"] = "corrupt"
+    with pytest.raises(RuntimeError, match="stale or corrupt"):
+        reconstruct_run(scene, waiting, resume=True)
+    failed = load_run(scene, run.id)
+    assert failed.status == RunStatus.FAILED
+    assert failed.stages["reconstruct"].status == StageStatus.FAILED
+
+    finalization["state"] = "passed"
+    completed = reconstruct_run(scene, failed, resume=True)
+    assert completed.stages["reconstruct"].status == StageStatus.SUCCEEDED
+    assert completed.selected_dataset.endswith("reconstruction-fallback")
+    assert completed.metrics["reconstruction"]["fallback"]["registration_ratio"] == 0.9
+    assert alignment_calls == [
+        "reconstruction-primary",
+        "reconstruction-primary",
+        "reconstruction-primary",
+        "reconstruction-fallback",
+    ]
 
 
 def test_qa_comparison_reports_baseline_deltas(tmp_path: Path) -> None:
@@ -271,7 +417,7 @@ def _finished_run() -> RunManifest:
             )
         ]
     )
-    for name in ("preprocess", "mask", "reconstruct", "train", "export"):
+    for name in ("preprocess", "mask", "reconstruct", "postshot_prepare", "train", "export"):
         run.stages[name] = StageRecord(status=StageStatus.SUCCEEDED)
     return run
 

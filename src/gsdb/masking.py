@@ -4,7 +4,7 @@ import json
 import os
 import struct
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Iterable, Sequence, TypeVar
@@ -12,7 +12,7 @@ from typing import Any, Callable, Iterable, Sequence, TypeVar
 import cv2
 import numpy as np
 
-from .models import MaskingConfig
+from .models import COCO_DYNAMIC_CLASS_IDS, MaskingConfig
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
@@ -51,6 +51,8 @@ def run_image_tasks(action: Callable[[_T], Any], items: Sequence[_T]) -> list[An
 class PersonPrediction:
     mask: np.ndarray
     detections: int
+    detections_by_class: dict[str, int] = field(default_factory=dict)
+    masks_by_class: dict[str, np.ndarray] = field(default_factory=dict)
 
 
 PersonPredictor = Callable[[np.ndarray], PersonPrediction]
@@ -203,17 +205,51 @@ class TorchvisionPersonSegmenter:
             output = self._model([tensor])[0]
         labels = output["labels"].detach().cpu().numpy()
         scores = output["scores"].detach().cpu().numpy()
+        class_names = list(getattr(self._config, "classes", ["person"]))
+        class_ids = {
+            name: (
+                self._config.person_class_id
+                if name == "person"
+                else COCO_DYNAMIC_CLASS_IDS[name]
+            )
+            for name in class_names
+        }
         selected = np.flatnonzero(
-            (labels == self._config.person_class_id)
+            np.isin(labels, list(class_ids.values()))
             & (scores >= self._config.score_threshold)
         )
         if len(selected) == 0:
             return PersonPrediction(
-                mask=np.zeros(image_bgr.shape[:2], dtype=bool), detections=0
+                mask=np.zeros(image_bgr.shape[:2], dtype=bool),
+                detections=0,
+                detections_by_class={name: 0 for name in class_names},
+                masks_by_class={
+                    name: np.zeros(image_bgr.shape[:2], dtype=bool)
+                    for name in class_names
+                },
             )
         probabilities = output["masks"][selected, 0].detach().cpu().numpy()
-        mask = np.any(probabilities >= self._config.probability_threshold, axis=0)
-        return PersonPrediction(mask=mask, detections=len(selected))
+        selected_labels = labels[selected]
+        masks_by_class = {}
+        detections_by_class = {}
+        for name, class_id in class_ids.items():
+            positions = np.flatnonzero(selected_labels == class_id)
+            detections_by_class[name] = len(positions)
+            masks_by_class[name] = (
+                np.any(
+                    probabilities[positions] >= self._config.probability_threshold,
+                    axis=0,
+                )
+                if len(positions)
+                else np.zeros(image_bgr.shape[:2], dtype=bool)
+            )
+        mask = np.any(list(masks_by_class.values()), axis=0)
+        return PersonPrediction(
+            mask=mask,
+            detections=len(selected),
+            detections_by_class=detections_by_class,
+            masks_by_class=masks_by_class,
+        )
 
 
 def _read_existing_mask(mask_path: Path, shape: tuple[int, int]) -> np.ndarray:
@@ -260,6 +296,7 @@ def generate_person_masks(
                 # Only the shape is needed to check a cached mask, so skip the decode.
                 ignored = _read_existing_mask(target, image_dimensions(image_path))
                 detections = previous_records.get(image_name, {}).get("detections")
+                class_metrics = previous_records.get(image_name, {}).get("classes", {})
                 reused = True
             else:
                 image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
@@ -277,6 +314,32 @@ def generate_person_masks(
                     )
                 ignored = postprocess_person_mask(prediction.mask, config)
                 detections = prediction.detections
+                class_metrics = {
+                    name: {
+                        "detections": int(
+                            prediction.detections_by_class.get(name, 0)
+                        ),
+                        "masked_fraction": round(
+                            float(
+                                np.count_nonzero(
+                                    postprocess_person_mask(class_mask, config)
+                                )
+                                / class_mask.size
+                            ),
+                            8,
+                        ),
+                    }
+                    for name, class_mask in prediction.masks_by_class.items()
+                }
+                if not class_metrics:
+                    class_metrics = {
+                        "person": {
+                            "detections": int(prediction.detections),
+                            "masked_fraction": round(
+                                float(np.count_nonzero(ignored) / ignored.size), 8
+                            ),
+                        }
+                    }
                 reused = False
                 atomic_imwrite(target, colmap_mask_from_ignored(ignored))
             fraction = float(np.count_nonzero(ignored) / ignored.size)
@@ -284,6 +347,7 @@ def generate_person_masks(
                 "image": image_name,
                 "mask": target.relative_to(masks_dir).as_posix(),
                 "detections": detections,
+                "classes": class_metrics,
                 "masked_fraction": round(fraction, 8),
                 "reused": reused,
             }
@@ -423,11 +487,38 @@ def summarize_detection_records(records: Iterable[dict[str, object]]) -> dict[st
     known_detections = [
         int(item["detections"]) for item in values if item.get("detections") is not None
     ]
+    class_totals: dict[str, dict[str, float | int]] = {}
+    for item in values:
+        classes = item.get("classes")
+        if not isinstance(classes, dict):
+            continue
+        for name, raw in classes.items():
+            if not isinstance(raw, dict):
+                continue
+            totals = class_totals.setdefault(
+                str(name), {"detections": 0, "masked_fraction_sum": 0.0}
+            )
+            totals["detections"] = int(totals["detections"]) + int(
+                raw.get("detections", 0)
+            )
+            totals["masked_fraction_sum"] = float(
+                totals["masked_fraction_sum"]
+            ) + float(raw.get("masked_fraction", 0.0))
+    per_class = {
+        name: {
+            "detections": int(totals["detections"]),
+            "mean_masked_fraction": (
+                float(totals["masked_fraction_sum"]) / len(values) if values else 0.0
+            ),
+        }
+        for name, totals in sorted(class_totals.items())
+    }
     return {
         "images": len(values),
         "images_with_detection_metrics": len(known_detections),
         "detection_metrics_complete": len(known_detections) == len(values),
         "images_with_detections": sum(value > 0 for value in known_detections),
         "person_instances": sum(known_detections),
+        "per_class": per_class,
         "reused_masks": sum(bool(item.get("reused")) for item in values),
     }

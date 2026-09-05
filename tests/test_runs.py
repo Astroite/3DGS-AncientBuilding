@@ -4,8 +4,9 @@ from pathlib import Path
 import pytest
 
 from gsdb.manifests import canonical_hash
-from gsdb.models import LegacyRunConfigV1, RunConfig, RunStatus, StageStatus
+from gsdb.models import LegacyRunConfigV1, RunConfig, RunStatus, StageStatus, default_stages
 from gsdb.runs import (
+    STAGE_ORDER,
     begin_stage,
     complete_stage,
     create_run,
@@ -13,6 +14,13 @@ from gsdb.runs import (
     load_run,
     save_run,
 )
+
+
+def test_stage_order_matches_default_stages() -> None:
+    # begin_stage()'s STAGE_ORDER.index(stage) / require_previous_stages() gating
+    # depends on these two independently-hardcoded lists agreeing exactly.
+    assert set(STAGE_ORDER) == set(default_stages())
+    assert tuple(STAGE_ORDER) == tuple(default_stages())
 
 
 def test_run_id_and_stage_resume(tmp_path: Path) -> None:
@@ -92,7 +100,7 @@ def test_reconstruction_requires_successful_mask_stage(tmp_path: Path) -> None:
 
 def test_historical_v1_hash_loads_unchanged_and_v2_fields_enter_hash() -> None:
     root = Path(__file__).resolve().parents[1]
-    scene = root / "locations/yanguan-ancient-town-20260822/scenes/night-walk-4k"
+    scene = root / "tests/fixtures/legacy-run"
     historical = load_run(scene, "20260824T022046Z-5679786b")
     assert isinstance(historical.config, LegacyRunConfigV1)
     assert historical.config_hash == (

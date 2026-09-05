@@ -28,12 +28,16 @@ from .models import (
     LegacyReconstructionConfigV1,
     ReconstructionAttempt,
     ReconstructionConfig,
+    ReconstructionConfigV3,
 )
+from .media import sha256_file
 from .processes import run_logged
 
 
 AttemptConfig = ReconstructionAttempt | LegacyReconstructionAttemptV1
-ReconstructionSettings = ReconstructionConfig | LegacyReconstructionConfigV1
+ReconstructionSettings = (
+    ReconstructionConfig | ReconstructionConfigV3 | LegacyReconstructionConfigV1
+)
 
 class _WriteQueue:
     """Bounded background encode/write queue that keeps the GPU loop moving.
@@ -504,7 +508,9 @@ def pinhole_camera_parameters(image_path: Path, fov_degrees: float) -> str:
     return f"{focal:.10f},{focal:.10f},{width / 2.0:.10f},{height / 2.0:.10f}"
 
 
-def cross_view_pair_names(attempt: AttemptConfig) -> list[tuple[str, str]]:
+def cross_view_pair_names(
+    attempt: AttemptConfig, excluded_images: set[str] | None = None
+) -> list[tuple[str, str]]:
     """Every within-frame view pair of one panorama, in deterministic order.
 
     COLMAP 3.8's sequential matcher orders images by *name*, so ``view_XX/`` folders
@@ -517,6 +523,7 @@ def cross_view_pair_names(attempt: AttemptConfig) -> list[tuple[str, str]]:
     rejected by COLMAP's own geometric verification, so the full set is safe to emit.
     """
     views = attempt.images_per_equirect
+    excluded_images = excluded_images or set()
     return [
         (
             f"view_{first:02d}/frame_{frame:06d}.jpg",
@@ -525,16 +532,28 @@ def cross_view_pair_names(attempt: AttemptConfig) -> list[tuple[str, str]]:
         for frame in range(1, attempt.frame_count + 1)
         for first in range(views)
         for second in range(first + 1, views)
+        if f"view_{first:02d}/frame_{frame:06d}.jpg" not in excluded_images
+        and f"view_{second:02d}/frame_{frame:06d}.jpg" not in excluded_images
     ]
 
 
-def write_cross_view_pair_list(path: Path, attempt: AttemptConfig) -> int:
-    pairs = cross_view_pair_names(attempt)
+def write_cross_view_pair_list(
+    path: Path, attempt: AttemptConfig, excluded_images: set[str] | None = None
+) -> int:
+    pairs = cross_view_pair_names(attempt, excluded_images=excluded_images)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "".join(f"{first} {second}\n" for first, second in pairs), encoding="utf-8"
     )
     return len(pairs)
+
+
+def excluded_images(dataset: Path) -> set[str]:
+    path = dataset / "mask-final.json"
+    if not path.is_file():
+        return set()
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return {str(item) for item in payload.get("excluded_images", [])}
 
 
 def build_colmap_commands(
@@ -565,7 +584,12 @@ def build_colmap_commands(
     # so it is created here rather than left to the mapper.
     mapper_output = sparse / "0" if mapper_input_path is not None else sparse
     mapper_output.mkdir(parents=True, exist_ok=True)
-    names = interleaved_image_names(images_dir)
+    excluded = excluded_images(dataset)
+    names = [
+        name for name in interleaved_image_names(images_dir) if name not in excluded
+    ]
+    if not names:
+        raise RuntimeError("Every reconstruction image was excluded by mask review")
     image_list.write_text("".join(f"{name}\n" for name in names), encoding="utf-8")
     camera_params = pinhole_camera_parameters(images[0], projection_fov_degrees(attempt))
     is_v2 = isinstance(attempt, ReconstructionAttempt)
@@ -638,6 +662,26 @@ def build_colmap_commands(
     named = dict(
         zip(("features", "matching", "cross_view", "mapping"), commands)
     )
+    loop = getattr(settings, "loop_closure", None)
+    if loop is not None and loop.enabled:
+        vocabulary_tree = Path(str(loop.vocabulary_tree_path))
+        if not vocabulary_tree.is_file():
+            raise FileNotFoundError(f"COLMAP vocabulary tree is missing: {vocabulary_tree}")
+        observed_hash = sha256_file(vocabulary_tree)
+        if loop.vocabulary_tree_sha256 != observed_hash:
+            raise RuntimeError("COLMAP vocabulary tree hash changed after run creation")
+        named["matching"].extend(
+            [
+                "--SequentialMatching.loop_detection",
+                "1",
+                "--SequentialMatching.loop_detection_period",
+                str(loop.period),
+                "--SequentialMatching.loop_detection_num_images",
+                str(loop.num_images),
+                "--SequentialMatching.vocab_tree_path",
+                str(vocabulary_tree),
+            ]
+        )
     if not is_v2:
         # Legacy v1 datasets are flat, so there are no per-view folders to link.
         del named["cross_view"]
@@ -693,7 +737,9 @@ def interleaved_image_names(images_dir: Path) -> list[str]:
 
 
 def validate_folder_camera_ids(
-    database: Path, expected_view_count: int
+    database: Path,
+    expected_view_count: int,
+    expected_prefixes: set[str] | None = None,
 ) -> dict[str, int]:
     with sqlite3.connect(database) as connection:
         rows = connection.execute(
@@ -704,7 +750,9 @@ def validate_folder_camera_ids(
         normalized = str(name).replace("\\", "/")
         prefix = normalized.split("/", 1)[0] + "/"
         grouped.setdefault(prefix, set()).add(int(camera_id))
-    expected_prefixes = {f"view_{index:02d}/" for index in range(expected_view_count)}
+    expected_prefixes = expected_prefixes or {
+        f"view_{index:02d}/" for index in range(expected_view_count)
+    }
     if set(grouped) != expected_prefixes:
         raise RuntimeError(
             f"COLMAP camera folders mismatch: expected={sorted(expected_prefixes)}, "
@@ -713,7 +761,7 @@ def validate_folder_camera_ids(
     if any(len(camera_ids) != 1 for camera_ids in grouped.values()):
         raise RuntimeError("COLMAP did not assign exactly one camera ID per view folder")
     mapping = {prefix: next(iter(camera_ids)) for prefix, camera_ids in grouped.items()}
-    if len(set(mapping.values())) != expected_view_count:
+    if len(set(mapping.values())) != len(expected_prefixes):
         raise RuntimeError("COLMAP view folders do not have distinct camera IDs")
     return dict(sorted(mapping.items()))
 
@@ -1520,7 +1568,8 @@ def reconstruction_metrics(
     unique_names = {
         image.name for _, images in components for image in images.values()
     }
-    expected = expected_planar_images(attempt)
+    excluded = excluded_images(dataset)
+    expected = expected_planar_images(attempt) - len(excluded)
     selected_registered = len(
         json.loads(transforms_path.read_text(encoding="utf-8")).get("frames", [])
     )
@@ -1533,6 +1582,7 @@ def reconstruction_metrics(
     return {
         "expected_planar_images": expected,
         "written_planar_images": len(image_files(dataset / "images")),
+        "excluded_images": len(excluded),
         "registered_images": len(unique_names),
         "selected_component_images": selected_registered,
         "registration_ratio": len(unique_names) / expected if expected else 0.0,
@@ -1625,17 +1675,33 @@ def run_masked_colmap(
     cross_view_marker = colmap_attempt / ".cross-view-matching-complete"
     if "cross_view" in commands and not cross_view_marker.is_file():
         pair_count = write_cross_view_pair_list(
-            colmap_attempt / "cross-view-pairs.txt", attempt
+            colmap_attempt / "cross-view-pairs.txt",
+            attempt,
+            excluded_images=excluded_images(dataset),
         )
-        run_logged(
-            commands["cross_view"],
-            log_dir / colmap_attempt.name / "colmap-cross-view-matching.log",
-        )
+        if pair_count:
+            run_logged(
+                commands["cross_view"],
+                log_dir / colmap_attempt.name / "colmap-cross-view-matching.log",
+            )
         cross_view_marker.write_text(f"{pair_count}\n", encoding="utf-8")
 
     if rig_enabled:
+        active_names = [
+            line.strip()
+            for line in (colmap_attempt / "image-list.txt").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if line.strip()
+        ]
+        active_prefixes = {
+            name.replace("\\", "/").split("/", 1)[0] + "/"
+            for name in active_names
+        }
         database_camera_ids = validate_folder_camera_ids(
-            colmap_attempt / "database.db", attempt.images_per_equirect
+            colmap_attempt / "database.db",
+            attempt.images_per_equirect,
+            expected_prefixes=active_prefixes,
         )
 
     mapping_marker = colmap_attempt / ".mapping-complete"
@@ -1760,7 +1826,8 @@ def run_masked_colmap(
                 merged_images = read_images_binary(merged_dir / "images.bin")
                 threshold = float(getattr(settings, "registration_threshold", 0.70))
                 if len(merged_images) >= math.ceil(
-                    expected_planar_images(attempt) * threshold
+                    (expected_planar_images(attempt) - len(excluded_images(dataset)))
+                    * threshold
                 ):
                     selected_dir = merged_dir
     selected_model = selected_dir

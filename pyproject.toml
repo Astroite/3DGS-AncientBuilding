@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gsdb"
-version = "0.1.0"
+version = "0.2.0"
 description = "Location-oriented 360 video to Gaussian Splatting workflow and catalog"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
@@ -29,6 +29,9 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+gsdb = ["static/*.html"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

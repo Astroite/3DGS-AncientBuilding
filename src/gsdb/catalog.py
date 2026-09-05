@@ -5,14 +5,15 @@ import os
 import sqlite3
 from pathlib import Path
 
-from .manifests import load_model
+from .manifests import load_capture_manifest, load_model
 from .models import (
     ArtifactManifest,
     CaptureManifest,
+    CaptureManifestV2,
     LocationManifest,
-    RunManifest,
     SceneManifest,
 )
+from .runs import load_run
 
 
 SCHEMA = """
@@ -43,9 +44,9 @@ CREATE TABLE captures (
     location_id TEXT NOT NULL,
     scene_id TEXT NOT NULL,
     status TEXT NOT NULL,
-    raw_source_path TEXT NOT NULL,
-    stitched_relative_path TEXT NOT NULL,
-    stitched_sha256 TEXT,
+    source_kind TEXT NOT NULL,
+    primary_source_path TEXT NOT NULL,
+    prepared_relative_path TEXT,
     media_json TEXT NOT NULL,
     manifest_path TEXT NOT NULL,
     PRIMARY KEY (location_id, scene_id, id),
@@ -147,7 +148,15 @@ def build_catalog(root: Path, output_path: Path | None = None) -> dict[str, int]
                 scene_root = scene_path.parent
 
                 for capture_path in sorted((scene_root / "captures").glob("*.yaml")):
-                    capture = load_model(capture_path, CaptureManifest)
+                    capture = load_capture_manifest(capture_path)
+                    if isinstance(capture, CaptureManifestV2):
+                        source_kind = capture.source.kind
+                        primary_source_path = capture.source.files[0].windows_path
+                        prepared_relative_path = capture.prepared_relative_path
+                    else:
+                        source_kind = "equirect_video"
+                        primary_source_path = capture.raw_source.windows_path
+                        prepared_relative_path = capture.stitched_video.relative_path
                     connection.execute(
                         "INSERT INTO captures VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
@@ -155,9 +164,9 @@ def build_catalog(root: Path, output_path: Path | None = None) -> dict[str, int]
                             capture.location_id,
                             capture.scene_id,
                             capture.status.value,
-                            capture.raw_source.windows_path,
-                            capture.stitched_video.relative_path,
-                            capture.stitched_video.sha256,
+                            source_kind,
+                            primary_source_path,
+                            prepared_relative_path,
                             json.dumps(capture.model_dump(mode="json"), ensure_ascii=False),
                             _relative(capture_path, root),
                         ),
@@ -165,7 +174,9 @@ def build_catalog(root: Path, output_path: Path | None = None) -> dict[str, int]
                     counts["captures"] += 1
 
                 for run_path in sorted((scene_root / "runs").glob("*.yaml")):
-                    run = load_model(run_path, RunManifest)
+                    # Catalogs are derived indexes, so never index a run whose
+                    # immutable configuration no longer matches its stored hash.
+                    run = load_run(scene_root, run_path.stem)
                     connection.execute(
                         "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (

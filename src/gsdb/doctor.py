@@ -140,8 +140,11 @@ def _colmap_gpu_sift_smoke(project_root: Path, gpu_index: int = 0) -> tuple[bool
 
 
 def _wsl_memory_check(minimum_gib: float = 28.0) -> tuple[bool, str]:
+    version_path = Path("/proc/version")
+    if not version_path.is_file():
+        return True, "not running under WSL; WSL memory gate not applicable"
     try:
-        version = Path("/proc/version").read_text(encoding="utf-8", errors="replace")
+        version = version_path.read_text(encoding="utf-8", errors="replace")
         if "microsoft" not in version.lower():
             return True, "not running under WSL; WSL memory gate not applicable"
         meminfo = Path("/proc/meminfo").read_text(encoding="utf-8")
@@ -155,7 +158,15 @@ def _wsl_memory_check(minimum_gib: float = 28.0) -> tuple[bool, str]:
         return False, str(error)
 
 
-def run_doctor(project_root: Path, minimum_free_gib: float = 20.0) -> dict[str, Any]:
+def run_doctor(
+    project_root: Path,
+    minimum_free_gib: float = 20.0,
+    require: set[str] | None = None,
+) -> dict[str, Any]:
+    required = set(require or ())
+    unknown = required - {"mediasdk", "postshot"}
+    if unknown:
+        raise ValueError(f"Unknown optional doctor requirement(s): {sorted(unknown)}")
     checks: dict[str, Any] = {}
     checks["ffmpeg"] = _version(["ffmpeg", "-version"])
     checks["ffprobe"] = _version(["ffprobe", "-version"])
@@ -165,8 +176,6 @@ def run_doctor(project_root: Path, minimum_free_gib: float = 20.0) -> dict[str, 
         if checks["colmap_cuda_build"][0]
         else (False, "CUDA COLMAP build is required before the GPU SIFT smoke test")
     )
-    checks["ns_process_data"] = _version(["ns-process-data", "--help"])
-    checks["ns_train"] = _version(["ns-train", "--help"])
     checks["wsl_memory"] = _wsl_memory_check()
 
     deepseek_key_present = bool(os.environ.get("DEEPSEEK_API_KEY"))
@@ -202,51 +211,6 @@ def run_doctor(project_root: Path, minimum_free_gib: float = 20.0) -> dict[str, 
         checks["person_segmenter"] = (False, str(error))
 
     try:
-        import gsplat
-        import torch
-
-        device = "cuda"
-        means = torch.tensor(
-            [[0.0, 0.0, 2.0], [0.15, 0.0, 2.0]],
-            device=device,
-            requires_grad=True,
-        )
-        quats = torch.tensor(
-            [[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]], device=device
-        )
-        scales = torch.full((2, 3), 0.1, device=device)
-        opacities = torch.full((2,), 0.8, device=device)
-        colors = torch.tensor(
-            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-            device=device,
-            requires_grad=True,
-        )
-        viewmats = torch.eye(4, device=device)[None]
-        intrinsics = torch.tensor(
-            [[[20.0, 0.0, 8.0], [0.0, 20.0, 8.0], [0.0, 0.0, 1.0]]],
-            device=device,
-        )
-        render, alpha, _ = gsplat.rasterization(
-            means,
-            quats,
-            scales,
-            opacities,
-            colors,
-            viewmats,
-            intrinsics,
-            width=16,
-            height=16,
-        )
-        (render.mean() + alpha.mean()).backward()
-        gradient_ok = means.grad is not None and colors.grad is not None
-        checks["gsplat"] = (
-            gradient_ok,
-            f"{getattr(gsplat, '__version__', 'unknown')}; rasterization/backward ok",
-        )
-    except Exception as error:
-        checks["gsplat"] = (False, str(error))
-
-    try:
         with tempfile.NamedTemporaryFile(dir=project_root, prefix=".gsdb-doctor-", delete=True) as stream:
             stream.write(b"ok")
             stream.flush()
@@ -260,5 +224,38 @@ def run_doctor(project_root: Path, minimum_free_gib: float = 20.0) -> dict[str, 
         free_gib >= minimum_free_gib,
         f"{free_gib:.1f} GiB free; minimum reserve {minimum_free_gib:.1f} GiB",
     )
-    checks["ok"] = all(result[0] for key, result in checks.items() if key != "ok")
+    try:
+        from .sources import media_capabilities
+
+        with tempfile.TemporaryDirectory(
+            dir=project_root, prefix=".gsdb-mediasdk-doctor-"
+        ) as name:
+            capabilities = media_capabilities(Path(name))
+        checks["mediasdk"] = (
+            True,
+            f"helper={capabilities.get('helper_version', 'unknown')}, "
+            f"sdk={capabilities.get('sdk_version', 'unknown')}",
+        )
+    except Exception as error:
+        checks["mediasdk"] = (False, f"optional unavailable: {error}")
+    try:
+        from .postshot import POSTSHOT_MINIMUM_VERSION, postshot_version
+
+        version_tuple, version = postshot_version()
+        checks["postshot"] = (
+            version_tuple >= POSTSHOT_MINIMUM_VERSION,
+            (
+                f"Postshot {version}"
+                if version_tuple >= POSTSHOT_MINIMUM_VERSION
+                else f"Postshot {version} is older than required 1.1.69"
+            ),
+        )
+    except Exception as error:
+        checks["postshot"] = (False, f"optional unavailable: {error}")
+
+    checks["ok"] = all(
+        result[0]
+        for key, result in checks.items()
+        if key != "ok" and (key not in {"mediasdk", "postshot"} or key in required)
+    )
     return checks

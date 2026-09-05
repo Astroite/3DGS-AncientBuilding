@@ -41,7 +41,7 @@ def test_capture_selection_range_must_be_forward() -> None:
 
 def test_repository_manifests_validate() -> None:
     root = Path(__file__).resolve().parents[1]
-    location = root / "locations" / "yanguan-ancient-town-20260822"
+    location = root / "tests" / "fixtures" / "repository-manifests"
     load_model(location / "location.yaml", LocationManifest)
     scenes = {
         "night-pilot-8k": "capture-004-8k",

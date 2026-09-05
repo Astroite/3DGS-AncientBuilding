@@ -11,13 +11,18 @@ from typing import Any
 import numpy as np
 
 from .doctor import collect_tool_versions
-from .manifests import load_model, save_yaml
+from .manifests import load_capture_manifest, load_model, save_yaml
 from .masking import (
     create_mask_contact_sheets,
     generate_person_masks,
     image_files,
     summarize_detection_records,
     validate_mask_set,
+)
+from .mask_finalize import (
+    MaskFinalizationMissingError,
+    expected_reconstruction_images,
+    validate_mask_finalization,
 )
 from .media import (
     analyze_frames,
@@ -34,6 +39,7 @@ from .models import (
     ArtifactManifest,
     ArtifactRecord,
     CaptureManifest,
+    CaptureManifestV2,
     ReconstructionAttempt,
     RunManifest,
     RunStatus,
@@ -53,6 +59,7 @@ from .frames import (
 )
 from .paths import ensure_within, ensure_work_dir, host_path
 from .ply import CullSpec, gaussian_count, publish_gaussian_ply, rotate_gaussian_ply_y_up
+from .postshot import prepare_postshot_dataset, train_postshot
 from .processes import CommandError, run_logged
 from .reconstruction import (
     _selected_model_dir,
@@ -60,10 +67,16 @@ from .reconstruction import (
     center_spread_metrics,
     projection_fov_degrees,
     project_equirectangular_frames,
-    run_masked_colmap,
 )
+from .reconstruction_realityscan import run_realityscan_alignment
 from .runs import begin_stage, complete_stage, fail_stage, save_run
+from .sources import copy_candidate_frames, validate_source_fingerprints
 from .vision_qa import load_local_mask_qa_review, run_deepseek_mask_qa
+from .trajectory import (
+    timestamps_from_metrics,
+    validate_trajectory_qa,
+    write_trajectory_qa,
+)
 
 
 VERSION_PATTERN = re.compile(r"^v\d{3}$")
@@ -250,18 +263,41 @@ def capture_path(scene_path: Path, capture_id: str) -> Path:
     return scene_path / "captures" / f"{capture_id}.yaml"
 
 
-def load_capture(scene_path: Path, capture_id: str) -> CaptureManifest:
-    return load_model(capture_path(scene_path, capture_id), CaptureManifest)
+def load_capture(
+    scene_path: Path, capture_id: str
+) -> CaptureManifest | CaptureManifestV2:
+    return load_capture_manifest(capture_path(scene_path, capture_id))
 
 
 def ingest_capture(
     project_root: Path,
     scene_path: Path,
     capture_id: str,
-    stitched_path: Path,
+    stitched_path: Path | None,
     resume: bool = False,
-) -> CaptureManifest:
+) -> CaptureManifest | CaptureManifestV2:
     capture = load_capture(scene_path, capture_id)
+    if isinstance(capture, CaptureManifestV2):
+        from .sources import probe_capture_source
+
+        if stitched_path is not None:
+            raise ValueError(
+                "Schema 2 sources are immutable and already explicit; omit --stitched"
+            )
+        probe = probe_capture_source(
+            capture, scene_path / "inputs" / "prepared" / ".protocol"
+        )
+        capture.source.probe = type(capture.source.probe)(
+            **{
+                name: value
+                for name, value in probe.items()
+                if name in type(capture.source.probe).model_fields
+            }
+        )
+        save_yaml(capture_path(scene_path, capture_id), capture)
+        return capture
+    if stitched_path is None:
+        raise ValueError("A stitched video path is required for a schema 1 capture")
     stitched = ensure_within(stitched_path, project_root)
     if not stitched.is_file():
         raise FileNotFoundError(
@@ -315,52 +351,105 @@ def preprocess_run(scene_path: Path, run: RunManifest, resume: bool = False) -> 
         if not run.tool_versions:
             run.tool_versions = collect_tool_versions()
         capture = load_capture(scene_path, run.config.capture_id)
-        if capture.stitched_video.sha256 != run.config.input_sha256:
-            raise RuntimeError("Capture input hash changed after the run was created")
-        video = ensure_within(scene_path / capture.stitched_video.relative_path, scene_path)
-        if not video.is_file():
-            raise FileNotFoundError(
-                f"Stitched video is missing: {video}. Export a 2:1 MP4 from the raw 360 media first."
+        schema_version = int(getattr(run.config, "schema_version", 1))
+        modern = schema_version >= 2
+        candidates_dir = work / (
+            "equirect-candidates" if modern else "equirect-primary"
+        )
+        explicit_timestamps: tuple[float, ...] | None = None
+        if schema_version == 3:
+            if not isinstance(capture, CaptureManifestV2):
+                raise RuntimeError("RunConfigV3 requires a schema 2 capture")
+            from .sources import _dataset_from_manifest
+
+            prepared = ensure_within(
+                scene_path / run.config.prepared_relative_path, scene_path
             )
-        probe = probe_video(video)
-        validate_equirectangular(probe)
-        selection_duration = capture.selection.end_seconds - capture.selection.start_seconds
-        budget = check_disk_budget(
-            # Intermediates land in the work directory, which the scratch redirect
-            # can place on a different filesystem than the scene tree.
-            work,
-            video.stat().st_size,
-            run.config.preprocess.minimum_free_gib,
-        )
-        is_v2 = getattr(run.config, "schema_version", 1) == 2
-        candidates_dir = work / ("equirect-candidates" if is_v2 else "equirect-primary")
-        frames = extract_uniform_frames(
-            video,
-            candidates_dir,
-            run.config.preprocess.target_frames,
-            selection_duration,
-            run.config.preprocess.jpeg_quality,
-            log_path,
-            start_seconds=capture.selection.start_seconds,
-        )
+            candidate_set = _dataset_from_manifest(prepared)
+            if candidate_set.dataset_sha256 != run.config.input_dataset_sha256:
+                raise RuntimeError("Prepared input hash changed after the run was created")
+            frames = copy_candidate_frames(candidate_set, candidates_dir, resume=resume)
+            explicit_timestamps = candidate_set.timestamps_seconds
+            probe = capture.source.probe.model_dump(mode="json")
+            selection_duration = (
+                capture.selection.end_seconds - capture.selection.start_seconds
+            )
+            budget = check_disk_budget(
+                work,
+                sum(item.byte_size for item in capture.source.files),
+                run.config.preprocess.minimum_free_gib,
+            )
+        else:
+            if not isinstance(capture, CaptureManifest):
+                raise RuntimeError("Legacy RunConfig requires a schema 1 capture")
+            if capture.stitched_video.sha256 != run.config.input_sha256:
+                raise RuntimeError("Capture input hash changed after the run was created")
+            video = ensure_within(
+                scene_path / capture.stitched_video.relative_path, scene_path
+            )
+            if not video.is_file():
+                raise FileNotFoundError(
+                    f"Stitched video is missing: {video}. Export a 2:1 MP4 from the raw 360 media first."
+                )
+            probe = probe_video(video)
+            validate_equirectangular(probe)
+            selection_duration = (
+                capture.selection.end_seconds - capture.selection.start_seconds
+            )
+            budget = check_disk_budget(
+                work,
+                video.stat().st_size,
+                run.config.preprocess.minimum_free_gib,
+            )
+            frames = extract_uniform_frames(
+                video,
+                candidates_dir,
+                run.config.preprocess.target_frames,
+                selection_duration,
+                run.config.preprocess.jpeg_quality,
+                log_path,
+                start_seconds=capture.selection.start_seconds,
+            )
         metrics_path = work / "frame-metrics.jsonl"
         records = analyze_frames(
             frames,
             selection_duration,
             metrics_path,
             start_seconds=capture.selection.start_seconds,
+            timestamps_seconds=explicit_timestamps,
+            selection_algorithm=(
+                "composite_v1" if schema_version == 3 else "legacy_laplacian"
+            ),
         )
         run.metrics["input"] = probe
         run.metrics["selection"] = capture.selection.model_dump(mode="json")
         run.metrics["disk_budget"] = budget
         candidate_summary = summarize_frame_metrics(records)
-        if is_v2:
+        if modern:
+            selection_metric = (
+                "selection_score"
+                if schema_version == 3
+                else "blur_laplacian_variance"
+            )
             primary_count = run.config.reconstruction.primary.frame_count
             primary_dir = work / "equirect-primary"
             selected_frames = create_blur_aware_subset(
-                candidates_dir, records, primary_dir, primary_count
+                candidates_dir,
+                records,
+                primary_dir,
+                primary_count,
+                selection_metric=selection_metric,
             )
-            selected_records = select_blur_aware_records(records, primary_count)
+            selected_records = select_blur_aware_records(
+                records, primary_count, selection_metric=selection_metric
+            )
+            (work / "selected-primary-metrics.jsonl").write_text(
+                "".join(
+                    json.dumps(item, ensure_ascii=False) + "\n"
+                    for item in selected_records
+                ),
+                encoding="utf-8",
+            )
             selected_summary = summarize_frame_metrics(selected_records)
             candidate_blur = float(candidate_summary["blur_median"])
             selected_blur = float(selected_summary["blur_median"])
@@ -384,7 +473,7 @@ def preprocess_run(scene_path: Path, run: RunManifest, resume: bool = False) -> 
                 f"Extracted and analyzed {len(frames)} candidate equirectangular frames"
                 + (
                     f"; selected {run.config.reconstruction.primary.frame_count} blur-aware frames"
-                    if is_v2
+                    if modern
                     else ""
                 )
             ),
@@ -585,7 +674,16 @@ def reconstruct_run(scene_path: Path, run: RunManifest, resume: bool = False) ->
     attempts: dict[str, Any] = {}
     try:
         primary_output = work / "reconstruction-primary"
-        primary_metrics = run_masked_colmap(
+        if getattr(run.config, "schema_version", 1) == 3:
+            primary_attempt = run.config.reconstruction.primary
+            validate_mask_finalization(
+                primary_output,
+                expected_reconstruction_images(
+                    primary_attempt.frame_count,
+                    primary_attempt.images_per_equirect,
+                ),
+            )
+        primary_metrics = run_realityscan_alignment(
             primary_output,
             run.config.reconstruction.primary,
             work / "logs" / "reconstruct-primary",
@@ -605,12 +703,33 @@ def reconstruct_run(scene_path: Path, run: RunManifest, resume: bool = False) ->
                 work
                 / (
                     "equirect-candidates"
-                    if getattr(run.config, "schema_version", 1) == 2
+                    if getattr(run.config, "schema_version", 1) >= 2
                     else "equirect-primary"
                 ),
                 metrics_records,
                 fallback_frames,
                 run.config.reconstruction.fallback.frame_count,
+                selection_metric=(
+                    "selection_score"
+                    if getattr(run.config, "schema_version", 1) == 3
+                    else "blur_laplacian_variance"
+                ),
+            )
+            fallback_records = select_blur_aware_records(
+                metrics_records,
+                run.config.reconstruction.fallback.frame_count,
+                selection_metric=(
+                    "selection_score"
+                    if getattr(run.config, "schema_version", 1) == 3
+                    else "blur_laplacian_variance"
+                ),
+            )
+            (work / "selected-fallback-metrics.jsonl").write_text(
+                "".join(
+                    json.dumps(item, ensure_ascii=False) + "\n"
+                    for item in fallback_records
+                ),
+                encoding="utf-8",
             )
             fallback_output = work / "reconstruction-fallback"
             fallback_masking = _prepare_masked_dataset(
@@ -623,7 +742,28 @@ def reconstruct_run(scene_path: Path, run: RunManifest, resume: bool = False) ->
                 "fallback",
             )
             run.metrics.setdefault("masking", {})["fallback"] = fallback_masking
-            fallback_metrics = run_masked_colmap(
+            if getattr(run.config, "schema_version", 1) == 3:
+                try:
+                    fallback_attempt = run.config.reconstruction.fallback
+                    validate_mask_finalization(
+                        fallback_output,
+                        expected_reconstruction_images(
+                            fallback_attempt.frame_count,
+                            fallback_attempt.images_per_equirect,
+                        ),
+                    )
+                except MaskFinalizationMissingError:
+                    run.metrics["reconstruction"] = attempts
+                    run.status = RunStatus.WAITING_REVIEW
+                    run.active_stage = "reconstruct"
+                    run.stages["reconstruct"].message = (
+                        "Fallback masks are ready; run mask-review and mask-finalize "
+                        "for --attempt fallback, then reconstruct --resume"
+                    )
+                    _record_resources(run, work)
+                    save_run(scene_path, run)
+                    return run
+            fallback_metrics = run_realityscan_alignment(
                 fallback_output,
                 run.config.reconstruction.fallback,
                 work / "logs" / "reconstruct-fallback",
@@ -640,6 +780,34 @@ def reconstruct_run(scene_path: Path, run: RunManifest, resume: bool = False) ->
                     "stop and prepare a recapture report"
                 )
 
+        if getattr(run.config, "schema_version", 1) == 3:
+            selected_label = (
+                "fallback" if selected.name.endswith("fallback") else "primary"
+            )
+            selected_attempt = getattr(
+                run.config.reconstruction, selected_label
+            )
+            selected_metrics_path = work / f"selected-{selected_label}-metrics.jsonl"
+            timestamps_by_frame = timestamps_from_metrics(selected_metrics_path)
+            expected_frames = range(1, selected_attempt.frame_count + 1)
+            trajectory = write_trajectory_qa(
+                selected,
+                timestamps_by_frame=timestamps_by_frame,
+                expected_frames=expected_frames,
+            )
+            run.metrics["trajectory_qa"] = {
+                **trajectory,
+                "report": (selected / "trajectory-qa.json")
+                .relative_to(scene_path)
+                .as_posix(),
+                "top_view": (selected / "trajectory-top.svg")
+                .relative_to(scene_path)
+                .as_posix(),
+            }
+            if trajectory["blocking"]:
+                raise RuntimeError(
+                    f"Trajectory QA found {len(trajectory['blocking'])} blocking issue(s)"
+                )
         run.metrics["reconstruction"] = attempts
         run.selected_dataset = selected.relative_to(scene_path).as_posix()
         _record_resources(run, work)
@@ -723,7 +891,7 @@ def _train_command(
     settings: TrainSettings | None = None,
 ) -> list[str]:
     settings = settings or TrainSettings()
-    if getattr(run.config, "schema_version", 1) == 2:
+    if getattr(run.config, "schema_version", 1) >= 2:
         effective_downscale = downscale or run.config.train.downscale_factor
         return [
             "ns-train",
@@ -778,6 +946,131 @@ def _train_command(
     return command
 
 
+def postshot_prepare_run(
+    scene_path: Path,
+    run: RunManifest,
+    resume: bool = False,
+    output: Path | None = None,
+) -> RunManifest:
+    if not begin_stage(run, "postshot_prepare", resume=resume):
+        return run
+    save_run(scene_path, run)
+    work = ensure_work_dir(scene_path, run.id)
+    log_path = work / "logs" / "postshot-prepare.log"
+    try:
+        result = prepare_postshot_dataset(scene_path, run, output=output, resume=resume)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(
+            json.dumps(
+                {
+                    "output_path": result["output_path"],
+                    "counts": result["counts"],
+                    "reused": result["reused"],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        complete_stage(
+            run,
+            "postshot_prepare",
+            message=(
+                f"Postshot dataset ready at {result['output_path']}; "
+                f"images={result['counts']['images']}; cameras={result['counts']['cameras']}; "
+                f"reused={result['reused']}"
+            ),
+            log_path=log_path.relative_to(scene_path).as_posix(),
+        )
+    except Exception as error:
+        fail_stage(
+            run, "postshot_prepare", str(error), log_path.relative_to(scene_path).as_posix()
+        )
+        save_run(scene_path, run)
+        raise
+    save_run(scene_path, run)
+    return run
+
+
+def postshot_train_run(
+    scene_path: Path,
+    run: RunManifest,
+    *,
+    resume: bool = False,
+    dry_run: bool = False,
+    allow_low_vram: bool = False,
+    profile: str = "Splat3",
+    ksteps: int | None = None,
+    max_splats: int | None = None,
+    gpu: int = 0,
+    dataset: Path | None = None,
+    output: Path | None = None,
+    store_training_context: bool = True,
+    export_ply: Path | None = None,
+    export_spz: Path | None = None,
+) -> tuple[RunManifest, dict[str, Any]]:
+    """Postshot-backed equivalent of the retired Nerfstudio train_run().
+
+    A dry run previews the training command without training anything, so it
+    deliberately does not touch RunManifest.stages -- only a real run marks
+    the "train" stage started/succeeded/failed.
+    """
+    if dry_run:
+        result = train_postshot(
+            scene_path,
+            run,
+            dry_run=True,
+            allow_low_vram=allow_low_vram,
+            profile=profile,
+            ksteps=ksteps,
+            max_splats=max_splats,
+            gpu=gpu,
+            dataset=dataset,
+            output=output,
+            store_training_context=store_training_context,
+            export_ply=export_ply,
+            export_spz=export_spz,
+        )
+        return run, result
+
+    if not begin_stage(run, "train", resume=resume):
+        return run, {"skipped": True}
+    save_run(scene_path, run)
+    work = ensure_work_dir(scene_path, run.id)
+    log_path = work / "logs" / "postshot-train.log"
+    try:
+        result = train_postshot(
+            scene_path,
+            run,
+            dry_run=False,
+            allow_low_vram=allow_low_vram,
+            profile=profile,
+            ksteps=ksteps,
+            max_splats=max_splats,
+            gpu=gpu,
+            dataset=dataset,
+            output=output,
+            store_training_context=store_training_context,
+            export_ply=export_ply,
+            export_spz=export_spz,
+        )
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        complete_stage(
+            run,
+            "train",
+            message=f"Postshot project: {result['output']}; sha256={result['output_sha256']}",
+            log_path=log_path.relative_to(scene_path).as_posix(),
+        )
+    except Exception as error:
+        fail_stage(run, "train", str(error), log_path.relative_to(scene_path).as_posix())
+        save_run(scene_path, run)
+        raise
+    save_run(scene_path, run)
+    return run, result
+
+
 def train_run(
     scene_path: Path,
     run: RunManifest,
@@ -807,6 +1100,24 @@ def train_run(
         attempt_one, max_iterations
     )
     try:
+        if getattr(run.config, "schema_version", 1) == 3:
+            selected_label = "fallback" if run.fallback_attempted else "primary"
+            selected_attempt = getattr(run.config.reconstruction, selected_label)
+            validate_mask_finalization(
+                dataset,
+                expected_reconstruction_images(
+                    selected_attempt.frame_count,
+                    selected_attempt.images_per_equirect,
+                ),
+            )
+            timestamps = timestamps_from_metrics(
+                work / f"selected-{selected_label}-metrics.jsonl"
+            )
+            validate_trajectory_qa(
+                dataset,
+                timestamps,
+                range(1, selected_attempt.frame_count + 1),
+            )
         if selected_config is None:
             retry_for_memory = _log_reports_memory_exhaustion(log_one)
             incomplete_attempt_one = _find_training_config(attempt_one)
@@ -1116,7 +1427,7 @@ def export_run(
             raise FileExistsError(f"Export directory is not empty: {export_dir}")
         export_dir.mkdir(parents=True, exist_ok=True)
         config = ensure_within(scene_path / run.metrics["train"]["config_path"], scene_path)
-        y_up_export = getattr(run.config, "schema_version", 1) == 2
+        y_up_export = getattr(run.config, "schema_version", 1) >= 2
         if y_up_export:
             staging = work / "export-staging" / version
             staging.mkdir(parents=True, exist_ok=True)

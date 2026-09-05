@@ -1,11 +1,31 @@
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
 
-def test_windows_wrapper_forwards_only_named_deepseek_environment_variable() -> None:
+
+def test_windows_wrapper_has_no_wsl_tunnel() -> None:
     root = Path(__file__).resolve().parents[1]
     wrapper = (root / "gsdb.ps1").read_text(encoding="utf-8")
-    assert "DEEPSEEK_API_KEY" in wrapper
-    assert "MIMO_API_KEY" not in wrapper
-    assert "MIMO_BASE_URL" not in wrapper
-    assert "WSLENV" in wrapper
-    assert "Bearer" not in wrapper
+    assert "wsl.exe" not in wrapper
+    assert "WSLENV" not in wrapper
+    assert ".venv" in wrapper
+
+
+def test_windows_wrapper_runs_gsdb_from_the_venv() -> None:
+    root = Path(__file__).resolve().parents[1]
+    venv_python = root / ".venv" / "Scripts" / "python.exe"
+    if not venv_python.is_file():
+        pytest.skip("native venv is not bootstrapped; run scripts/bootstrap-windows.ps1")
+    powershell = shutil.which("pwsh") or shutil.which("pwsh.exe") or shutil.which("powershell.exe")
+    if powershell is None:
+        pytest.skip("PowerShell is unavailable")
+    completed = subprocess.run(
+        [powershell, "-NoProfile", "-File", str(root / "gsdb.ps1"), "--help"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    assert completed.returncode == 0
+    assert "gsdb" in completed.stdout.lower()

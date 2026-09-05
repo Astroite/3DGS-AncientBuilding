@@ -12,6 +12,7 @@ from gsdb.models import (
     LegacyReconstructionConfigV1,
     ReconstructionAttempt,
     ReconstructionConfig,
+    ReconstructionConfigV3,
 )
 from gsdb.reconstruction import (
     _average_rotations,
@@ -116,6 +117,53 @@ def test_colmap_commands_use_gpu_fixed_intrinsics_rig_cameras_and_image_list(
     ]
     parameters = pinhole_camera_parameters(image_path, 120.0).split(",")
     assert abs(float(parameters[0]) - 28.867513) < 0.001
+
+
+def test_optional_loop_closure_and_exclusions_enter_colmap_commands(
+    tmp_path: Path,
+) -> None:
+    dataset = tmp_path / "dataset"
+    for view in range(8):
+        image = dataset / "images" / f"view_{view:02d}" / "frame_000001.jpg"
+        image.parent.mkdir(parents=True)
+        assert cv2.imwrite(str(image), np.zeros((32, 32, 3), dtype=np.uint8))
+    (dataset / "masks").mkdir()
+    excluded = "view_03/frame_000001.jpg"
+    (dataset / "mask-final.json").write_text(
+        json.dumps({"excluded_images": [excluded]}), encoding="utf-8"
+    )
+    vocabulary = tmp_path / "vocab.bin"
+    vocabulary.write_bytes(b"pinned vocabulary tree")
+    import hashlib
+
+    settings = ReconstructionConfigV3(
+        loop_closure={
+            "enabled": True,
+            "period": 20,
+            "num_images": 5,
+            "vocabulary_tree_path": str(vocabulary),
+            "vocabulary_tree_sha256": hashlib.sha256(vocabulary.read_bytes()).hexdigest(),
+        }
+    )
+    commands = build_colmap_commands(dataset, _attempt(), settings)
+    assert "loop_closure" not in commands
+    matching = commands["matching"]
+    assert matching[1] == "sequential_matcher"
+    assert matching[matching.index("--SequentialMatching.loop_detection") + 1] == "1"
+    assert matching[
+        matching.index("--SequentialMatching.loop_detection_period") + 1
+    ] == "20"
+    assert matching[
+        matching.index("--SequentialMatching.loop_detection_num_images") + 1
+    ] == "5"
+    assert matching[
+        matching.index("--SequentialMatching.vocab_tree_path") + 1
+    ] == str(vocabulary)
+    image_list = dataset / "colmap/attempt-001/image-list.txt"
+    assert excluded not in image_list.read_text(encoding="utf-8")
+    pairs = dataset / "pairs.txt"
+    write_cross_view_pair_list(pairs, _attempt(), {excluded})
+    assert excluded not in pairs.read_text(encoding="utf-8")
 
 
 def test_projection_specs_match_nerfstudio_orientation_counts_and_crop_math() -> None:

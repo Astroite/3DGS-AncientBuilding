@@ -27,16 +27,19 @@ class CommandError(RuntimeError):
         self.metrics = metrics or {}
 
 
-def _gpu_memory_used_mib() -> float | None:
+def _gpu_memory_used_mib(gpu_index: int | None = None) -> float | None:
     if shutil.which("nvidia-smi") is None:
         return None
     try:
+        command = [
+            "nvidia-smi",
+            "--query-gpu=memory.used",
+            "--format=csv,noheader,nounits",
+        ]
+        if gpu_index is not None:
+            command.append(f"--id={gpu_index}")
         result = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=memory.used",
-                "--format=csv,noheader,nounits",
-            ],
+            command,
             check=True,
             capture_output=True,
             text=True,
@@ -53,6 +56,7 @@ def run_logged(
     log_path: Path,
     cwd: Path | None = None,
     monitor_gpu: bool = False,
+    gpu_index: int | None = None,
 ) -> dict[str, float]:
     args = [str(item) for item in command]
     started = time.monotonic()
@@ -61,7 +65,7 @@ def run_logged(
 
     def sample_gpu() -> None:
         while not stop_monitor.is_set():
-            value = _gpu_memory_used_mib()
+            value = _gpu_memory_used_mib(gpu_index)
             if value is not None:
                 peak_gpu_mib.append(value)
             stop_monitor.wait(1.0)

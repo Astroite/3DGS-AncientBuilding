@@ -1,5 +1,9 @@
 # GSDB：古建筑 360 视频到 3DGS 参考库
 
+> 当前工具版本为 **0.2.0**。新建采集可使用 2:1 视频、2:1 图片序列，
+> 或获批 Desktop MediaSDK 明确支持型号的 INSV；旧 schema 1 清单和历史 run
+> 保持原样读取。完整命令见 [v0.2 多输入与质量门禁手册](docs/V0.2-MULTI-INPUT.md)。
+
 这个仓库按“地点 → 场景 → 采集 → 运行 → 产物”管理全景视频重建。地点是资料目录，场景才是一次 COLMAP/Splatfacto 可以独立处理的空间单元；长距离古镇素材应拆成有连续视觉重叠的院落、街段或走廊，不能把几十分钟视频直接塞进一个模型。
 
 当前试点：
@@ -14,7 +18,10 @@
 
 ## 数据边界
 
-- E 盘原始 `.insv` 永远按只读来源处理，CLI 不解码、不复制、不修改它。
+- E 盘原始 `.insv` 永远按只读来源处理，不复制、不修改。Python 不逆向格式；
+  仅在获批 Desktop MediaSDK 和 Windows helper 可用、且型号已验证时，helper 才会
+  只读解码本次选中的帧。X6 已随 MediaSDK 一并验证，可直接走 `insta360_insv`
+  源类型，不再要求 Insta360 Studio 手动导出。
 - Insta360 Studio 手工拼接得到的标准 2:1 MP4 和全部派生数据放在地点子项目内，由 Git 忽略。
 - YAML 是权威数据源；`catalog/catalog.sqlite` 只能通过 `gsdb catalog build` 重建。
 - 帧、检查点、COLMAP 数据库、训练输出和 Z-up 中间 PLY 不进入 Git；人工预览用的版本化 Y-up PLY 与 MP4 才通过 Git LFS 发布。
@@ -161,6 +168,44 @@ COLMAP 3.8 使用 GPU SIFT，`doctor` 不允许静默退回 CPU。每个 `view_X
 跨视图匹配本身耗时 20 秒（3780 个 pair 中 2793 个通过几何验证）。代价在 mapper：它不再半途放弃、而是真的去建一个完整模型，从 6.2 分钟增加到 36.9 分钟——换来的是整条 180×14 降级分支不必再跑。
 
 主流程使用 135×8 个 2048²/120° 透视视图、20% 底部裁剪和两个下采样层级。如果注册率或最大连通模型覆盖低于 70%，只进行一次确定性的降级尝试：从原始 270 候选帧按桶选 180 帧，转换为 180×14 个 1746²/110° 视图、裁底 15%，并生成自己的完整遮罩与 rig。第二次仍失败就停止。
+
+### postshot-prepare
+
+成功重建后，可把最终的 rig 约束 COLMAP 模型整理为 Postshot 可直接导入的数据集：
+
+```powershell
+.\gsdb.ps1 postshot-prepare LOCATION_ID SCENE_ID RUN_ID
+```
+
+新 v3 run 默认输出到 `locations/<location>/scenes/<scene>/inputs/postshot/<run>/`；
+旧 run 仍保留 `work/<run>/postshot/`。数据集包含平铺且唯一命名的
+`images/`、Postshot 白色忽略语义的 `masks/`、同步改名后的 `colmap/`
+二进制模型、`image-map.csv`、`dataset.json` 和 `IMPORT.md`。只导出最终模型中
+已注册的图像；原始图像、遮罩和 COLMAP 模型保持只读。中断后使用 `--resume`
+续作，也可用 `--output PATH` 指定其他 Windows 可访问位置。
+
+`postshot-train` 的输出必须使用 `.psht` 后缀。默认训练日志与血缘清单为项目旁的
+`postshot-train.log`、`training.json`；自定义项目名则使用
+`<name>.postshot-train.log`、`<name>.training.json`。成功与失败都会保留命令、版本、
+GPU 指标及已生成产物哈希。
+
+在 Postshot v1.1.69 或更新版本中同时导入 `images/` 与 `colmap/`，再把 `masks/` 添加到 Image Masks，选择 `Remove Occluders`，并确认 Camera Poses 为 `Import`、Image Selection 为 `Use All`。该数据集已有外部相机位姿，不要重新运行 camera tracking。
+
+### postshot-review
+
+可启动本地遮罩审核器，对已经整理的 Postshot 数据集做额外人工抽查：
+
+```powershell
+.\gsdb.ps1 postshot-review LOCATION_ID SCENE_ID RUN_ID
+```
+
+打开命令输出的 `http://127.0.0.1:8765`。页面按遮罩占比排序，支持原图、
+红色遮罩叠加、并排和遮罩单独查看，也可记录通过、漏遮人物、误遮背景或
+整图剔除建议。审核结论原子写入 Postshot 数据集下的 `mask-review.json`，不会
+修改原图或遮罩；页面右上角可导出 CSV。它是额外 QA 记录，不是训练门禁，也
+不会改写已经冻结的训练清单；强制门禁是在 COLMAP 前执行的 `mask-review` 与
+`mask-finalize`。使用 `--dataset PATH` 审核自定义输出，使用 `--port` 更改端口，
+终端按 `Ctrl+C` 停止服务。
 
 ### 入镜人物与拍摄者
 

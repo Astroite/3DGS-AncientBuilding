@@ -13,7 +13,7 @@ from gsdb.masking import (
     postprocess_person_mask,
     validate_mask_set,
 )
-from gsdb.models import MaskingConfig
+from gsdb.models import MaskingConfig, MaskingConfigV3
 
 
 def _write_image(path: Path, shape: tuple[int, int] = (32, 32)) -> None:
@@ -48,6 +48,38 @@ def test_person_mask_is_black_for_both_consumers(tmp_path: Path) -> None:
     summary = validate_mask_set(images, masks, max_masked_fraction=0.45)
     assert summary["deterministic_qa"] == "passed"
     assert summary["masked_images"] == 1
+
+
+def test_multiclass_dynamic_masks_record_counts_and_area(tmp_path: Path) -> None:
+    images = tmp_path / "images"
+    masks = tmp_path / "masks"
+    images.mkdir()
+    image_path = images / "frame_000001.jpg"
+    _write_image(image_path)
+    config = MaskingConfigV3(
+        classes=["person", "car"], dilation_pixels=0, closing_pixels=0
+    )
+
+    def predictor(image: np.ndarray) -> PersonPrediction:
+        person = np.zeros(image.shape[:2], dtype=bool)
+        car = np.zeros(image.shape[:2], dtype=bool)
+        person[1:3, 1:3] = True
+        car[10:13, 10:13] = True
+        return PersonPrediction(
+            mask=person | car,
+            detections=3,
+            detections_by_class={"person": 1, "car": 2},
+            masks_by_class={"person": person, "car": car},
+        )
+
+    records = generate_person_masks(
+        images, masks, config, tmp_path / "metrics.jsonl", predictor=predictor
+    )
+    assert records[0]["detections"] == 3
+    assert records[0]["classes"] == {
+        "person": {"detections": 1, "masked_fraction": round(4 / 1024, 8)},
+        "car": {"detections": 2, "masked_fraction": round(9 / 1024, 8)},
+    }
 
 
 def test_mask_resume_reuses_existing_file(tmp_path: Path) -> None:

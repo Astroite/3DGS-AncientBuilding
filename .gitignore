@@ -24,6 +24,9 @@ catalog/*.db
 # Heavy scene data. Manifests, QA summaries, and placeholder files remain tracked.
 locations/*/scenes/*/inputs/stitched/*
 !locations/*/scenes/*/inputs/stitched/.gitkeep
+locations/*/scenes/*/inputs/prepared/**
+locations/*/scenes/*/inputs/postshot/**
+locations/*/scenes/*/inputs/postshot-training/**
 locations/*/scenes/*/work/*
 !locations/*/scenes/*/work/.gitkeep
 locations/*/scenes/*/exports/**
@@ -45,6 +48,13 @@ locations/*/scenes/*/exports/**
 *.onnx
 *.db-shm
 *.db-wal
+
+# MediaSDK is an external licensed dependency; never vendor or commit its build outputs.
+tools/mediasdk-helper/build/
+tools/mediasdk-helper/vendor/
+tools/mediasdk-helper/**/*.dll
+tools/mediasdk-helper/**/*.lib
+tools/mediasdk-helper/**/*.exe
 
 # Published scene artifacts are versioned; large PLY/MP4 files use Git LFS.
 !locations/*/scenes/*/exports/*/splat.ply

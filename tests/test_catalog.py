@@ -2,8 +2,10 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from gsdb.catalog import build_catalog
-from gsdb.manifests import save_yaml
+from gsdb.manifests import load_yaml, save_yaml
 from gsdb.models import LocationManifest, RunConfig, SceneManifest
 from gsdb.runs import create_run
 
@@ -24,7 +26,7 @@ def test_catalog_rebuild_is_idempotent(tmp_path: Path) -> None:
         scene_path / "scene.yaml",
         SceneManifest(id="scene-001", location_id="site-001", display_name="测试场景"),
     )
-    create_run(
+    run = create_run(
         scene_path,
         "site-001",
         "scene-001",
@@ -47,3 +49,9 @@ def test_catalog_rebuild_is_idempotent(tmp_path: Path) -> None:
         "SELECT entity_id FROM search WHERE search MATCH ?", ("古建筑",)
     ).fetchone() == ("site-001",)
     connection.close()
+
+    payload = load_yaml(scene_path / "runs" / f"{run.id}.yaml")
+    payload["config"]["input_sha256"] = "d" * 64
+    save_yaml(scene_path / "runs" / f"{run.id}.yaml", payload)
+    with pytest.raises(RuntimeError, match="config hash mismatch"):
+        build_catalog(tmp_path)
