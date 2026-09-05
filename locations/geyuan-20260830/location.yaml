@@ -1,0 +1,14 @@
+schema_version: 1
+id: geyuan-20260830
+display_name: 个园 2026-08-30
+status: draft
+capture_date: '2026-08-30'
+region:
+  country_code: CN
+  province: 江苏省
+  city: 扬州市
+tags: []
+rights:
+  status: needs_review
+  notes: null
+notes: null

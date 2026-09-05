@@ -1,0 +1,10 @@
+schema_version: 1
+id: vid-20260823-104518-00-014
+location_id: yunxiu-20260822
+display_name: 云秀全景全片
+status: draft
+description: VID_20260823_104518_00_014 全景素材，完整时长重新导入。
+metric_scale: false
+quality_target: pipeline_proof
+default_capture_id: null
+notes: null

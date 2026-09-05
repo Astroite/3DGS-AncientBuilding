@@ -1,0 +1,44 @@
+schema_version: 2
+id: capture-014-full
+location_id: yunxiu-20260822
+scene_id: vid-20260823-104518-00-014
+status: draft
+source:
+  kind: insta360_insv
+  files:
+  - windows_path: E:\Photo\PhotosRaw\2026\2026-08-23\Insta360\VID_20260823_104518_00_014.insv
+    sha256: a281d92885b4b694d3273dd9be5ad1822275e348ddf7afb473433f3973cd95b3
+    byte_size: 3391966518
+  projection: dual_fisheye
+  probe:
+    width: 3840
+    height: 1920
+    fps: 29.97003
+    frame_count: 12812
+    duration_seconds: 427.493
+    codec: insv
+    camera_model: Insta360 X6
+    helper_version: 0.2.0
+    sdk_version: 3.1.5
+camera:
+  make: Insta360
+  model: X6
+  firmware: null
+selection:
+  start_seconds: 0.0
+  end_seconds: 427.493
+normalization:
+  projection: equirectangular
+  aspect_ratio: '2:1'
+  width: 3840
+  height: 1920
+  image_format: jpeg
+  jpeg_quality: 95
+  stitching: dynamic
+  flowstate: true
+  direction_lock: false
+  ai_denoise: false
+  sharpening: false
+  color_processing: false
+prepared_relative_path: null
+notes: null

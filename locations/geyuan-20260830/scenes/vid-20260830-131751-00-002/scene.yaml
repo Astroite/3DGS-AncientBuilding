@@ -1,0 +1,10 @@
+schema_version: 1
+id: vid-20260830-131751-00-002
+location_id: geyuan-20260830
+display_name: 个园全景全片
+status: draft
+description: VID_20260830_131751_00_002 全景素材，完整时长重新导入。
+metric_scale: false
+quality_target: pipeline_proof
+default_capture_id: null
+notes: null

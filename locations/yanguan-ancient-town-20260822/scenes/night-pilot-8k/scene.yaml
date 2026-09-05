@@ -1,0 +1,10 @@
+schema_version: 1
+id: night-pilot-8k
+location_id: yanguan-ancient-town-20260822
+display_name: 盐官古镇夜景 8K 流程试点
+status: draft
+description: 使用约 90.7 秒 8K 夜景全景视频验证流程；素材存在低照度、高反差和运动拖影，不作为正式质量标杆。
+metric_scale: false
+quality_target: pipeline_proof
+default_capture_id: null
+notes: null
