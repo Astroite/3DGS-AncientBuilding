@@ -15,10 +15,10 @@ is omitted. There is no CLI-native way to synthesize this file from scratch (see
 tools/realityscan-setup/README.md for the one-time GUI export instructions and
 exactly what was checked before concluding this).
 
-KNOWN GAP, not yet wired: mask application during alignment (COLMAP's
---ImageReader.mask_path equivalent). RealityScan's setImagesLayer/inpMaskOpts
-mechanism (see the design doc) has not been empirically verified yet -- treat
-alignment quality without masks as unproven until that lands.
+Schema 5 stages white-keep mask image layers and explicitly enables alignment
+masking with inpMaskOpts. The audit checks names, hashes and the executed command;
+it does not inspect RealityScan's internal feature selection. Historical settings
+retain their original behavior. See docs/CURRENT-WORKFLOW.md for current usage.
 """
 
 from __future__ import annotations

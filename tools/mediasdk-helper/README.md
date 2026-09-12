@@ -5,12 +5,18 @@ headers, DLLs, import libraries, models, license files, or built helper binaries
 into this repository. Keep all vendor material under `INSTA360_MEDIA_SDK_ROOT`;
 the repository's `build/` and `vendor/` paths are ignored as an additional guard.
 
-The checked-in C++ bridge is deliberately a `sdk_adapter_not_linked` protocol
-stub. Direct INSV decoding is not production-ready until the approved SDK has
-been linked in `src/insta360_bridge.cpp` and the hardware acceptance script has
-passed with real samples. `fake-helper.py` is only the CI seam; it never parses
-INSV. Python helpers are rejected by default; tests must deliberately set
-`GSDB_ALLOW_FAKE_MEDIA_HELPER=1`.
+The checked-in C++ bridge implements capabilities, metadata probing and frame
+export against MediaSDK and InsMetaDataSDK. It must be built against the locally
+installed SDK with `build.ps1`; the native workflow has exercised X6 decoding.
+Support for a particular source is determined by the helper capabilities and
+probe response, not by a model name in this document. Validate a new SDK/camera
+combination with `scripts/test-mediasdk-helper.ps1` before production use.
+`fake-helper.py` is only the CI seam; it never parses INSV. Python helpers are
+rejected by default; tests deliberately set `GSDB_ALLOW_FAKE_MEDIA_HELPER=1`.
+
+The user workflow is documented in [the current manual](../../docs/CURRENT-WORKFLOW.md).
+The JSON examples below illustrate the protocol and are not a complete camera
+support list. Build outputs and locally copied runtime DLLs remain ignored by Git.
 
 ## Invocation and common rules
 

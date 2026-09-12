@@ -1,248 +1,211 @@
-# 当前全流程执行手册：Windows → RealityScan → Postshot
+# Windows 360 重建工作手册
 
-**2026-09-12 增补：** 新 Run 已升级 schema 5：14 视图首选、0.5% 遮罩阈值、一次局部补选、分段 QA，以及 gsplat/Postshot 共用训练包。新功能和命令见 [Schema 5 执行说明](PIPELINE-V5.md)。下文 schema 4 参数保留用于历史 Run 恢复；不代表新默认。全量运行仍须先完成人工片段对照验收。
+本文件是 APP 唯一的日常操作手册。现行流程为 INSV / 标准全景输入 → schema 5 → RealityScan → 分段 QA → Postshot Splat ADC 或 Windows gsplat。脚本清单、兼容范围和历史归档见 [维护说明](MAINTENANCE.md)。
 
-核对日期：2026-09-09。适用工具版本 0.2.0、schema 2 采集 / schema 4 新 Run。
-基于 APP HEAD `2cae79784911e5f105b8805e7a5cadb1c401c63d` **及当前未提交修复**，不是声称该提交已经包含全部修复。保留工作区改动，不 reset/checkout 回历史版本。
+新 Run 使用现行默认，已有 Run 按原清单恢复。代码接入、短测试通过和最终画质验收分别记录，不互相替代。
 
-本页是当前操作入口。旧 README 的 WSL、`locations/.../scenes/.../inputs`、强制手工 MP4、`run-009-demo.ps1` 与 `train → export` 示例属于历史流程，不应套用本次 Windows/Postshot 路线。当前路线已实际跑到重建质量失败、独立 Postshot 包成功和 CLI 许可证失败；**尚未验证 Postshot 训练成功或正式发布闭环**。
+## 1. Windows 环境与检查
 
-## 1. 任意目录初始化 PowerShell 会话
-
-只修改第一行安装位置，后续命令不依赖当前工作目录。路径迁移时重新初始化；ID 为参数，不硬编码到程序。建议使用 PowerShell 7。
+准备 Python 3.10、PowerShell、NVIDIA 驱动、FFmpeg/FFprobe、RealityScan 2.2，以及所选后端需要的 Postshot。INSV 另需本机 Insta360 Desktop MediaSDK 和编译完成的 Windows helper。安装脚本不安装商业软件或 SDK。
 
 ```powershell
-$AppRoot = 'D:\Project\3DGS\APP' # 唯一安装路径；换机器时修改
-. (Join-Path $AppRoot 'scripts\session.ps1')
-# 自定义 Data 根目录：. (Join-Path $AppRoot 'scripts\session.ps1') -DataRoot 'F:\GSDB-Data'
-$LocationId = 'yanguan-ancient-town-20260822'
-$SceneId = 'night-walk-4k'
-$CaptureId = 'capture-009-4k'
-$SceneDir = Join-Path (Join-Path $env:GSDB_DATA_ROOT $LocationId) $SceneId
-Invoke-Gsdb --help
-```
-
-`session.ps1` 设置绝对 Data 路径、找到 APP 自己的 `.venv` 与本地 MediaSDK helper；`Invoke-Gsdb` 临时进入 APP、执行后恢复原目录，失败抛错。它不自动启动任何阶段。不要从裸 `python`、旧 WSL conda 或任意 PATH 上的 gsdb 启动。
-
-已有环境不重装。全新机器先安装 Python 3.10、NVIDIA 驱动及本机工具，再运行：
-
-```powershell
+$AppRoot = 'D:\Project\3DGS\APP'   # 改为实际 APP 路径
+$DataRoot = 'D:\Project\3DGS\Data' # 已存在的数据根目录
+# 仅首次安装运行以下两条，已有正常环境不要重复安装。
 & (Join-Path $AppRoot 'scripts\bootstrap-windows.ps1')
+& (Join-Path $AppRoot 'scripts\bootstrap-gsplat-windows.ps1')
+
+. (Join-Path $AppRoot 'scripts\session.ps1') -DataRoot $DataRoot
+Invoke-Gsdb --help
+Invoke-Gsdb doctor --backend all --require mediasdk
 ```
 
-本次使用 RealityScan 2.2、Postshot 1.1.69、MediaSDK 3.1.5 / helper 0.2.0、Insta360 X6。必要时显式设置（不要覆盖已配置的其他有效安装）：
+主环境是 `.venv`；独立训练与统一 PLY 评估环境是 `.venv-gsplat`，固定 PyTorch 2.1.2/cu118、gsplat 1.4.0 官方 Windows 轮子。即使使用 Postshot，CLI 训练后的统一评估也需要独立环境。预编译轮子不要求本地编译 CUDA 扩展。
+
+`session.ps1` 支持任意当前目录，初始化后使用 `Invoke-Gsdb`。绝对路径调用 `gsdb.ps1` 也会复用相同初始化。Data 路径优先级为显式 `-DataRoot`、已有 `GSDB_DATA_ROOT`、APP 同级 Data。已有 SDK/helper/trainer 环境变量保留；不读取或打印密钥值。
+
+按实际安装位置配置；已有正确配置无需重设：
 
 ```powershell
 $env:GSDB_REALITYSCAN_CLI = 'C:\Program Files\Epic Games\RealityScan_2.2\RealityScan.exe'
 $env:GSDB_REALITYSCAN_EXPORT_PARAMS = Join-Path $AppRoot 'tools\realityscan-setup\colmap-export-params.xml'
 $env:GSDB_POSTSHOT_CLI = 'C:\Program Files\Jawset Postshot\bin\postshot-cli.exe'
+$env:INSTA360_MEDIA_SDK_ROOT = Join-Path $AppRoot 'sdks\Insta360-MediaSDK'
 $env:GSDB_MEDIA_HELPER = Join-Path $AppRoot 'tools\mediasdk-helper\build\Release\gsdb-media-helper.exe'
-Invoke-Gsdb doctor
-& $env:GSDB_POSTSHOT_CLI --help
-nvidia-smi --query-gpu=name,memory.free,utilization.gpu --format=csv,noheader
-Get-PSDrive -PSProvider FileSystem | Select-Object Name,Used,Free
+# 自定义训练解释器时设置 GSDB_GSPLAT_PYTHON。
 ```
 
-RealityScan XML 见 [导出参数说明](../tools/realityscan-setup/README.md)。导出任务文件用 `registration.txt`，不能用保留名 `images.txt`；需要完整 cameras/images/points3D 三件套，退出码为 0 不能替代文件检查。不要凭空编造 XML 或改变相机参数。
+已有 SDK/helper 不重建。新安装见 [MediaSDK helper](../tools/mediasdk-helper/README.md)，导出设置见 [RealityScan 配置](../tools/realityscan-setup/README.md)。
 
-**先确认 Postshot CLI 的 Studio 许可证。** `--help` 成功只证明程序存在，不能证明有 CLI 权限。2026-09-09 实测 CLI 报 `Postshot Studio license required`，仍返回 0；必须同时查日志及 `.psht` 是否生成。没有 CLI 权限时直接走 GUI 导入，避免耗时准备后反复重试许可证错误。不要购买、登录他人账户或绕过许可证。
+`doctor --backend postshot` 为默认检查；`--backend gsplat` 检查独立环境 CUDA 前向/反向；`--backend all` 检查两者。公共检查包含主环境 CUDA、分割依赖、RealityScan、可解析的导出 XML、Data 可写性及剩余空间。检查使用工作区 GPU 锁，不运行实际重建或训练。CUDA COLMAP 仅在 `--require colmap` 时检查，现行流程不要求 WSL。
 
-## 2. 目录与新采集
+Postshot 版本可用不证明 Studio CLI 训练许可证可用。不能以帮助输出或退出码零判断训练成功；CLI 受限时使用第 4 节 GUI 路线。
 
-```text
-<workspace>/APP/                          源码、原生 .venv、工具、本文
-<workspace>/Data/<location>/location.yaml
-<workspace>/Data/<location>/<scene>/scene.yaml
-  captures/<capture>.yaml                 源文件、哈希、选段、拼接设置
-  prepared/<capture>/<hash>/              可重建缓存
-  <run>/manifest.yaml                    Run 状态与配置的权威记录
-  <run>/reconstruction-primary|fallback/  图像、遮罩、模型、轨迹报告
-  <run>/postshot/                         正式导入包
-  <run>/postshot-training/                Postshot 项目及训练日志
-```
+## 2. 从原片创建场景和 Capture
 
-已有地点、场景、采集跳过 init；已有 Run 恢复直接去第 4 节，不重新 preprocess 新建 Run。
+原片只读。地点是组织目录，场景是空间连续、可独立重建的街段或院落。同文件的不同选段用不同 Capture ID；已有地点、场景和 Capture 不重复 init，不覆盖清单更改输入。
 
 ```powershell
+$LocationId = 'my-location'
+$SceneId = 'my-scene'
+$CaptureId = 'capture-stable'
+$Source = 'D:\path\to\capture.insv' # 替换为真实原片
+$SceneDir = Join-Path (Join-Path $env:GSDB_DATA_ROOT $LocationId) $SceneId
+
 Invoke-Gsdb location init $LocationId --name '地点名称'
 Invoke-Gsdb scene init $LocationId $SceneId --name '场景名称'
-$Source = 'E:\path\capture.insv' # 明确选定的只读源文件
-Invoke-Gsdb capture init $LocationId $SceneId $CaptureId --source-type insta360_insv --source $Source --camera-model X6 --output-width 3840 --output-height 1920
+Invoke-Gsdb capture init $LocationId $SceneId $CaptureId `
+  --source-type insta360_insv --source $Source --camera-model X6 `
+  --output-width 3840 --output-height 1920 `
+  --start-seconds 0 --end-seconds 45
 Invoke-Gsdb media probe $LocationId $SceneId $CaptureId
 Invoke-Gsdb ingest $LocationId $SceneId $CaptureId
 ```
 
-实际命令名/选项以 `Invoke-Gsdb capture init --help` 为准。X6 可用获批 helper 直接解码，不必先用 Studio 导出 MP4。标准 2:1 全景视频改用 `--source-type equirect_video`，图片序列用 `equirect_sequence` 并明确 `--fps`；多源用重复 `--source`，不要把 16:9 重构视频当全景。要限定选段，在 capture init 增加 `--start-seconds`、`--end-seconds`；不传结束时间使用探测到的完整时长。不修改源文件或覆盖已有采集清单以变更选段，应创建新 CaptureId。
+示例创建前 45 秒候选窗口，结束时间必须在原片范围内。正式对照选择最早通过 QA 的连续 30 秒；窗口不足时另建更长 Capture，不降低门槛。全片 Capture 省略 `--end-seconds`，使用探测时长；这不等于应立即全片运行。
 
-## 3. 新 Run：预处理、遮罩与重建
+标准 2:1 视频使用 `--source-type equirect_video`；2:1 图片序列使用 `equirect_sequence` 并提供 `--fps`。不要将 16:9 重构视频当全景。INSV 不必先手工导出 MP4，实际型号支持以 helper capabilities 和 probe 为准。
+
+```text
+Data/<location>/location.yaml
+Data/<location>/<scene>/scene.yaml
+  captures/<capture>.yaml
+  prepared/<capture>/<hash>/
+  <run>/manifest.yaml
+  <run>/reconstruction-primary/
+  <run>/reconstruction-repair/       仅触发补选时产生
+  <run>/training-data/<segment>/
+  <run>/experiments/<experiment>/
+  qa/<run>.md
+```
+
+## 3. 新 Run、遮罩与重建
 
 ```powershell
-Invoke-Gsdb preprocess $LocationId $SceneId $CaptureId --candidate-fps 5 --selected-per-second 2 --primary-per-second 1 --fallback-per-second 2 --mask-discard-threshold 0.05 --no-mask-review-gate --no-vision-qa
-$RunId = '<复制 preprocess 实际输出的 Run ID>'
+Invoke-Gsdb preprocess $LocationId $SceneId $CaptureId
+$RunId = '<复制实际输出的 RUN_ID>'
 $RunDir = Join-Path $SceneDir $RunId
 Invoke-Gsdb mask $LocationId $SceneId $RunId
 Invoke-Gsdb reconstruct $LocationId $SceneId $RunId
+Invoke-Gsdb qa report $LocationId $SceneId $RunId
 ```
 
-小样试跑在**新建** preprocess 时增加 `--smoke`：只取前 5 秒、缩小投影，不等于本次全长运行。配置变化创建新 Run，`--resume` 不用于偷偷更改阈值、模型或分辨率。
+| 设置 | 新 Run 默认 |
+| --- | --- |
+| 候选 / 初选全景 | 5 fps / 每秒两张 |
+| 每张全景投影 | 14 视图、110°、1746 × 1746 |
+| 底部裁切 | 15% |
+| 遮罩整图剔除 | 严格大于 0.005（0.5%）；等于保留 |
+| 重试 | 最多一次局部补选，不放宽阈值 |
+| 正式训练外观 | SH 3 |
+| 默认后端 | Postshot Splat ADC |
 
-当前默认：5 fps 候选 / 每秒选 2 张；Primary rank 1 × 8 视图、2048、120°、底裁 20%；Fallback rank 1–2 × 14 视图、1746、110°、底裁 15%。Mask R-CNN 默认人物类别、置信度 0.25、像素阈值 0.50、gamma 0.75、膨胀 24 px、闭合 7 px。最终遮罩占比**严格大于 5%**整对剔除，等于 5% 保留。源遮罩黑色忽略；Postshot 包转换为白色忽略。
+人物遮罩默认 Mask R-CNN：置信度 0.25、像素阈值 0.50、推理 gamma 0.75、膨胀 24 px、闭合 7 px。推理 gamma 只用于人物检测，不是整体压暗训练图像。人工遮罩门禁和外部 vision QA 默认关闭；自动 mask-final 不代表人工审核。向外部服务发送图片须有明确授权。
 
-自动流程仍需完成 mask-final。人工审核和外部 vision QA 默认关闭；需要时只在新 Run 明确开启相应选项，先查看 `mask-review --help` / `mask-finalize --help`。不得把自动生成 final 当成人工审核完成。开启外部 vision QA 涉及发送抽样图像，需有用户授权。
+RealityScan 白色保留、黑色忽略，实际输入为 `图像名.jpg.mask.png` 图层和 `inpMaskOpts=1`。`alignment-masks.json` 核验逐图对应、哈希和启用命令，不声称读取了软件内部全部被屏蔽特征。刚性 rig 未启用；另做同全景中心一致性 QA。
 
-重建按最终实际图片清单计算注册率及最大组件覆盖率；Primary 不达 70% 才尝试 Fallback（过滤后时间桶不足也可触发）。工具、导出或许可证错误直接失败。Fallback 仍不达门槛或轨迹 QA 有阻断项时停止，不能将“有模型文件”等同于“重建成功”。RealityScan 本次未启用刚性 rig；不要把配置的 use_rig 或导入说明模板当作已实现的后端约束。
+初次对齐后，对少于三个剩余视图、未注册采样、超过两秒的缺口及异常区间，在前后各两秒内补入未选候选。原轮与 repair 独立 QA，选择有效覆盖更好的模型，不拼接不同坐标系。
 
-## 4. 恢复既有 Run：先检查，再备份，最后续跑
+`--smoke` 仅为前五秒、较小投影的链路检查，不自动训练，也不作为正式画质对照。改配置应新建 Run，恢复不能更换输入或阈值。
+
+## 4. 分段 QA 与训练
+
+`segments.json` 位于选中的 reconstruction 目录。`manifest.yaml` 的 `selected_dataset` 和 `metrics.selected_attempt` 是实际选择依据，不能假设总是 primary。
+
+三个结果独立解释：
+
+- 数据完整性：缺文件、相机错配、非有限位姿、错误时间戳阻断。
+- 分段适用性：至少十个时间采样、三个不同位置，分段实际输入图像注册率至少 70%；未通过分段隔离。
+- 路线覆盖：首尾缺失、未注册区间和长缺口单独报告。存在可训练分段不等于全路线完整。
+
+速度按真实时间间隔计算，阈值取十倍中位速度与中位速度加十倍稳健离散度中的较大值。长缺口切段但不判瞬移；旋转先消除投影朝向。异常通过切段、隔离处理，不用轨迹平滑掩盖。
+
+选择报告中实际 passed 的分段：
 
 ```powershell
-$RunId = '20260906T164624Z-97ab61db' # 换成目标 Run
-$RunDir = Join-Path $SceneDir $RunId
-Get-Content (Join-Path $RunDir 'manifest.yaml')
-Get-CimInstance Win32_Process | Where-Object {
-    $_.Name -match 'python|RealityScan|postshot|pwsh|powershell' -and
-    ($_.CommandLine -like "*$RunId*" -or $_.Name -match 'RealityScan|postshot')
-} | Select-Object ProcessId,ParentProcessId,Name,CommandLine
+$SegmentId = 'segment-001' # 替换为实际通过的 ID
+$NativeOutput = Join-Path $RunDir 'experiments\gsplat-photo-on'
+$PostshotOutput = Join-Path $RunDir 'experiments\postshot-photo-on'
+
+# 实际原生训练；先完成代表片段检查。
+Invoke-Gsdb train $LocationId $SceneId $RunId --segment $SegmentId `
+  --backend gsplat --output $NativeOutput
+
+# 只准备 Postshot 输入、适配包和命令。
+Invoke-Gsdb train $LocationId $SceneId $RunId --segment $SegmentId `
+  --backend postshot --output $PostshotOutput --dry-run
+# 有 Studio CLI 许可后，去掉 --dry-run 执行相同命令。
 ```
 
-确认不存在同一 Run 的活动进程，尤其工具子进程不一定包含 Run ID。不要因看到其他 Postshot GUI 就将其结束。命令行不可读或进程归属不明时继续核实；不要启动第二个相同重建。
+默认启用光度补偿，关闭用 `--no-photo-comp`；不同配置用不同输出目录。默认预算 `max(30000, 30 × 训练图片数)`；Postshot 按千步向上取整，以保存的实际命令为准。较长有效段可加 `--duration-seconds 30`，选完全位于通过分段内、重新核验注册率的最早窗口；不足时拒绝。
 
-以下备份清单与指标，不复制几十 GB 图片：
+两后端共享图片、遮罩、相机和初始化点。训练/验证按全景采样分组；初始化颜色只用未遮罩训练观测。gsplat 按需加载图像，遮罩排除 L1/SSIM 观测，评估处理遮罩边界，不把人物区域训练成黑色。曝光/白平衡按全景共享参数，固定参考并约束时间连续性，导出标准 SH 3。
+
+### Postshot GUI
+
+准备成功后使用 `$PostshotOutput\postshot-input`：
+
+1. 导入 `images` 与 `colmap`，Camera Poses=Import，Image Selection=Use All。
+2. `masks` 加入 Image Masks，选择 Remove Occluders：白色忽略，与 RealityScan 极性相反。
+3. 确认图像、遮罩及相机匹配，数量等于共享包训练组；不额外导入验证图片。
+4. 使用 Splat ADC、SH 3，额外抗锯齿关闭；光度补偿按本次实验开关设置。已有位姿不重新 tracking。
+5. 保存新的 `.psht` 并导出 PLY，记录设置。GUI 成功不自动更新 CLI `dispatch.json`，不得手改为 succeeded 冒充可复现实验。
+
+## 5. 恢复、结果与故障
+
+恢复前确认没有同一 Run 的活动进程，检查 manifest、阶段日志和过滤记录。MediaSDK、遮罩、重建及训练使用跨进程 GPU 锁，等待消息不代表失败。不要绕过锁另启 GPU 作业或重复提交同一 Run。
 
 ```powershell
-$Stamp = Get-Date -Format 'yyyyMMddTHHmmssfff'
-$Backup = Join-Path $RunDir "recovery-backups\$Stamp"
-New-Item -ItemType Directory -Path $Backup -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $RunDir 'manifest.yaml') -Destination $Backup
-Get-ChildItem -LiteralPath $RunDir -File -Filter '*metrics*' | Copy-Item -Destination $Backup
-foreach ($Attempt in @('primary','fallback')) {
-    $Src = Join-Path $RunDir "reconstruction-$Attempt"
-    $Dst = Join-Path $Backup $Attempt
-    New-Item -ItemType Directory -Path $Dst -Force | Out-Null
-    foreach ($Name in @('mask-filter.json','.mask-filter.pending.json','mask-final.json','trajectory-qa.json')) {
-        $File = Join-Path $Src $Name
-        if (Test-Path -LiteralPath $File) { Copy-Item -LiteralPath $File -Destination $Dst }
-    }
-}
-$LogDir = Join-Path $RunDir 'logs'
-New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
-$Log = Join-Path $LogDir "reconstruct-resume-$Stamp.log"
-Invoke-Gsdb reconstruct $LocationId $SceneId $RunId --resume *> $Log
-# 长任务用持久终端运行；另一终端执行下一条观察。不要重复提交 reconstruct。
-Get-Content -LiteralPath $Log -Tail 12 | ForEach-Object {
-    if ($_.Length -gt 500) { $_.Substring(0,500) + ' ... [truncated]' } else { $_ }
-}
+Get-Content -LiteralPath (Join-Path $RunDir 'manifest.yaml')
+# 根据实际失败阶段选择一条，不要无条件全部执行：
+Invoke-Gsdb preprocess $LocationId $SceneId $CaptureId --run-id $RunId --resume
+Invoke-Gsdb mask $LocationId $SceneId $RunId --resume
+Invoke-Gsdb reconstruct $LocationId $SceneId $RunId --resume
+Invoke-Gsdb qa report $LocationId $SceneId $RunId --resume
+
+# 同输入、同配置的原生检查点恢复：
+Invoke-Gsdb train $LocationId $SceneId $RunId --segment $SegmentId `
+  --backend gsplat --output $NativeOutput --resume
 ```
 
-预处理本身未完成时用 `Invoke-Gsdb preprocess $LocationId $SceneId $CaptureId --run-id $RunId --resume`；遮罩阶段中断用 `Invoke-Gsdb mask $LocationId $SceneId $RunId --resume`。选择实际失败阶段，不盲目从头跑。没有进度输出时结合日志时间、CPU、子进程确认存活；图像解码核验可能持续数分钟。
+改变分段时长、补偿或步数应使用新实验目录；Postshot CLI 不支持该 `--resume` 分支，需按保存项目另行继续。
 
-本次修复后的恢复顺序：投影/分割**之前**恢复 completed 或 pending 过滤记录；完整核验结构、阈值、路径、保留文件哈希及额外文件集合后，才删除属于已有 rejected 记录的额外文件。删除可中断续作；不重新建立可信清单。未知文件、保留文件缺失、非人工审核允许的哈希变化或阈值冲突均在删除前报具体路径并停止。不要手工删除 filter/final 或改哈希“修好”错误。
+| 文件或目录 | 含义 |
+| --- | --- |
+| Run 的 `manifest.yaml` | 阶段状态与配置的权威记录 |
+| `mask-filter.json` / `mask-final.json` | 剔除与最终输入清单，勿删除以绕过检查 |
+| `segments.json` / `repair-plan.json` | 分段来源证据 / 唯一一次补选身份 |
+| `training-data/<segment>/dataset.json` | 共享包、分组、相机和文件哈希 |
+| 实验 `dispatch.json` / `train.log` | 准备或实际执行状态、命令与日志 |
+| 原生 `checkpoint.pt` / `failure.json` | 检查点 / 失败和恢复说明 |
+| 原生 `training.json` / `runtime*.json` | 训练与运行环境记录 |
+| `model.ply` / `model.psht` | 高斯模型 / Postshot 项目，须结合状态检查 |
+| `evaluation/metrics.json` 及 PNG | 验证指标、预测/参考图与角度扫描 |
 
-run 指标缺失不等于遮罩未完成。恢复统计优先用 filter 的 `original_image_count` 和已有指标；检测统计缺失标记未知。`equirect-fallback` 已清理不要求重新投影；先看可信记录。严格校验、schema 1–3 和人工审核语义均保留。
+OOM 保留可恢复状态，不自动降分辨率或 SH。没有检查点的初始化失败按 failure.json 使用同输入新目录重试。哈希变化应调查原因，不重写哈希通过校验。训练资源含每图平均采样次数、点数、显存和耗时；恢复报告应辨明累计或本次运行计时。
 
-## 5. 正式 Postshot 路线：只接收成功重建
+Postshot 返回零但无模型时查看 Studio license 日志；导入包存在只表示准备成功。源模型或输入已清理后，历史报告无法代替可恢复数据。
+
+## 6. 对照、高亮诊断与全量条件
+
+通用对照入口不依赖预设地点、日期或旧 Run：
 
 ```powershell
-Invoke-Gsdb postshot-prepare $LocationId $SceneId $RunId --resume
-$Dataset = Join-Path $RunDir 'postshot'
-Get-Content (Join-Path $Dataset 'IMPORT.md')
+$ComparisonOutput = Join-Path $RunDir 'experiments\backend-comparison'
+& $GsdbPython (Join-Path $AppRoot 'scripts\compare-backends-v5.py') `
+  --run-dir $RunDir --segment $SegmentId --output $ComparisonOutput --dry-run
+if ($LASTEXITCODE -ne 0) { throw '检查 comparison.json 中的失败原因' }
 ```
 
-prepare 要求 reconstruct=succeeded 且 selected_dataset 存在，并继续检查轨迹与来源；当前失败 Run 不能直接用此命令。包中只含已注册图像、同步改名的 COLMAP 二进制模型、转换遮罩、image-map.csv、dataset.json 和 IMPORT.md。可用 `--output` 指定绝对路径；中断续作 `--resume`。逐张解码、哈希核验可能需数十分钟，不能把耗时当成挂起。
+去掉 `--dry-run` 会实际训练两后端的补偿开/关组合。`--backends gsplat` 或 `postshot` 限定后端，`--photo-comp both|on|off` 选择组合；`--resume` 恢复原生检查点并核验复用成功模型。失败或许可证阻断时返回非零，结果保存在 `comparison.json`；不会自动启动全场景。
 
-### GUI（本机 CLI 无 Studio 权限时的操作路径）
+使用同一全景分组、共享数据和验证相机，比较 PSNR、SSIM、LPIPS、覆盖、人物残留、细节、高亮及资源消耗。高亮诊断顺序：
 
-1. 打开 Postshot，同时将包内 `images` 与 `colmap` 拖入导入窗口。
-2. 将 `masks` 加入 Image Masks，选择 Remove Occluders（白色忽略）。
-3. Camera Poses=Import，Image Selection=Use All；确认匹配数量等于 dataset.json 的 images 数。
-4. 检查相机和点云，开始训练并保存 `.psht`。已有外部位姿，不再执行 camera tracking。
-5. 需要交换资产时从 Postshot GUI 导出支持的 PLY/SPZ；该操作未在本次验证，导出后检查实际文件、坐标与可视效果。
+1. 固定相机、显示曝光及色彩设置，对比 Postshot 内部和 PLY 渲染。
+2. 同模型对比正式 SH 3 与诊断 SH 0，查看未截断亮度和角度扫描。
+3. 对照曝光补偿、异常输入位姿、源图饱和高光和弱观测区域。
+4. 保留正式 SH 3，不默认整体压暗、统一删亮点或将真实灯光反射视作错误。
 
-### 有 Studio CLI 权限后的正式短跑/训练
+默认角度扫描只覆盖前三个验证相机的 ±30°，不保证命中全部异常视角；特定异常诊断需要对应模型、相机和源图。CUDA 冒烟及短训练只能验证链路，不能接受细节画质。
 
-```powershell
-$Project = Join-Path $RunDir 'postshot-training\smoke-1000.psht'
-Invoke-Gsdb postshot-train $LocationId $SceneId $RunId --dataset $Dataset --output $Project --profile Splat3 --ksteps 1 --max-splats 1000 --dry-run
-# dry-run 不验证许可证。实际启动：
-Invoke-Gsdb postshot-train $LocationId $SceneId $RunId --dataset $Dataset --output $Project --profile Splat3 --ksteps 1 --max-splats 1000
-```
-
-`ksteps=1` 是 1000 步；max-splats 单位为千，这里上限 100 万。短跑只验证链路，不是质量验收。默认保留训练上下文。已有输出不能覆盖，另取新项目名；项目存在不等于完成，读取对应 `.training.json` / `.postshot-train.log`。
-
-正式训练改用新文件名、移除短跑限制，让 Postshot 采用其默认步数/点数，或使用用户选定参数。要同时导出，给 `postshot-train` 增加 `--export-ply <绝对路径.ply>` **或** `--export-spz <绝对路径.spz>`，两者不能同传。
-
-**当前集成边界：** CLI 没有旧的 `train` 命令。现有 `gsdb export` 仍读取 Nerfstudio 的 `metrics.train.config_path`，不能拿 Postshot `.psht` 直接接它；不自动串 `export → qa report → qa approve`。Postshot 产物的版本发布、QA 清单联动尚待接通，人工看过结果也不能伪造已有 Run 的正式 artifacts。`Invoke-Gsdb catalog build` 只重建索引，不批准成果。
-
-## 6. 用户明确要求跳过轨迹 QA 的独立实验
-
-默认不走此分支。用户已明确授权本次实验时，直接执行，无需为相同授权重复询问。新场景不能继承本次授权。本脚本不修改 CLI/schema/正式门槛，不写回 Run；只在私有内存副本适配准备接口，并跳过 trajectory 校验。文件、遮罩和来源完整性仍检查，审核文件哈希在前后核对。只支持已具备 filter/final/trajectory 报告的 schema 4。
-
-```powershell
-$Label = 'trajectory-test-01' # 新实验用新标签
-& $GsdbPython (Join-Path $AppRoot 'scripts\prepare-postshot-experiment.py') --run-dir $RunDir --attempt fallback --label $Label --allow-failed-trajectory --reason '用户明确要求跳过轨迹 QA，测试 Postshot 导入' --resume
-if ($LASTEXITCODE -ne 0) { throw 'Experiment preparation failed; inspect audit' }
-$Dataset = Join-Path $RunDir "postshot-experiments\$Label\dataset"
-```
-
-此脚本只准备，不训练。实验目录有逐次 audit 和 TEST-ONLY.txt；dataset.json 的 validation=passed 仅表示文件结构/完整性，**不表示轨迹通过**。不要直接运行先前 `.repair-runs/.../run_test.py`：那是固定本次 ID、会自动训练的一次性脚本。
-
-实验包 GUI 按第 5 节导入。有 CLI Studio 权限、且用户授权测试训练时，直接使用 Postshot 原生命令（正式 GSDB 入口仍会正确阻断失败 Run）：
-
-```powershell
-$ExperimentDir = Split-Path $Dataset -Parent
-$Project = Join-Path $ExperimentDir 'smoke-1000.psht'
-if (Test-Path -LiteralPath $Project) { throw 'Choose a new output project name' }
-$CliLog = Join-Path $ExperimentDir ('postshot-' + (Get-Date -Format 'yyyyMMddTHHmmssfff') + '.log')
-$CommandArgs = @('train','--import',(Join-Path $Dataset 'images'),(Join-Path $Dataset 'colmap'),
-    '--import-masks',(Join-Path $Dataset 'masks'),'--profile','Splat3','--image-select','all',
-    '--max-image-size','0','--mask-mode','occluders','--gpu','0','--output',$Project,
-    '--store-training-context','--train-steps-limit','1','--max-num-splats','1000')
-$CommandArgs | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $ExperimentDir 'command.json')
-& $env:GSDB_POSTSHOT_CLI @CommandArgs *> $CliLog
-$Code = $LASTEXITCODE
-if ($Code -ne 0 -or -not (Test-Path -LiteralPath $Project)) {
-    Get-Content -LiteralPath $CliLog -Tail 12
-    throw "Postshot failed or produced no project (exit=$Code)"
-}
-Get-FileHash -LiteralPath $Project -Algorithm SHA256
-```
-
-## 7. 本次 Run 的接手状态（无需重新分析）
-
-`yanguan-ancient-town-20260822 / night-walk-4k / 20260906T164624Z-97ab61db`，capture-009-4k，X6 完整 293.86 秒，不是旧手册前 90 秒。采集清单源路径目前在 Data 地点目录，实际来源以 captures YAML 为准。
-
-- 遮罩 resume 修复已落地：原 8232 对，保留 6140 对，剔除 2092 对；独立核验保留哈希，清理重新出现的剔除对，filter 哈希保持不变；132 项相关测试通过。
-- 续跑 Primary 677/1730=39.13%；Fallback **4496/6140=73.2248%**，通过 70% 注册门槛。
-- 2026-09-09 01:21:29（上海时间）因轨迹 QA 3 项阻断结束：588 个预期时间采样中缺 121 个位姿；112→171、530→581 的位移分别约为中位步长 70.73、45.45 倍。跨越缺帧区间，不能声称是真实瞬移；模型单位未标定为米。
-- Run failed、selected_dataset=null。模型保留在 reconstruction-fallback/colmap，transforms.json 有 4496 帧；约 526 万稀疏点不是训练好的高斯点。
-- 用户随后明确授权跳过 QA 测试。**现成包**：`<RunDir>/postshot-test-qa-skipped`，4496 图像/遮罩/相机、5,259,955 稀疏点，文件校验通过。可直接 GUI 导入，无需重复打包。
-- CLI 短训练未实际进行：Postshot 1.1.69 提示 Studio license required，退出 0 但没有 `.psht`；未自动重试，原 Run 清单不变。GUI 导入训练尚未验证。
-- 修复记录：`<workspace>/.repair-runs/mask-resume-20260908/REPORT.md`；测试审计：`<workspace>/.repair-runs/postshot-test-20260909/result.json`。训练失败日志：`<RunDir>/postshot-test-training/smoke-1000.postshot-train.log`。
-
-后续对话可直接粘贴：
-
-> 先读 APP/AGENTS.md 和 APP/docs/CURRENT-WORKFLOW.md，使用 scripts/session.ps1 初始化原生 Windows 环境。保留未提交改动。目标 Run 为 20260906T164624Z-97ab61db；resume bug 已修复，重建因轨迹 QA 失败，Postshot 测试包已生成，CLI 因 Studio 许可证失败。不要重新投影、分割、重建或打包。按我这次明确指定的下一步操作；未指定时先报告现成成果与阻断。
-
-## 8. 验证与常见故障
-
-```powershell
-Push-Location -LiteralPath $AppRoot
-try {
-    & $GsdbPython -m pytest tests/test_masking.py tests/test_pipeline.py tests/test_mask_finalize.py tests/test_reconstruction.py tests/test_reconstruction_realityscan.py tests/test_mask_review.py tests/test_vision_qa.py
-    if ($LASTEXITCODE -ne 0) { throw 'Regression tests failed' }
-    git diff --check
-} finally { Pop-Location }
-```
-
-只改文档无需重跑昂贵重建。涉及遮罩恢复/重建代码才运行相关回归；运行完成后以结果为准，历史 132 passed 不代表后续变更自动通过。
-
-| 现象 | 下一步 |
-|---|---|
-| Python `Unable to create process`，指向本机 Python310 | 确認 APP venv 的基础解释器存在；本次是执行沙箱限制，使用工具的执行权限升级，不重建/删除环境 |
-| `rg` 不存在 | PowerShell `Select-String` / `Get-ChildItem`，不用为查文件安装工具 |
-| mask-filter 清单与文件数不同 | 修复后的 `--resume` 恢复；未知文件/哈希变化先排查，禁止删可信记录重建 |
-| equirect-fallback 不存在 | 可能是正常缓存回收；已有过滤记录和注册模型优先恢复 |
-| reconstruct 有 colmap 文件但 failed | 看 manifest 与 trajectory-qa.json；物理产物存在不代表阶段成功 |
-| 日志一行非常长 | Nerfstudio 转换可能打印全部相机字典；按上面限制单行长度，优先读 JSON/YAML 摘要 |
-| Postshot 返回 0 但无 psht | 读日志，尤其 Studio license；不报训练成功、不因退出 0 自动进入导出 |
-| Postshot prepare 没有百分比输出很久 | 源图像/遮罩核验和来源校验多次逐张解码；监测 CPU/进程，勿启动重复进程 |
-| 自动审批拒绝操作 | 保留已完成成果，报告被拒动作及原因，先做可执行部分，不用其他方式绕过 |
+自动测试与分段检查通过后，先完成人工人物、高亮和细节对照，再执行各场景完整的新 Capture/Run。gsplat 不自动成为默认。schema 5 分段可输出 PLY 和评估，但旧 `export → qa approve` 不是它的完整发布验收链；人工验收应保存与具体模型哈希对应的记录。

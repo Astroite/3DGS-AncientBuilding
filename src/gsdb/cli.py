@@ -130,21 +130,27 @@ def _fatal(error: Exception) -> None:
 @app.command()
 def doctor(
     minimum_free_gib: Annotated[float, typer.Option(help="Required free-space reserve")] = 20.0,
+    backend: Annotated[str, typer.Option(help="Training backend to check: postshot, gsplat, or all")] = "postshot",
     require: Annotated[
         list[str] | None,
-        typer.Option("--require", help="Require optional component: mediasdk or postshot"),
+        typer.Option("--require", help="Require additional component: mediasdk, postshot, or legacy colmap"),
     ] = None,
 ) -> None:
-    """Verify project write access, command-line tools, CUDA, and gsplat."""
-    checks = run_doctor(
-        _data_root(), minimum_free_gib=minimum_free_gib, require=set(require or [])
-    )
+    """Check Windows reconstruction dependencies and the selected training backend."""
+    try:
+        checks = run_doctor(
+            _data_root(), minimum_free_gib=minimum_free_gib, require=set(require or []), backend=backend
+        )
+    except Exception as error:
+        _fatal(error)
     table = Table("Check", "Result", "Detail")
     for name, result in checks.items():
         if name == "ok":
             continue
         ok, detail = result
         optional = name in {"mediasdk", "postshot"} and name not in set(require or [])
+        if name == "postshot" and backend in {"postshot", "all"}:
+            optional = False
         label = "PASS" if ok else ("UNAVAILABLE" if optional else "FAIL")
         table.add_row(
             name,
@@ -488,12 +494,12 @@ def preprocess(
             "--smoke",
             help=(
                 "Process only the first 5 seconds at the same 5/2 temporal density, "
-                "with smaller projections and a short training run"
+                "with smaller projections; does not start training"
             ),
         ),
     ] = False,
     train_iterations: Annotated[
-        int | None, typer.Option(help="Override the Splatfacto iteration count")
+        int | None, typer.Option(help="Legacy Splatfacto setting; segment training uses train --steps")
     ] = None,
 ) -> None:
     """Create a run, sample candidates by time density, and rank each second."""
@@ -706,7 +712,7 @@ def preprocess(
             if smoke:
                 console.print(
                     "[yellow]Smoke profile[/yellow]: first 5 seconds at 5 candidate fps "
-                    "and 2 selected per second, smaller projections and short training. "
+                    "and 2 selected per second, smaller projections; training is separate. "
                     "Use it to validate the pipeline, never to judge quality."
                 )
         run = preprocess_run(path, run, resume=resume)
@@ -845,10 +851,10 @@ def postshot_prepare(
     ] = False,
     output: Annotated[
         Path | None,
-        typer.Option(help="Optional output directory; v3 defaults to inputs/postshot/<run-id>"),
+        typer.Option(help="Optional legacy dataset output directory; schema 5 uses train --segment"),
     ] = None,
 ) -> None:
-    """Prepare registered images, poses, points and occluder masks for Postshot."""
+    """Legacy Run preparation. Schema 5 uses train --backend postshot --segment --dry-run."""
     try:
         root = _data_root()
         path = _scene(location_id, scene_id)
@@ -939,7 +945,7 @@ def postshot_train(
     export_ply: Annotated[Path | None, typer.Option()] = None,
     export_spz: Annotated[Path | None, typer.Option()] = None,
 ) -> None:
-    """Validate and launch Postshot with imported COLMAP poses and occluder masks."""
+    """Legacy dataset training. Schema 5 uses train --backend postshot --segment."""
     try:
         root = _data_root()
         path = _scene(location_id, scene_id)
@@ -1013,7 +1019,7 @@ def export_command(
         ),
     ] = False,
 ) -> None:
-    """Export PLY, preview, thumbnail, transforms, and artifact manifest.
+    """Legacy Nerfstudio asset publishing; not the schema 5 segment PLY export.
 
     Culling is a publishing decision, not a training one, so these options are not
     part of the run's config hash: the same run can publish several versions.

@@ -3,18 +3,14 @@ param(
     [Parameter(Mandatory = $true)][string]$LocationId,
     [Parameter(Mandatory = $true)][string]$SceneId,
     [Parameter(Mandatory = $true)][string]$CaptureId,
-    [ValidateRange(180, 5000)][int]$TargetFrames = 270,
+    [string]$RunId,
     [switch]$ResumePreparedCache
 )
 
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
-if ($env:GSDB_DATA_ROOT) {
-    $DataRoot = (Resolve-Path -LiteralPath $env:GSDB_DATA_ROOT).Path
-}
-else {
-    $DataRoot = (Resolve-Path -LiteralPath (Join-Path $ProjectRoot '..\Data')).Path
-}
+. (Join-Path $PSScriptRoot 'session.ps1')
+$DataRoot = $env:GSDB_DATA_ROOT
 if (-not $env:GSDB_MEDIA_HELPER) {
     throw 'Set GSDB_MEDIA_HELPER to the approved Windows x64 helper first.'
 }
@@ -43,8 +39,8 @@ if (-not $env:INSTA360_MEDIA_SDK_ROOT) {
     throw 'Set INSTA360_MEDIA_SDK_ROOT to the approved SDK installation first.'
 }
 $Gsdb = Join-Path $ProjectRoot 'gsdb.ps1'
-& $Gsdb doctor --require mediasdk
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+# Probe and exported-frame checks validate the SDK without requiring a trainer.
+# Use doctor separately for the complete pipeline.
 
 Write-Host 'Probing the real INSV source...'
 & $Gsdb media probe $LocationId $SceneId $CaptureId
@@ -52,13 +48,16 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $PreprocessArguments = @(
     'preprocess', $LocationId, $SceneId, $CaptureId,
-    '--target-frames', [string]$TargetFrames
+    '--candidate-fps', '5'
 )
-if ($ResumePreparedCache) {
+if ($RunId) {
+    $PreprocessArguments += @('--run-id', $RunId)
+}
+if ($ResumePreparedCache -or $RunId) {
     $PreprocessArguments += '--resume'
 }
 
-Write-Host "Exporting and validating $TargetFrames selected frames..."
+Write-Host 'Exporting and validating the capture at 5 fps candidate sampling...'
 $PreprocessOutput = @(& $Gsdb @PreprocessArguments 2>&1)
 $PreprocessOutput | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -95,15 +94,18 @@ $Manifest = Get-Content -Raw -LiteralPath $DatasetManifestPath |
 if (
     $Manifest.integrity -ne 'complete' -or
     $Manifest.lineage.capture_id -ne $CaptureId -or
-    [int]$Manifest.lineage.target_frames -ne $TargetFrames -or
+    [int]$Manifest.schema_version -ne 2 -or
+    [string]$Manifest.lineage.sampling.mode -ne 'fixed_rate_v1' -or
+    [double]$Manifest.lineage.sampling.candidate_fps -ne 5 -or
     $Manifest.lineage.source_kind -ne 'insta360_insv'
 ) {
     throw "The run references an incompatible prepared-input manifest: $DatasetManifestPath"
 }
 
 $Frames = @($Manifest.frames)
-if ($Frames.Count -ne $TargetFrames) {
-    throw "Expected $TargetFrames frame records, found $($Frames.Count)."
+$ExpectedFrames = [int]$Manifest.lineage.candidate_frame_count
+if ($ExpectedFrames -lt 1 -or $Frames.Count -ne $ExpectedFrames) {
+    throw "Expected $ExpectedFrames candidate records, found $($Frames.Count)."
 }
 $SourceFiles = @($Manifest.lineage.source_files)
 if ($SourceFiles.Count -notin @(1, 2)) {
@@ -111,7 +113,7 @@ if ($SourceFiles.Count -notin @(1, 2)) {
 }
 $UniqueIndices = @($Frames | ForEach-Object { [int]$_.source_frame_index } |
     Sort-Object -Unique)
-if ($UniqueIndices.Count -ne $TargetFrames) {
+if ($UniqueIndices.Count -ne $ExpectedFrames) {
     throw 'Candidate source-frame indices are not unique.'
 }
 if (-not $Manifest.lineage.helper_version -or -not $Manifest.lineage.sdk_version) {

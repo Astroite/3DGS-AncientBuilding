@@ -1,5 +1,0 @@
---- a/nerfstudio/process_data/equirect_utils.py
-+++ b/nerfstudio/process_data/equirect_utils.py
-@@
--    return torch.nn.functional.grid_sample(img, grid, mode="bicubic", padding_mode="zeros")
-+    return torch.nn.functional.grid_sample(img, grid, mode="bicubic", padding_mode="zeros").clamp(0.0, 1.0)

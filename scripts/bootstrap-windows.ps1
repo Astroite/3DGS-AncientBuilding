@@ -12,12 +12,14 @@ if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
         throw 'No system Python found on PATH. Install Python 3.10 first.'
     }
     & $SystemPython.Source -m venv $VenvPath
+    if ($LASTEXITCODE -ne 0) { throw 'Python environment creation failed' }
 }
 
 & $VenvPython -m pip install --upgrade pip
+if ($LASTEXITCODE -ne 0) { throw 'pip upgrade failed' }
 
-# Torch/torchvision first, from the CUDA-11.8 wheel index, matching the pin the WSL
-# conda env already proved working. Installing these before nerfstudio keeps pip's
+# Torch/torchvision first, from the pinned CUDA-11.8 wheel index.
+# Installing these before nerfstudio keeps pip's
 # resolver from silently swapping in a CPU-only or differently-CUDA'd build.
 & $VenvPython -m pip install torch==2.1.2 torchvision==0.16.2 `
     --index-url https://download.pytorch.org/whl/cu118
@@ -33,4 +35,4 @@ if ($LASTEXITCODE -ne 0) { throw 'nerfstudio patch failed' }
 & $VenvPython -m pip install --editable "$ProjectRoot[dev]"
 if ($LASTEXITCODE -ne 0) { throw 'gsdb editable install failed' }
 
-& (Join-Path $ProjectRoot 'gsdb.ps1') doctor
+Write-Output 'Main environment installed. Install the shared trainer/evaluator with scripts\bootstrap-gsplat-windows.ps1, then run gsdb.ps1 doctor --backend all.'

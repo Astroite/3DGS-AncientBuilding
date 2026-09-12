@@ -5,6 +5,7 @@ $global:GsdbPython = Join-Path $global:GsdbAppRoot '.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $global:GsdbPython -PathType Leaf)) {
     throw 'Native venv missing. Run APP/scripts/bootstrap-windows.ps1 first.'
 }
+if (-not $DataRoot) { $DataRoot = $env:GSDB_DATA_ROOT }
 if (-not $DataRoot) { $DataRoot = Join-Path (Split-Path $global:GsdbAppRoot -Parent) 'Data' }
 $env:GSDB_DATA_ROOT = (Resolve-Path -LiteralPath $DataRoot).Path
 $env:PYTHONUNBUFFERED = '1'

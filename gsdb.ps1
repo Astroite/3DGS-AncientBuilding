@@ -5,11 +5,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ProjectRoot = (Resolve-Path -LiteralPath $PSScriptRoot).Path
-$VenvPython = Join-Path $ProjectRoot '.venv\Scripts\python.exe'
-if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
-    throw "GSDB virtual environment is missing: $VenvPython. Run scripts\bootstrap-windows.ps1 first."
+try {
+    # session.ps1 selects .venv and preserves configured SDK/Data locations.
+    . (Join-Path $PSScriptRoot 'scripts\session.ps1')
+    Invoke-Gsdb @GsdbArgs
+    exit 0
 }
-
-& $VenvPython -m gsdb @GsdbArgs
-exit $LASTEXITCODE
+catch {
+    Write-Error -Message $_ -ErrorAction Continue
+    exit 1
+}

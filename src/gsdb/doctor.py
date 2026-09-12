@@ -10,6 +10,9 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree
+
+from .gpu_lock import gpu_locked
 
 
 def _version(command: list[str]) -> tuple[bool, str]:
@@ -139,52 +142,7 @@ def _colmap_gpu_sift_smoke(data_root: Path, gpu_index: int = 0) -> tuple[bool, s
         return False, str(error)
 
 
-def _wsl_memory_check(minimum_gib: float = 28.0) -> tuple[bool, str]:
-    version_path = Path("/proc/version")
-    if not version_path.is_file():
-        return True, "not running under WSL; WSL memory gate not applicable"
-    try:
-        version = version_path.read_text(encoding="utf-8", errors="replace")
-        if "microsoft" not in version.lower():
-            return True, "not running under WSL; WSL memory gate not applicable"
-        meminfo = Path("/proc/meminfo").read_text(encoding="utf-8")
-        line = next(item for item in meminfo.splitlines() if item.startswith("MemTotal:"))
-        total_gib = int(line.split()[1]) * 1024 / 1024**3
-        return (
-            total_gib >= minimum_gib,
-            f"WSL memory {total_gib:.1f} GiB; minimum {minimum_gib:.1f} GiB",
-        )
-    except Exception as error:
-        return False, str(error)
-
-
-def run_doctor(
-    data_root: Path,
-    minimum_free_gib: float = 20.0,
-    require: set[str] | None = None,
-) -> dict[str, Any]:
-    required = set(require or ())
-    unknown = required - {"mediasdk", "postshot"}
-    if unknown:
-        raise ValueError(f"Unknown optional doctor requirement(s): {sorted(unknown)}")
-    checks: dict[str, Any] = {}
-    checks["ffmpeg"] = _version(["ffmpeg", "-version"])
-    checks["ffprobe"] = _version(["ffprobe", "-version"])
-    checks["colmap_cuda_build"] = _colmap_cuda_build()
-    checks["colmap_gpu_sift"] = (
-        _colmap_gpu_sift_smoke(data_root)
-        if checks["colmap_cuda_build"][0]
-        else (False, "CUDA COLMAP build is required before the GPU SIFT smoke test")
-    )
-    checks["wsl_memory"] = _wsl_memory_check()
-
-    deepseek_key_present = bool(os.environ.get("DEEPSEEK_API_KEY"))
-    if deepseek_key_present:
-        checks["deepseek_environment"] = (
-            True,
-            "DEEPSEEK_API_KEY is present; value was not inspected or logged",
-        )
-
+def _torch_cuda_check() -> tuple[bool, str]:
     try:
         import torch
 
@@ -194,21 +152,105 @@ def run_doctor(
             value = torch.randn(32, 32, device="cuda", requires_grad=True)
             (value.square().mean()).backward()
             detail += f", gpu={torch.cuda.get_device_name(0)}"
-        checks["torch_cuda"] = (cuda_ok, detail)
+        return cuda_ok, detail
     except Exception as error:
-        checks["torch_cuda"] = (False, str(error))
+        return False, str(error)
 
+
+def _person_segmenter_check() -> tuple[bool, str]:
     try:
         from torchvision.models.detection import MaskRCNN_ResNet50_FPN_V2_Weights
 
-        weights = MaskRCNN_ResNet50_FPN_V2_Weights.DEFAULT
-        checks["person_segmenter"] = (
-            True,
-            f"torchvision Mask R-CNN available; weights={weights.name} "
-            "(download/cache is deferred until gsdb mask)",
-        )
+        return True, f"Mask R-CNN available; weights={MaskRCNN_ResNet50_FPN_V2_Weights.DEFAULT.name} (download/cache deferred until mask)"
     except Exception as error:
-        checks["person_segmenter"] = (False, str(error))
+        return False, str(error)
+
+
+def _training_python() -> Path:
+    app = Path(__file__).resolve().parents[2]
+    return Path(os.environ.get("GSDB_GSPLAT_PYTHON", str(app / ".venv-gsplat" / "Scripts" / "python.exe")))
+
+
+def _gsplat_runtime_check(python: Path) -> tuple[bool, str]:
+    """Check the separate environment without starting training or installing packages."""
+    if not python.is_file():
+        return False, f"Missing native environment: {python}; run bootstrap-gsplat-windows.ps1"
+    code = '''import json
+from importlib.metadata import version
+import torch
+import gsplat
+from gsplat import csrc
+assert torch.__version__.split('+')[0] == '2.1.2', 'Expected PyTorch 2.1.2'
+assert torch.version.cuda == '11.8', 'Expected CUDA 11.8 PyTorch build'
+assert version('gsplat').split('+')[0] == '1.4.0', 'Expected gsplat 1.4.0'
+assert torch.cuda.is_available(), 'CUDA unavailable in native training environment'
+means = torch.tensor([[0., 0., 3.]], device='cuda', requires_grad=True)
+quats = torch.tensor([[1., 0., 0., 0.]], device='cuda', requires_grad=True)
+scales = torch.full((1, 3), .2, device='cuda', requires_grad=True)
+opacities = torch.full((1,), .5, device='cuda', requires_grad=True)
+colors = torch.full((1, 3), .5, device='cuda', requires_grad=True)
+rgb, alpha, _ = gsplat.rasterization(means, quats, scales, opacities, colors,
+    torch.eye(4, device='cuda')[None],
+    torch.tensor([[[8., 0., 4.], [0., 8., 4.], [0., 0., 1.]]], device='cuda'), 8, 8)
+(rgb.sum() + alpha.sum()).backward()
+assert torch.isfinite(rgb).all(), 'Nonfinite CUDA output'
+assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in [means, quats, scales, opacities, colors]), 'Invalid CUDA gradients'
+torch.cuda.synchronize()
+print(json.dumps(dict(torch=torch.__version__, gsplat=version('gsplat'), cuda=torch.version.cuda, forward_backward='passed')))
+'''
+    try:
+        result = subprocess.run([str(python), "-c", code], capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=120)
+        lines = (result.stdout if result.returncode == 0 else result.stderr or result.stdout).strip().splitlines()
+        return result.returncode == 0, lines[-1] if lines else f"Native check exited {result.returncode}"
+    except Exception as error:
+        return False, str(error)
+
+
+@gpu_locked
+def run_doctor(
+    data_root: Path,
+    minimum_free_gib: float = 20.0,
+    require: set[str] | None = None,
+    backend: str = "postshot",
+) -> dict[str, Any]:
+    required = set(require or ())
+    if backend not in {"postshot", "gsplat", "all"}:
+        raise ValueError("backend must be postshot, gsplat, or all")
+    unknown = required - {"mediasdk", "postshot", "colmap"}
+    if unknown:
+        raise ValueError(f"Unknown optional doctor requirement(s): {sorted(unknown)}")
+    checks: dict[str, Any] = {}
+    checks["ffmpeg"] = _version(["ffmpeg", "-version"])
+    checks["ffprobe"] = _version(["ffprobe", "-version"])
+    if "colmap" in required:
+        checks["colmap_cuda_build"] = _colmap_cuda_build()
+        checks["colmap_gpu_sift"] = (
+            _colmap_gpu_sift_smoke(data_root) if checks["colmap_cuda_build"][0]
+            else (False, "CUDA COLMAP unavailable for explicit legacy check")
+        )
+    for name, resolver in _realityscan_resolvers().items():
+        try:
+            resolved = resolver()
+            if name == "realityscan_export":
+                ElementTree.parse(resolved)
+            checks[name] = (True, str(resolved))
+        except Exception as error:
+            checks[name] = (False, str(error))
+
+    deepseek_key_present = bool(os.environ.get("DEEPSEEK_API_KEY"))
+    if deepseek_key_present:
+        checks["deepseek_environment"] = (
+            True,
+            "DEEPSEEK_API_KEY is present; value was not inspected or logged",
+        )
+
+    checks["torch_cuda"] = _torch_cuda_check()
+    checks["person_segmenter"] = _person_segmenter_check()
+    python = _training_python()
+    checks["training_python"] = (python.is_file(), f"{python}; also used for shared PLY evaluation")
+    if backend in {"gsplat", "all"}:
+        checks["gsplat_cuda"] = _gsplat_runtime_check(python)
 
     try:
         with tempfile.NamedTemporaryFile(dir=data_root, prefix=".gsdb-doctor-", delete=True) as stream:
@@ -218,12 +260,12 @@ def run_doctor(
     except Exception as error:
         checks["data_writable"] = (False, str(error))
 
-    usage = shutil.disk_usage(data_root)
-    free_gib = usage.free / 1024**3
-    checks["disk_free"] = (
-        free_gib >= minimum_free_gib,
-        f"{free_gib:.1f} GiB free; minimum reserve {minimum_free_gib:.1f} GiB",
-    )
+    try:
+        free_gib = shutil.disk_usage(data_root).free / 1024**3
+        checks["disk_free"] = (free_gib >= minimum_free_gib,
+                              f"{free_gib:.1f} GiB free; minimum reserve {minimum_free_gib:.1f} GiB")
+    except Exception as error:
+        checks["disk_free"] = (False, str(error))
     try:
         from .sources import media_capabilities
 
@@ -245,7 +287,7 @@ def run_doctor(
         checks["postshot"] = (
             version_tuple >= POSTSHOT_MINIMUM_VERSION,
             (
-                f"Postshot {version}"
+                f"Postshot {version}; executable/version only, training license not verified"
                 if version_tuple >= POSTSHOT_MINIMUM_VERSION
                 else f"Postshot {version} is older than required 1.1.69"
             ),
@@ -253,9 +295,17 @@ def run_doctor(
     except Exception as error:
         checks["postshot"] = (False, f"optional unavailable: {error}")
 
+    if backend in {"postshot", "all"}:
+        required.add("postshot")
     checks["ok"] = all(
         result[0]
         for key, result in checks.items()
         if key != "ok" and (key not in {"mediasdk", "postshot"} or key in required)
     )
     return checks
+
+
+def _realityscan_resolvers():
+    from .reconstruction_realityscan import realityscan_executable, export_params_file
+
+    return {"realityscan": realityscan_executable, "realityscan_export": export_params_file}
