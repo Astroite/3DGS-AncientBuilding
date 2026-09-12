@@ -10,6 +10,7 @@ from gsdb.media import (
     analyze_frames,
     create_blur_aware_subset,
     extract_indexed_frames,
+    select_temporal_records,
     select_blur_aware_records,
     summarize_frame_metrics,
     validate_equirectangular,
@@ -86,3 +87,29 @@ def test_degenerate_tenengrad_does_not_fall_back_to_laplacian() -> None:
         "frame_000000.jpg",
         "frame_000002.jpg",
     ]
+
+
+def test_temporal_selection_ranks_each_second_and_keeps_partial_bucket() -> None:
+    records = [
+        {
+            "file": f"frame_{index + 1:06d}.jpg",
+            "timestamp_seconds": 7.3 + index * 0.2,
+            "selection_score": float(index % 5),
+        }
+        for index in range(12)
+    ]
+    selected = select_temporal_records(records, 7.3, 2)
+    assert len(selected) == 6
+    assert [item["time_bucket"] for item in selected] == [0, 0, 1, 1, 2, 2]
+    assert sorted(item["temporal_rank"] for item in selected[:2]) == [1, 2]
+    assert len([item for item in selected if item["temporal_rank"] == 1]) == 3
+
+
+def test_temporal_selection_breaks_score_ties_by_earlier_timestamp() -> None:
+    records = [
+        {"file": "late.jpg", "timestamp_seconds": 3.8, "selection_score": 1.0},
+        {"file": "early.jpg", "timestamp_seconds": 3.2, "selection_score": 1.0},
+    ]
+    selected = select_temporal_records(records, 3.0, 1)
+    assert selected[0]["file"] == "early.jpg"
+    assert selected[0]["temporal_rank"] == 1

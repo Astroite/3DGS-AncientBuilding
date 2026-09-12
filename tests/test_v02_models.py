@@ -11,7 +11,10 @@ from gsdb.models import (
     NormalizationSettings,
     PanoramaSource,
     PreparedInputConfig,
+    PreparedInputConfigV2,
     RunConfigV3,
+    RunConfigV4,
+    SourceProbe,
     SourceFile,
     TimeSelection,
 )
@@ -98,3 +101,82 @@ def test_run_config_v3_hash_includes_input_adapter_lineage() -> None:
     assert canonical_hash(first) == canonical_hash(second)
     second.input.candidate_frame_indices[0] = 9
     assert canonical_hash(first) != canonical_hash(second)
+
+
+def _run_config_v4(**overrides: object) -> RunConfigV4:
+    capture = _capture()
+    values = {
+        "capture_id": capture.id,
+        "input_dataset_sha256": "b" * 64,
+        "prepared_relative_path": "prepared/capture-001/hash",
+        "input": PreparedInputConfigV2(
+            source_kind="equirect_video",
+            source_sha256=["a" * 64],
+            source_probe=SourceProbe(
+                width=7680,
+                height=3840,
+                fps=30,
+                frame_count=72,
+                duration_seconds=2.4,
+                codec="h264",
+            ),
+            normalization=capture.normalization,
+            selection=TimeSelection(end_seconds=2.4),
+            candidate_frame_indices=list(range(12)),
+            candidate_fps=5.0,
+        ),
+    }
+    values.update(overrides)
+    return RunConfigV4(**values)
+
+
+def test_run_config_v4_defaults_to_five_two_primary_one_fallback_two() -> None:
+    config = _run_config_v4()
+    assert config.preprocess.candidate_fps == 5.0
+    assert config.preprocess.selected_per_second == 2
+    assert config.masking.mask_discard_threshold == 0.05
+    assert config.masking.mask_review_required is False
+    assert config.reconstruction.primary.temporal_rank_limit == 1
+    assert config.reconstruction.primary.images_per_equirect == 8
+    assert config.reconstruction.fallback.temporal_rank_limit == 2
+    assert config.reconstruction.fallback.images_per_equirect == 14
+
+
+def test_v5_upgrade_preserves_legacy_serialization_and_changes_new_defaults():
+    from gsdb.models import RunConfigV5
+    legacy=_run_config_v4()
+    serialized=legacy.model_dump(mode='json')
+    assert RunConfigV4.model_validate(serialized).model_dump(mode='json')==serialized
+    inputs={k:serialized[k] for k in ('capture_id','input_dataset_sha256','prepared_relative_path','input')}
+    new=RunConfigV5(**inputs)
+    assert new.reconstruction.primary.images_per_equirect==14
+    assert new.masking.mask_discard_threshold==0.005
+    assert legacy.reconstruction.primary.images_per_equirect==8
+    assert legacy.masking.mask_discard_threshold==0.05
+    invalid=new.model_dump(mode='json')
+    invalid['reconstruction']['repair_attempts']=2
+    with pytest.raises(ValueError):
+        RunConfigV5.model_validate(invalid)
+
+
+def test_run_config_v4_validates_temporal_density_chain() -> None:
+    with pytest.raises(ValueError, match="primary <= fallback"):
+        _run_config_v4(
+            preprocess={"candidate_fps": 5.0, "selected_per_second": 2},
+            reconstruction={
+                "primary": {
+                    "temporal_rank_limit": 2,
+                    "images_per_equirect": 8,
+                    "projection_fov_degrees": 120,
+                    "projection_size": 512,
+                    "crop_bottom": 0.2,
+                },
+                "fallback": {
+                    "temporal_rank_limit": 1,
+                    "images_per_equirect": 14,
+                    "projection_fov_degrees": 110,
+                    "projection_size": 512,
+                    "crop_bottom": 0.15,
+                },
+            },
+        )

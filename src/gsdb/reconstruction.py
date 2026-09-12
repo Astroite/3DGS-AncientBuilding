@@ -27,16 +27,21 @@ from .models import (
     LegacyReconstructionAttemptV1,
     LegacyReconstructionConfigV1,
     ReconstructionAttempt,
+    ReconstructionAttemptV4,
     ReconstructionConfig,
     ReconstructionConfigV3,
+    ReconstructionConfigV4,
 )
 from .media import sha256_file
 from .processes import run_logged
 
 
-AttemptConfig = ReconstructionAttempt | LegacyReconstructionAttemptV1
+AttemptConfig = ReconstructionAttempt | ReconstructionAttemptV4 | LegacyReconstructionAttemptV1
 ReconstructionSettings = (
-    ReconstructionConfig | ReconstructionConfigV3 | LegacyReconstructionConfigV1
+    ReconstructionConfig
+    | ReconstructionConfigV3
+    | ReconstructionConfigV4
+    | LegacyReconstructionConfigV1
 )
 
 class _WriteQueue:
@@ -76,8 +81,11 @@ class _WriteQueue:
             self._pool.shutdown(wait=True)
 
 
-def expected_planar_images(attempt: AttemptConfig) -> int:
-    return attempt.frame_count * attempt.images_per_equirect
+def expected_planar_images(attempt: AttemptConfig, frame_count: int | None = None) -> int:
+    resolved = frame_count if frame_count is not None else getattr(attempt, "frame_count", None)
+    if resolved is None:
+        raise ValueError("A dynamic reconstruction attempt requires an explicit frame_count")
+    return int(resolved) * attempt.images_per_equirect
 
 
 def projection_fov_degrees(attempt: AttemptConfig) -> float:
@@ -179,7 +187,9 @@ def project_equirectangular_frames(
     dataset: Path,
     attempt: AttemptConfig,
 ) -> list[Path]:
-    expected = expected_planar_images(attempt)
+    frames = image_files(source)
+    frame_count = int(getattr(attempt, "frame_count", len(frames)))
+    expected = expected_planar_images(attempt, frame_count)
     target = dataset / "images"
     if target.is_dir():
         existing = image_files(target)
@@ -230,16 +240,15 @@ def project_equirectangular_frames(
     import torch
     from nerfstudio.process_data.equirect_utils import equirect2persp
 
-    frames = image_files(source)
-    if len(frames) != attempt.frame_count:
+    if len(frames) != frame_count:
         raise RuntimeError(
-            f"Projection source has {len(frames)} frames; expected {attempt.frame_count}"
+            f"Projection source has {len(frames)} frames; expected {frame_count}"
         )
     device = torch.device("cuda")
     size = attempt.projection_size
     specs = projection_view_specs(attempt)
     reusable = validate_existing_projection_set(
-        target, attempt.frame_count, len(specs), size
+        target, frame_count, len(specs), size
     )
     target.mkdir(parents=True, exist_ok=True)
     for view_index in range(len(specs)):
@@ -310,121 +319,6 @@ def project_equirectangular_frames(
         raise RuntimeError(f"Projection produced {len(produced)} images; expected {expected}")
     return image_files(target)
 
-
-def pyramid_level_marker(dataset: Path, prefix: str, factor: int) -> Path:
-    """Marker recording that a level was written and fully validated once."""
-    return dataset / f".pyramid-complete-{prefix}_{factor}"
-
-
-def _pyramid_level_is_current(
-    target_dir: Path,
-    relatives: Sequence[Path],
-    source_shapes: dict[Path, tuple[int, int]],
-    factor: int,
-) -> bool:
-    """Header-only recheck of a level a previous run already validated in full.
-
-    Every file was written through ``atomic_imwrite``, so a name that exists holds
-    complete content; the header confirms it is the level this factor expects.
-    """
-    if {item.relative_to(target_dir) for item in image_files(target_dir)} != set(relatives):
-        return False
-
-    def check(relative: Path) -> None:
-        height, width = source_shapes[relative]
-        expected = (max(1, height // factor), max(1, width // factor))
-        if image_dimensions(target_dir / relative) != expected:
-            raise RuntimeError(
-                f"Existing pyramid file is invalid: {target_dir / relative}; "
-                f"expected shape {expected}"
-            )
-
-    try:
-        run_image_tasks(check, relatives)
-    except (OSError, RuntimeError):
-        return False
-    return True
-
-
-def build_image_pyramid(
-    source_dir: Path,
-    dataset: Path,
-    prefix: str,
-    num_downscales: int,
-    is_mask: bool = False,
-) -> None:
-    if num_downscales < 1:
-        return
-    sources = image_files(source_dir)
-    if not sources:
-        raise RuntimeError(f"No pyramid source images found in {source_dir}")
-    relatives = [source.relative_to(source_dir) for source in sources]
-    flag = cv2.IMREAD_GRAYSCALE if is_mask else cv2.IMREAD_COLOR
-    interpolation = cv2.INTER_NEAREST if is_mask else cv2.INTER_AREA
-    arguments: list[int] = [] if is_mask else [cv2.IMWRITE_JPEG_QUALITY, 95]
-
-    source_shapes: dict[Path, tuple[int, int]] | None = None
-    pending: list[tuple[int, Path]] = []
-    for level in range(1, num_downscales + 1):
-        factor = 2**level
-        target_dir = dataset / f"{prefix}_{factor}"
-        if pyramid_level_marker(dataset, prefix, factor).is_file():
-            if source_shapes is None:
-                source_shapes = dict(
-                    zip(
-                        relatives,
-                        run_image_tasks(
-                            lambda relative: image_dimensions(source_dir / relative),
-                            relatives,
-                        ),
-                    )
-                )
-            if _pyramid_level_is_current(target_dir, relatives, source_shapes, factor):
-                continue
-        pending.append((factor, target_dir))
-    if not pending:
-        return
-    for _, target_dir in pending:
-        target_dir.mkdir(parents=True, exist_ok=True)
-
-    def build(relative: Path) -> None:
-        source = source_dir / relative
-        image = cv2.imread(str(source), flag)
-        if image is None:
-            raise RuntimeError(f"Cannot decode pyramid source: {source}")
-        height, width = image.shape[:2]
-        for factor, target_dir in pending:
-            target = target_dir / relative
-            expected_shape = (max(1, height // factor), max(1, width // factor))
-            if target.exists():
-                existing = cv2.imread(str(target), flag)
-                if existing is None or existing.shape[:2] != expected_shape:
-                    raise RuntimeError(
-                        f"Existing pyramid file is invalid: {target}; "
-                        f"expected shape {expected_shape}"
-                    )
-                if is_mask and not set(int(value) for value in np.unique(existing)).issubset(
-                    {0, 255}
-                ):
-                    raise RuntimeError(f"Existing mask pyramid file is not binary: {target}")
-                continue
-            resized = cv2.resize(
-                image,
-                (expected_shape[1], expected_shape[0]),
-                interpolation=interpolation,
-            )
-            atomic_imwrite(target, resized, arguments)
-
-    run_image_tasks(build, relatives)
-    for factor, target_dir in pending:
-        actual = image_files(target_dir)
-        if {item.relative_to(target_dir) for item in actual} != set(relatives):
-            raise RuntimeError(
-                f"Pyramid {target_dir.name} does not exactly match its source file set"
-            )
-        pyramid_level_marker(dataset, prefix, factor).write_text(
-            "complete\n", encoding="utf-8"
-        )
 
 
 # COLMAP 3.8 ships ``ba_global_function_tolerance`` at 0, which switches off Ceres'

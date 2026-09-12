@@ -1,5 +1,7 @@
 from gsdb.cli import SMOKE_PROFILE, apply_smoke_profile
 from gsdb.models import ReconstructionAttempt, RunConfig
+from gsdb.media import select_temporal_records
+from gsdb.sources import fixed_rate_frame_indices
 
 
 def _defaults() -> dict[str, int | None]:
@@ -95,3 +97,20 @@ def test_smoke_projection_size_still_satisfies_the_reconstruction_bounds() -> No
     )
     assert attempt.projection_size == SMOKE_PROFILE["projection_size"]
     assert attempt.frame_count <= SMOKE_PROFILE["target_frames"]
+
+
+def test_v4_smoke_keeps_five_two_density_for_exact_25_10_40_counts() -> None:
+    _, timestamps = fixed_rate_frame_indices(300, 30.0, 0.0, 5.0, 5.0)
+    candidates = [
+        {
+            "file": f"frame_{index:06d}.jpg",
+            "timestamp_seconds": timestamp,
+            "selection_score": float(index % 5),
+        }
+        for index, timestamp in enumerate(timestamps, start=1)
+    ]
+    selected = select_temporal_records(candidates, 0.0, 2)
+    primary = [item for item in selected if item["temporal_rank"] == 1]
+    assert len(candidates) == 25
+    assert len(selected) == 10
+    assert len(primary) * 8 == 40

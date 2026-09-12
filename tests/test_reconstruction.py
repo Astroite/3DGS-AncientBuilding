@@ -20,14 +20,12 @@ from gsdb.reconstruction import (
     _rig_component_alignment,
     attach_frame_masks,
     build_colmap_commands,
-    build_image_pyramid,
     build_rig_config,
     center_spread_metrics,
     cross_view_pair_names,
     interleaved_image_names,
     latest_mapper_snapshot,
     pinhole_camera_parameters,
-    pyramid_level_marker,
     select_colmap_attempt,
     projection_view_specs,
     projection_world_from_camera,
@@ -510,23 +508,6 @@ def test_transforms_receive_matching_per_frame_mask_path(tmp_path: Path) -> None
     assert not list(tmp_path.glob(".transforms.json.*.tmp"))
 
 
-def test_mask_pyramid_keeps_binary_values_and_colmap_filename(tmp_path: Path) -> None:
-    source = tmp_path / "masks"
-    (source / "view_00").mkdir(parents=True)
-    mask = np.full((16, 16), 255, dtype=np.uint8)
-    mask[4:12, 4:12] = 0
-    assert cv2.imwrite(str(source / "view_00" / "view.jpg.png"), mask)
-    build_image_pyramid(source, tmp_path, "masks", 2, is_mask=True)
-    build_image_pyramid(source, tmp_path, "masks", 2, is_mask=True)
-    for factor in (2, 4):
-        result = cv2.imread(
-            str(tmp_path / f"masks_{factor}" / "view_00" / "view.jpg.png"),
-            cv2.IMREAD_GRAYSCALE,
-        )
-        assert result is not None
-        assert set(int(value) for value in np.unique(result)).issubset({0, 255})
-
-
 def test_cross_view_pairs_link_every_view_within_one_frame_only(tmp_path: Path) -> None:
     attempt = _attempt(8)
     pairs = cross_view_pair_names(attempt)
@@ -556,53 +537,6 @@ def test_cross_view_matching_is_skipped_for_legacy_flat_datasets(tmp_path: Path)
     commands = build_colmap_commands(dataset, legacy, LegacyReconstructionConfigV1())
     assert "cross_view" not in commands
     assert set(commands) == {"features", "matching", "mapping"}
-
-
-def test_pyramid_marker_allows_header_only_revalidation(tmp_path: Path) -> None:
-    source = tmp_path / "images"
-    (source / "view_00").mkdir(parents=True)
-    image_path = source / "view_00" / "frame_000001.jpg"
-    assert cv2.imwrite(str(image_path), np.full((64, 64, 3), 120, dtype=np.uint8))
-    build_image_pyramid(source, tmp_path, "images", 2)
-    marker = pyramid_level_marker(tmp_path, "images", 2)
-    assert marker.is_file()
-    downscaled = tmp_path / "images_2" / "view_00" / "frame_000001.jpg"
-    original = downscaled.read_bytes()
-
-    calls: list[str] = []
-    real_imread = cv2.imread
-
-    def counting_imread(path: str, *arguments: object) -> object:
-        calls.append(path)
-        return real_imread(path, *arguments)
-
-    cv2.imread = counting_imread  # type: ignore[assignment]
-    try:
-        build_image_pyramid(source, tmp_path, "images", 2)
-    finally:
-        cv2.imread = real_imread  # type: ignore[assignment]
-    assert calls == []
-    assert downscaled.read_bytes() == original
-
-    # A level whose contents no longer match the factor is still rejected.
-    assert cv2.imwrite(str(downscaled), np.zeros((8, 8, 3), dtype=np.uint8))
-    with pytest.raises(RuntimeError, match="Existing pyramid file is invalid"):
-        build_image_pyramid(source, tmp_path, "images", 2)
-
-
-def test_pyramid_without_marker_still_fully_validates_existing_masks(tmp_path: Path) -> None:
-    source = tmp_path / "masks"
-    (source / "view_00").mkdir(parents=True)
-    mask = np.zeros((64, 64), dtype=np.uint8)
-    mask[:32] = 255
-    assert cv2.imwrite(str(source / "view_00" / "view.jpg.png"), mask)
-    target_dir = tmp_path / "masks_2" / "view_00"
-    target_dir.mkdir(parents=True)
-    assert cv2.imwrite(
-        str(target_dir / "view.jpg.png"), np.full((32, 32), 128, dtype=np.uint8)
-    )
-    with pytest.raises(RuntimeError, match="not binary"):
-        build_image_pyramid(source, tmp_path, "masks", 1, is_mask=True)
 
 
 def test_interleaved_image_names_orders_frame_major_for_the_colmap_image_list(

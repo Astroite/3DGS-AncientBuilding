@@ -15,6 +15,7 @@ from .catalog import build_catalog
 from .doctor import run_doctor
 from .manifests import load_capture_manifest, load_model, save_yaml
 from .mask_finalize import expected_reconstruction_images, finalize_mask_dataset
+from .masking import validate_mask_filter
 from .mask_review import create_mask_review_server
 from .models import (
     CaptureManifest,
@@ -24,10 +25,13 @@ from .models import (
     NormalizationSettings,
     PanoramaSource,
     PreparedInputConfig,
+    PreparedInputConfigV2,
     Region,
     Rights,
     RunConfig,
     RunConfigV3,
+    RunConfigV4,
+    RunConfigV5,
     SceneManifest,
     SourceFile,
     SourceProbe,
@@ -81,6 +85,8 @@ SMOKE_PROFILE: dict[str, int] = {
     "mask_qa_sample_count": 8,
     "train_iterations": 5000,
 }
+
+SMOKE_DURATION_SECONDS = 5.0
 
 
 SMOKE_CEILINGS: dict[str, int] = {
@@ -403,17 +409,30 @@ def preprocess(
     capture_id: Annotated[str, typer.Argument()],
     run_id: Annotated[str | None, typer.Option(help="Existing run ID when resuming")] = None,
     resume: Annotated[bool, typer.Option(help="Reuse completed work in the same run")] = False,
-    target_frames: Annotated[int, typer.Option()] = 270,
+    target_frames: Annotated[
+        int | None,
+        typer.Option(help="Deprecated fixed candidate count; legacy runs only"),
+    ] = None,
     primary_frames: Annotated[
-        int, typer.Option(help="Blur-aware frames selected for the primary reconstruction")
-    ] = 135,
+        int | None, typer.Option(help="Deprecated; legacy runs only")
+    ] = None,
     primary_fov: Annotated[
         float, typer.Option(help="Primary perspective horizontal FOV in degrees")
-    ] = 120.0,
+    ] = 110.0,
     primary_projection_size: Annotated[
         int, typer.Option(help="Primary square perspective image size")
-    ] = 2048,
-    fallback_frames: Annotated[int, typer.Option()] = 180,
+    ] = 1746,
+    fallback_frames: Annotated[int | None, typer.Option(help="Deprecated; legacy runs only")] = None,
+    candidate_fps: Annotated[float, typer.Option(help="Candidate panorama sampling rate")] = 5.0,
+    selected_per_second: Annotated[
+        int, typer.Option(help="Best panorama candidates retained in each one-second bucket")
+    ] = 2,
+    primary_per_second: Annotated[
+        int, typer.Option(help="Temporal ranks used by the primary attempt")
+    ] = 2,
+    fallback_per_second: Annotated[
+        int, typer.Option(help="Temporal ranks used by the fallback attempt")
+    ] = 2,
     fallback_fov: Annotated[float, typer.Option()] = 110.0,
     fallback_projection_size: Annotated[int, typer.Option()] = 1746,
     mask_device: Annotated[str, typer.Option(help="Person segmenter device: cuda or cpu")] = "cuda",
@@ -430,8 +449,16 @@ def preprocess(
         int, typer.Option(help="Pixel radius added around detected people")
     ] = 24,
     max_masked_fraction: Annotated[
-        float, typer.Option(help="Reject a view when its ignored fraction exceeds this value")
-    ] = 0.45,
+        float | None,
+        typer.Option(help="Deprecated mask ceiling; legacy runs only"),
+    ] = None,
+    mask_discard_threshold: Annotated[
+        float, typer.Option(help="Delete a perspective view when its ignored fraction exceeds this value")
+    ] = 0.005,
+    mask_review_gate: Annotated[
+        bool,
+        typer.Option("--mask-review-gate/--no-mask-review-gate", help="Require human mask finalization"),
+    ] = False,
     mask_qa_sample_count: Annotated[
         int, typer.Option(help="Perspective views sampled for person-mask QA")
     ] = 16,
@@ -460,8 +487,8 @@ def preprocess(
         typer.Option(
             "--smoke",
             help=(
-                "Reduced end-to-end profile for plumbing checks: fewer frames, smaller "
-                "projections and a short training run. Never a quality baseline."
+                "Process only the first 5 seconds at the same 5/2 temporal density, "
+                "with smaller projections and a short training run"
             ),
         ),
     ] = False,
@@ -469,64 +496,38 @@ def preprocess(
         int | None, typer.Option(help="Override the Splatfacto iteration count")
     ] = None,
 ) -> None:
-    """Create a run, extract uniform panorama frames, and measure input quality."""
+    """Create a run, sample candidates by time density, and rank each second."""
     try:
         path = _scene(location_id, scene_id)
         if run_id:
             run = load_run(path, run_id)
         else:
-            if smoke:
-                # A distinct config hash keeps smoke output in its own run directory,
-                # so it can never be mistaken for or overwrite a full-quality run.
-                reduced = apply_smoke_profile(
-                    {
-                        "target_frames": target_frames,
-                        "primary_frames": primary_frames,
-                        "fallback_frames": fallback_frames,
-                        "primary_projection_size": primary_projection_size,
-                        "fallback_projection_size": fallback_projection_size,
-                        "mask_qa_sample_count": mask_qa_sample_count,
-                        "train_iterations": train_iterations,
-                    }
-                )
-                target_frames = int(reduced["target_frames"])
-                primary_frames = int(reduced["primary_frames"])
-                fallback_frames = int(reduced["fallback_frames"])
-                primary_projection_size = int(reduced["primary_projection_size"])
-                fallback_projection_size = int(reduced["fallback_projection_size"])
-                mask_qa_sample_count = int(reduced["mask_qa_sample_count"])
-                train_iterations = int(reduced["train_iterations"])
             capture = load_capture_manifest(
                 path / "captures" / f"{capture_id}.yaml"
             )
-            masking = {
-                "device": mask_device,
-                "score_threshold": mask_score_threshold,
-                "probability_threshold": mask_probability_threshold,
-                "inference_gamma": mask_gamma,
-                "dilation_pixels": mask_dilation_pixels,
-                "max_masked_fraction": max_masked_fraction,
-                "qa_sample_count": mask_qa_sample_count,
-            }
-            reconstruction = {
-                "primary": {
-                    "frame_count": primary_frames,
-                    "images_per_equirect": 8,
-                    "projection_fov_degrees": primary_fov,
-                    "projection_size": primary_projection_size,
-                    "crop_bottom": 0.20,
-                    "use_rig": True,
-                },
-                "fallback": {
-                    "frame_count": fallback_frames,
-                    "images_per_equirect": 14,
-                    "projection_fov_degrees": fallback_fov,
-                    "projection_size": fallback_projection_size,
-                    "crop_bottom": 0.15,
-                    "use_rig": True,
-                },
-            }
             if isinstance(capture, CaptureManifest):
+                legacy_target = target_frames if target_frames is not None else 270
+                legacy_primary = primary_frames if primary_frames is not None else 135
+                legacy_fallback = fallback_frames if fallback_frames is not None else 180
+                if smoke:
+                    reduced = apply_smoke_profile(
+                        {
+                            "target_frames": legacy_target,
+                            "primary_frames": legacy_primary,
+                            "fallback_frames": legacy_fallback,
+                            "primary_projection_size": primary_projection_size,
+                            "fallback_projection_size": fallback_projection_size,
+                            "mask_qa_sample_count": mask_qa_sample_count,
+                            "train_iterations": train_iterations,
+                        }
+                    )
+                    legacy_target = int(reduced["target_frames"])
+                    legacy_primary = int(reduced["primary_frames"])
+                    legacy_fallback = int(reduced["fallback_frames"])
+                    primary_projection_size = int(reduced["primary_projection_size"])
+                    fallback_projection_size = int(reduced["fallback_projection_size"])
+                    mask_qa_sample_count = int(reduced["mask_qa_sample_count"])
+                    train_iterations = int(reduced["train_iterations"])
                 if not capture.stitched_video.sha256:
                     raise RuntimeError(
                         "Capture has not been ingested; run gsdb ingest first"
@@ -535,17 +536,85 @@ def preprocess(
                     raise ValueError(
                         "Optional loop closure is available only for schema 2 captures/new v3 runs"
                     )
+                legacy_masking = {
+                    "device": mask_device,
+                    "score_threshold": mask_score_threshold,
+                    "probability_threshold": mask_probability_threshold,
+                    "inference_gamma": mask_gamma,
+                    "dilation_pixels": mask_dilation_pixels,
+                    "max_masked_fraction": (
+                        max_masked_fraction
+                        if max_masked_fraction is not None
+                        else 0.45
+                    ),
+                    "qa_sample_count": mask_qa_sample_count,
+                }
+                legacy_reconstruction = {
+                    "primary": {
+                        "frame_count": legacy_primary,
+                        "images_per_equirect": 8,
+                        "projection_fov_degrees": primary_fov,
+                        "projection_size": primary_projection_size,
+                        "crop_bottom": 0.20,
+                        "use_rig": True,
+                    },
+                    "fallback": {
+                        "frame_count": legacy_fallback,
+                        "images_per_equirect": 14,
+                        "projection_fov_degrees": fallback_fov,
+                        "projection_size": fallback_projection_size,
+                        "crop_bottom": 0.15,
+                        "use_rig": True,
+                    },
+                }
                 config = RunConfig(
                     capture_id=capture_id,
                     input_sha256=capture.stitched_video.sha256,
-                    preprocess={"target_frames": target_frames},
-                    masking=masking,
+                    preprocess={"target_frames": legacy_target},
+                    masking=legacy_masking,
                     vision_qa={"enabled": vision_qa},
-                    reconstruction=reconstruction,
+                    reconstruction=legacy_reconstruction,
                 )
             else:
+                if any(
+                    value is not None
+                    for value in (target_frames, primary_frames, fallback_frames, max_masked_fraction)
+                ):
+                    raise ValueError(
+                        "Fixed frame-count and max-mask flags are retired for new runs; "
+                        "use --candidate-fps, --selected-per-second, "
+                        "--primary-per-second, --fallback-per-second and "
+                        "--mask-discard-threshold"
+                    )
+                if smoke and (
+                    abs(candidate_fps - 5.0) > 1e-9
+                    or selected_per_second != 2
+                    or primary_per_second != 2
+                    or fallback_per_second != 2
+                ):
+                    raise ValueError(
+                        "--smoke fixes temporal density at 5 candidate fps, 2 selected "
+                        "per second, Primary and repair baseline ranks 1-2"
+                    )
+                if smoke:
+                    primary_projection_size = min(primary_projection_size, 1024)
+                    fallback_projection_size = min(fallback_projection_size, 1024)
+                    mask_qa_sample_count = min(mask_qa_sample_count, 8)
+                    train_iterations = min(train_iterations or 5000, 5000)
+                effective_end = (
+                    min(
+                        capture.selection.end_seconds,
+                        capture.selection.start_seconds + SMOKE_DURATION_SECONDS,
+                    )
+                    if smoke
+                    else capture.selection.end_seconds
+                )
                 candidate_set = prepare_capture_input(
-                    path, capture, target_frames=target_frames, resume=resume
+                    path,
+                    capture,
+                    candidate_fps=candidate_fps,
+                    selection_end_seconds=effective_end,
+                    resume=resume,
                 )
                 capture.prepared_relative_path = candidate_set.path.relative_to(
                     path
@@ -566,18 +635,36 @@ def preprocess(
                         raise FileNotFoundError(resolved_tree)
                     loop_path = str(resolved_tree)
                     loop_sha256 = sha256_file(resolved_tree)
-                reconstruction["loop_closure"] = {
-                    "enabled": loop_closure,
-                    "period": loop_period,
-                    "num_images": loop_num_images,
-                    "vocabulary_tree_path": loop_path,
-                    "vocabulary_tree_sha256": loop_sha256,
+                reconstruction = {
+                    "primary": {
+                        "temporal_rank_limit": primary_per_second,
+                        "images_per_equirect": 14,
+                        "projection_fov_degrees": primary_fov,
+                        "projection_size": primary_projection_size,
+                        "crop_bottom": 0.15,
+                        "use_rig": False,
+                    },
+                    "fallback": {
+                        "temporal_rank_limit": fallback_per_second,
+                        "images_per_equirect": 14,
+                        "projection_fov_degrees": fallback_fov,
+                        "projection_size": fallback_projection_size,
+                        "crop_bottom": 0.15,
+                        "use_rig": False,
+                    },
+                    "loop_closure": {
+                        "enabled": loop_closure,
+                        "period": loop_period,
+                        "num_images": loop_num_images,
+                        "vocabulary_tree_path": loop_path,
+                        "vocabulary_tree_sha256": loop_sha256,
+                    },
                 }
-                config = RunConfigV3(
+                config = RunConfigV5(
                     capture_id=capture_id,
                     input_dataset_sha256=candidate_set.dataset_sha256,
                     prepared_relative_path=capture.prepared_relative_path,
-                    input=PreparedInputConfig(
+                    input=PreparedInputConfigV2(
                         source_kind=capture.source.kind,
                         source_sha256=[
                             item.sha256 for item in capture.source.files
@@ -586,13 +673,30 @@ def preprocess(
                             candidate_set.source_probe
                         ),
                         normalization=capture.normalization,
-                        selection=capture.selection,
+                        selection=TimeSelection(
+                            start_seconds=capture.selection.start_seconds,
+                            end_seconds=effective_end,
+                        ),
                         candidate_frame_indices=list(candidate_set.frame_indices),
+                        candidate_fps=candidate_fps,
                         helper_version=candidate_set.helper_version,
                         sdk_version=candidate_set.sdk_version,
                     ),
-                    preprocess={"target_frames": target_frames},
-                    masking={**masking, "classes": classes},
+                    preprocess={
+                        "candidate_fps": candidate_fps,
+                        "selected_per_second": selected_per_second,
+                    },
+                    masking={
+                        "device": mask_device,
+                        "score_threshold": mask_score_threshold,
+                        "probability_threshold": mask_probability_threshold,
+                        "inference_gamma": mask_gamma,
+                        "dilation_pixels": mask_dilation_pixels,
+                        "mask_discard_threshold": mask_discard_threshold,
+                        "qa_sample_count": mask_qa_sample_count,
+                        "classes": classes,
+                        "mask_review_required": mask_review_gate,
+                    },
                     vision_qa={"enabled": vision_qa},
                     reconstruction=reconstruction,
                 )
@@ -601,8 +705,9 @@ def preprocess(
             run = create_run(path, location_id, scene_id, config)
             if smoke:
                 console.print(
-                    "[yellow]Smoke profile[/yellow]: reduced frames, projection size and "
-                    "training length. Use it to validate the pipeline, never to judge quality."
+                    "[yellow]Smoke profile[/yellow]: first 5 seconds at 5 candidate fps "
+                    "and 2 selected per second, smaller projections and short training. "
+                    "Use it to validate the pipeline, never to judge quality."
                 )
         run = preprocess_run(path, run, resume=resume)
         console.print(f"Run [green]{run.id}[/green]: preprocess={run.stages['preprocess'].status.value}")
@@ -670,8 +775,8 @@ def mask_review(
     try:
         path = _scene(location_id, scene_id)
         run = load_run(path, run_id)
-        if getattr(run.config, "schema_version", 1) != 3:
-            raise RuntimeError("mask-review is available only for RunConfigV3 runs")
+        if getattr(run.config, "schema_version", 1) not in (3, 4):
+            raise RuntimeError("mask-review is available only for RunConfigV3/V4 runs")
         dataset = _mask_attempt_path(path, run_id, attempt)
         server = create_mask_review_server(dataset, host=host, port=port)
         actual_host, actual_port = server.server_address[:2]
@@ -702,15 +807,24 @@ def mask_finalize(
     try:
         path = _scene(location_id, scene_id)
         run = load_run(path, run_id)
-        if getattr(run.config, "schema_version", 1) != 3:
-            raise RuntimeError("mask-finalize is available only for RunConfigV3 runs")
+        schema_version = int(getattr(run.config, "schema_version", 1))
+        if schema_version not in (3, 4):
+            raise RuntimeError("mask-finalize is available only for RunConfigV3/V4 runs")
         dataset = _mask_attempt_path(path, run_id, attempt)
         attempt_config = getattr(run.config.reconstruction, attempt)
+        if schema_version >= 4:
+            filtered = validate_mask_filter(dataset, verify_hashes=False)
+            expected_images = {str(item["image"]) for item in filtered["accepted"]}
+            maximum_fraction = run.config.masking.mask_discard_threshold
+        else:
+            expected_images = expected_reconstruction_images(
+                attempt_config.frame_count, attempt_config.images_per_equirect
+            )
+            maximum_fraction = None
         result = finalize_mask_dataset(
             dataset,
-            expected_reconstruction_images(
-                attempt_config.frame_count, attempt_config.images_per_equirect
-            ),
+            expected_images,
+            maximum_included_masked_fraction=maximum_fraction,
         )
         console.print(
             f"Mask final [green]passed[/green]: masks={result['counts']['masks']}; "
@@ -1018,6 +1132,90 @@ def clean(
         total += size
         console.print(f"{run_path.name}: {size / 1024**3:.2f} GiB")
     console.print(f"Total preview only: {total / 1024**3:.2f} GiB; nothing was deleted")
+
+
+@qa_app.command("segments")
+def qa_segments(
+    location_id: Annotated[str, typer.Argument()],
+    scene_id: Annotated[str, typer.Argument()],
+    run_id: Annotated[str, typer.Argument()],
+    attempt: Annotated[str | None, typer.Option()] = None,
+    output: Annotated[Path | None, typer.Option(help="Legacy reports must be outside their Run directory")] = None,
+) -> None:
+    """Recompute auditable segment QA without changing reconstruction stage status."""
+    from .segments import write_segments
+    from .masking import validate_mask_filter
+    from .mask_finalize import validate_mask_finalization
+    from .models import SegmentQAConfig
+    try:
+        scene=_scene(location_id,scene_id)
+        run=load_run(scene,run_id)
+        if run.config.schema_version not in (4,5):
+            raise ValueError('Temporal segment QA requires schema 4 or 5')
+        label=attempt or run.metrics.get('selected_attempt','primary')
+        if label not in ('primary','fallback','repair') or (label=='repair' and run.config.schema_version!=5):
+            raise ValueError('Unknown reconstruction attempt')
+        work=scene/run_id
+        if run.config.schema_version==4 and (output is None or output.resolve()==work.resolve() or work.resolve() in output.resolve().parents):
+            raise ValueError('Legacy replay needs --output outside the historical Run')
+        dataset=work/f'reconstruction-{label}'
+        records=[json.loads(line) for line in (work/f'selected-{label}-metrics.jsonl').read_text(encoding='utf-8').splitlines() if line]
+        filtered=validate_mask_filter(dataset,verify_hashes=True)
+        included={r['image'] for r in filtered['accepted']}
+        final=validate_mask_finalization(dataset,included)
+        included-=set(final.get('excluded_images',[]))
+        config=getattr(run.config.reconstruction,'primary' if label=='repair' else label)
+        report=write_segments(dataset,records,included,config,getattr(run.config,'segment_qa',SegmentQAConfig()),output)
+        console.print(json.dumps({k:report[k] for k in ('integrity','training_status','coverage_status')},ensure_ascii=False))
+    except Exception as error:
+        _fatal(error)
+
+
+@app.command("train")
+def train_segment(
+    location_id: Annotated[str, typer.Argument()],
+    scene_id: Annotated[str, typer.Argument()],
+    run_id: Annotated[str, typer.Argument()],
+    segment: Annotated[str, typer.Option(help="Passed segment ID, e.g. segment-001")],
+    output: Annotated[Path, typer.Option(help="New training experiment directory")],
+    backend: Annotated[str, typer.Option(help="gsplat or postshot (ADC)")] = "postshot",
+    steps: Annotated[int | None, typer.Option(min=1)] = None,
+    photo_comp: Annotated[bool, typer.Option()] = True,
+    resume: Annotated[bool, typer.Option()] = False,
+    dry_run: Annotated[bool, typer.Option(help="Prepare validated input and command without training")] = False,
+    duration_seconds: Annotated[float | None, typer.Option(min=0.001,help="Earliest fully validated window within the segment")] = None,
+) -> None:
+    """Train a QA-approved segment with one of the interchangeable backends."""
+    from .training_data import prepare_segment
+    from .training import train_package
+    from .runs import save_run
+    try:
+        scene = _scene(location_id,scene_id)
+        run = load_run(scene,run_id)
+        if run.config.schema_version != 5 or run.stages['reconstruct'].status.value != 'succeeded' or not run.selected_dataset:
+            raise RuntimeError('train --segment requires a successful schema 5 reconstruction')
+        label = run.metrics['selected_attempt']
+        records = [json.loads(line) for line in (scene/run_id/f'selected-{label}-metrics.jsonl').read_text(encoding='utf-8').splitlines() if line]
+        dataset = scene/run.selected_dataset
+        package_name=segment if duration_seconds is None else f'{segment}-first-{duration_seconds:g}s'
+        package = scene/run_id/'training-data'/package_name
+        if segment not in {s['id'] for s in json.loads((dataset/'segments.json').read_text(encoding='utf-8'))['segments']}:
+            raise ValueError('Unknown segment ID')
+        prepare_segment(dataset,records,run.config.reconstruction.primary,run.config.segment_qa,segment,package,duration_seconds=duration_seconds)
+        experiment = dict(segment=segment,backend=backend,output=str(output.resolve()),status='preparing')
+        run.metrics.setdefault('training_experiments',[]).append(experiment)
+        save_run(scene,run)
+        try:
+            result = train_package(package,output,backend,steps,photo_comp,resume,dry_run)
+            experiment.update(result)
+        except Exception as error:
+            experiment.update(status='failed',error=str(error))
+            raise
+        finally:
+            save_run(scene,run)
+        console.print(json.dumps(result,ensure_ascii=False,indent=2))
+    except Exception as error:
+        _fatal(error)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,9 @@
-# 009 前 90 秒 v002：审查调整版运行手册
+# 009 前 90 秒 schema v4：时间密度与自动遮罩过滤运行手册
 
-> 本页对应审核后的 schema v2 流水线。命令会实际解码视频、生成高分辨率视图、运行 CUDA COLMAP、rig BA 与 100k GPU 训练；启动后保持供电并禁用休眠。
+> **历史方案。当前操作请先读 [CURRENT-WORKFLOW.md](CURRENT-WORKFLOW.md)。**
+> 本页的前 90 秒、WSL、旧目录及一键训练/导出命令不适用于 2026-09-09 接手的完整 293.86 秒 Windows/Postshot Run。
+
+> 本页对应 schema v4 流水线。命令会实际解码视频、生成高分辨率视图、运行动态物体分割、RealityScan 与 Postshot；启动后保持供电并禁用休眠。
 
 本次运行固定使用：
 
@@ -8,16 +11,17 @@
 - 场景：`night-walk-4k`
 - 采集：`capture-009-4k`
 - 片段：009 视频的 `0–90` 秒
-- 候选：270 张全景帧；主流程按时间桶选最清晰 135 张 × 8 个视图，共 1080 张 2048² 图
-- 有界降级：主重建未达门槛时，才运行 180 × 14，共 2520 张
-- 人物处理：本地 Mask R-CNN 分割、边缘闭合与扩张；同一黑白遮罩同时用于 COLMAP 和 Nerfstudio
+- 候选：全时段 5 fps；每秒保留综合质量最好的 2 张全景
+- Primary：每秒 rank 1 × 8 个视图；Fallback：每秒 rank 1–2 × 14 个视图
+- 动态物体处理：本地 Mask R-CNN 分割、边缘闭合与扩张；最终遮罩占比严格大于 5% 的单张透视图与遮罩成对删除
 - 最终状态：`needs_review`，脚本不会自动批准结果
 
 本次新 RunId 会把以下关键配置完整写入运行 YAML 并参与配置哈希：
 
 ```yaml
 preprocess:
-  target_frames: 270
+  candidate_fps: 5.0
+  selected_per_second: 2
 masking:
   enabled: true
   model: maskrcnn_resnet50_fpn_v2
@@ -29,7 +33,8 @@ masking:
   inference_gamma: 0.75
   dilation_pixels: 24
   closing_pixels: 7
-  max_masked_fraction: 0.45
+  mask_discard_threshold: 0.05
+  mask_review_required: false
   qa_sample_count: 16
 vision_qa:
   enabled: false            # 设置 DEEPSEEK_API_KEY 后用 --vision-qa 新建运行
@@ -44,10 +49,10 @@ reconstruction:
   registration_threshold: 0.70
   rig_center_spread_ratio_limit: 0.001
   primary:
-    {frame_count: 135, images_per_equirect: 8, projection_fov_degrees: 120,
+    {temporal_rank_limit: 1, images_per_equirect: 8, projection_fov_degrees: 120,
      projection_size: 2048, crop_bottom: 0.20, use_rig: true}
   fallback:
-    {frame_count: 180, images_per_equirect: 14, projection_fov_degrees: 110,
+    {temporal_rank_limit: 2, images_per_equirect: 14, projection_fov_degrees: 110,
      projection_size: 1746, crop_bottom: 0.15, use_rig: true}
 train:
   method: splatfacto-big
@@ -180,19 +185,19 @@ locations\yanguan-ancient-town-20260822\scenes\night-walk-4k\runs\<RunId>.yaml
 locations\yanguan-ancient-town-20260822\scenes\night-walk-4k\work\<RunId>\
 ```
 
-修改人物置信度、是否启用 DeepSeek、抽帧数量或其他运行配置，都会改变配置哈希，必须从 `preprocess` 创建新 RunId。不要直接编辑已有运行 YAML；加载时会校验哈希并拒绝被篡改的配置。
+修改动态物体置信度、是否启用 DeepSeek、候选帧率、每秒保留数或其他运行配置，都会改变配置哈希，必须从 `preprocess` 创建新 RunId。不要直接编辑已有运行 YAML；加载时会校验哈希并拒绝被篡改的配置。历史 schema v1–v3 run 仍按既有清单与哈希恢复。
 
 ## 遮罩阶段实际做什么
 
-`mask` 在 COLMAP 之前完成以下工作：
+`mask` 在 RealityScan 之前完成以下工作：
 
-1. 分析 270 张候选全景、按 135 个时间桶挑最清晰帧，再显式投影为 1080 张 2048²/120° 透视图并生成两个下采样层级。
+1. 从选择起点开始按 5 fps 取得候选，每秒按综合质量选前 2；Primary 取 rank 1 并显式投影为 8 个 2048²/120° 视图。
 2. 用 `maskrcnn_resnet50_fpn_v2` 检测和分割人物；夜景推理使用固定 gamma，人物边缘执行闭合和 24 px 扩张。
 3. 为每张透视图保存同尺寸二值遮罩：白色为可用建筑像素，黑色为人物等忽略区域。
-4. 校验图片/遮罩一一对应、尺寸一致、只包含 0/255，并拒绝单张遮掉超过 45% 的异常结果。
-5. 从 16 个抽样透视视图生成两张联系表。DeepSeek 未启用时只记录“远程 QA 已禁用”，不会发送图片到外部服务。
+4. 按最终后处理遮罩计算占比；严格大于 5% 的图片/遮罩成对删除，恰好 5% 保留。先原子写 `.mask-filter.pending.json`，完成删除和剩余清单验证后再发布 `mask-filter.json`。
+5. 默认自动生成 `mask-final.json` 并继续。传入 `--mask-review-gate` 时才对自动过滤后剩余图片生成审核材料并暂停；人工编辑使遮罩重新超过 5% 时，必须把该图显式标记为排除才能 finalize。
 
-随后 `reconstruct` 把同一组遮罩通过 COLMAP 的 `ImageReader.mask_path` 排除出特征提取，并把 `mask_path` 写进 Nerfstudio 的 `transforms.json`，训练时继续排除这些像素。
+随后 `reconstruct` 只把最终纳入清单送给 RealityScan；使用同盘、唯一文件名的临时硬链接树规避跨视图同名帧冲突，人工排除的图片不会进入该树，也不复制大图。注册率分母、轨迹 QA、Postshot 准备与训练图片数均读取实际纳入清单。
 
 ## DeepSeek：默认禁用，设置 Key 后显式启用
 
@@ -211,7 +216,7 @@ $env:DEEPSEEK_API_KEY = $DeepSeekCredential.GetNetworkCredential().Password
 
 `gsdb.ps1` 和一键脚本只通过 Windows 的 `WSLENV` 转发 `DEEPSEEK_API_KEY` 变量名；密钥值不会成为命令行参数。Base URL 固定为官方 `https://api.deepseek.com`，客户端拒绝 HTTP 和重定向，避免 Bearer key 被转发到其他地址。
 
-远程 QA 会调用 `deepseek-v4-flash-vision-exp`，只发送抽样遮罩联系表，不会发送 `.insv` 或完整视频。图片使用 OpenAI 兼容的 Base64 `image_url` 内容块并设置 `detail: original`；服务端仍会把大图按比例缩放到约 `800×800` 的总像素规模，因此联系表使用大字号标签和高对比度红色遮罩。模型必须返回结构化的 `pass/fail`；只有 `pass`、置信度不低于 0.80、且未报告漏遮或误遮视图时才放行。API 缺少凭据、超时、返回无效 JSON 或其他任一条件不满足时，遮罩阶段直接失败，COLMAP 不会继续。具体输入和限制见 [DeepSeek 官方图像理解文档](https://api-docs.deepseek.com/zh-cn/guides/vision/)。
+远程 QA 会调用 `deepseek-v4-flash-vision-exp`，只发送抽样遮罩联系表，不会发送 `.insv` 或完整视频。图片使用 OpenAI 兼容的 Base64 `image_url` 内容块并设置 `detail: original`；服务端仍会把大图按比例缩放到约 `800×800` 的总像素规模，因此联系表使用大字号标签和高对比度红色遮罩。模型必须返回结构化的 `pass/fail`；只有 `pass`、置信度不低于 0.80、且未报告漏遮或误遮视图时才放行。API 缺少凭据、超时、返回无效 JSON 或其他任一条件不满足时，遮罩阶段直接失败，RealityScan 不会继续。具体输入和限制见 [DeepSeek 官方图像理解文档](https://api-docs.deepseek.com/zh-cn/guides/vision/)。
 
 结束或失败后清除当前会话中的秘密：
 
@@ -252,9 +257,9 @@ $RunId = '<上次打印的 RunId>'
   --baseline-run-id 20260824T022046Z-5679786b --resume
 ```
 
-`--resume` 只复用可验证的完成结果。人物遮罩逐文件核验；COLMAP 的 feature、matching、cross-view matching、mapping、rig BA 和转换都有独立完成标记，mapper 无 sparse 输出时保留数据库并以单线程恢复，不完整 sparse/rig 输出不会被覆盖。投影目录只生成一部分或图片/遮罩校验失败时会拒绝猜测。
+`--resume` 只复用可验证的完成结果。人物遮罩逐文件核验；两阶段 `mask-filter` 可继续完成中断的成对删除，RealityScan 只有在 COLMAP 兼容模型、路径映射和最终清单全部一致时才复用。投影目录只生成一部分或图片/遮罩校验失败时会拒绝猜测。
 
-缓存图像集的续跑校验只读文件头尺寸，不再逐张解码。中间图一律经由"写临时文件 → fsync → 原子改名"落盘，最终文件名下不可能出现半截内容，所以尺寸就是这类校验真正要确认的东西；金字塔每层写完并整体核对后留下 `.pyramid-complete-*` 标记，没有标记的旧数据仍走完整解码校验。这条改动把一次 2520 图 fallback 的空转续跑校验从约 27 分钟降到分钟级。
+遮罩阶段的续跑只复用可验证的实际输入：原始投影视图、逐图遮罩和联系表文件集合必须齐全。RealityScan 与 Postshot 都不会读取的多级缩小副本不再生成，也不再参与缓存有效性判断。
 
 可在运行 YAML 的 `stages`、`active_stage`、`message` 和 `log_path` 字段中确认停在何处；各阶段日志位于对应的 `work\<RunId>\logs` 下。
 
@@ -263,31 +268,31 @@ $RunId = '<上次打印的 RunId>'
 流程不会为了“跑出一个结果”而无限调参：
 
 - `doctor`、输入 2:1/解码/哈希或空间检查失败：在预处理前停止。
-- 本地遮罩缺失、尺寸错误、非二值或单图遮挡超过 45%：在 COLMAP 前停止。
-- 启用 DeepSeek 后远程调用失败或判定 `fail`：在 COLMAP 前停止。
-- 主 COLMAP 的注册率或最大连通模型覆盖低于 70%：只运行一次 180 × 14 降级流程。同帧跨视图匹配已并入主流程，按视图目录裂成多个组件不再是触发降级的常规原因：在 009 前 90 秒数据上，最大组件覆盖从 0.320（8 个组件）变为 0.988（1 个组件）。
-- rig BA 后同帧光心 p95 散布超过中位帧间基线 0.1%：重建失败，不进入训练。
-- 降级 COLMAP 仍低于 70%：停止，不启动训练，并保留失败分析数据。
+- 本地遮罩缺失、尺寸错误或非二值：在 RealityScan 前停止；占比严格大于 5% 的单图自动淘汰。
+- 启用 DeepSeek 后远程调用失败或判定 `fail`：在 RealityScan 前停止。
+- Primary 过滤后不足两个时间桶，或注册率/最大组件覆盖低于 70%：只运行一次每秒 rank 1–2 × 14 的 Fallback。
+- RealityScan 工具、许可证或导出错误：直接失败，不触发 Fallback。
+- Fallback 仍不足两个时间桶或仍低于 70%：停止，不启动训练，并要求重拍。
 - Splatfacto 首次明确 CUDA OOM：只降低一级训练分辨率重试一次；第二次 OOM 或其他训练错误直接停止。
 - 任何失败运行都不会覆盖历史成功运行或已有导出。
 
 ## 预计耗时与空间
 
-以下是 RTX 4070 Ti SUPER 16 GiB + CUDA COLMAP 对审核后高分辨率方案的规划区间，不是承诺值。
+以下旧 90 秒基准只用于估算量级；schema v4 的实际图片数由时长和 5% 过滤结果动态决定，不是承诺值。
 
 | 阶段 | 规划耗时 | 主要空间 |
 | --- | ---: | ---: |
 | doctor / ingest | 5–20 分钟 | 很小；首次 gsplat/模型缓存另计 |
-| preprocess（270 张全景） | 10–30 分钟 | 约 2–6 GiB |
-| 投影 + 人物遮罩 + 金字塔（1080×2048²） | 20–60 分钟 | 约 15–40 GiB |
-| 主 COLMAP + rig BA（1080 图，GPU SIFT） | 1–3 小时 | 约 5–25 GiB |
+| preprocess（5 fps 候选、2 fps 保留） | 随时长线性变化 | 完整候选保存在 prepared 缓存 |
+| Primary 投影 + 动态遮罩（8 视图/秒） | 随时长线性变化 | 过滤后投影源删除 |
+| RealityScan | 随最终纳入图片数变化 | 仅接收最终清单 |
 | Splatfacto-big 100k | 1–5 小时 | 约 10–35 GiB |
 | export / QA / catalog | 10–40 分钟 | 约 2–10 GiB |
 | 训练 checkpoint（每 10k 步一个，共 10 个） | — | 约 10–25 GiB |
 
-主流程先按 **2.5–8 小时、峰值约 40–100 GiB** 规划。若触发 2520 图降级，整体按 **5–14 小时、峰值约 70–160 GiB**。实际耗时、磁盘峰值和显存峰值会写入运行清单与 QA 报告。
+Primary 每秒最多 8 张透视图，Fallback 每秒最多 28 张；据此按选择时长线性估算。实际候选数、自动淘汰数、最终输入数、耗时、磁盘峰值和显存峰值都会写入运行清单与 QA 报告。
 
-上面的区间已经计入三处改动：中间数据改放 WSL ext4（`GSDB_SCRATCH_ROOT`，图像读取实测快 4 倍）、续跑校验只读文件头、以及删除了一处对匹配结果没有影响的 COLMAP 数据库 ID 重排——那一步在 1.2 GB 主库上约 18 分钟、2.7 GB 降级库上约 45 分钟，全部是无效开销。
+上面的区间已经计入中间数据改放 WSL ext4（`GSDB_SCRATCH_ROOT`，图像读取实测快 4 倍）、不再生成无人读取的图像/遮罩缩小副本，以及删除了一处对匹配结果没有影响的 COLMAP 数据库 ID 重排——那一步在 1.2 GB 主库上约 18 分钟、2.7 GB 降级库上约 45 分钟，全部是无效开销。
 
 ## 只验证流水线时用 `--smoke`
 
@@ -298,7 +303,7 @@ $RunId = '<上次打印的 RunId>'
   yanguan-ancient-town-20260822 night-walk-4k capture-009-4k --smoke
 ```
 
-它把候选帧压到 80、主流程 40×8、投影边长 1024、训练 5000 步，配置哈希天然不同，因此会落在自己的 RunId 下，绝不会覆盖或冒充正式运行。所有阈值都是上限：显式传更小的值仍然生效。**`--smoke` 的产物不能用于质量判断，也不应提交审核。**
+它仍使用 5 fps 候选、每秒保留 2 张，但只处理选择区间前 5 秒：默认计数为 25 个候选、10 张保留全景、Primary 5×8=40 张预过滤透视图；投影边长 1024、训练上限 5000 步。配置哈希天然不同，因此会落在自己的 RunId 下，绝不会覆盖或冒充正式运行。**`--smoke` 的产物不能用于质量判断，也不应提交审核。**
 
 因此，明早启动后当天未完成不等于卡死。判断是否仍在工作应查看日志更新时间、CPU/GPU 占用和工作目录增长，不要仅凭控制台一段时间没有新行就中断。
 

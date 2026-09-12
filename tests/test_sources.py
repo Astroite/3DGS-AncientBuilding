@@ -20,6 +20,7 @@ from gsdb.models import (
 from gsdb.sources import (
     ALLOW_FAKE_HELPER_ENV,
     copy_candidate_frames,
+    fixed_rate_frame_indices,
     invoke_media_helper,
     ordered_sequence_files,
     prepare_capture_input,
@@ -109,6 +110,33 @@ def test_uniform_indices_are_deterministic_and_bounded() -> None:
     assert uniform_frame_indices(100, 10, 2, 8, 3) == [30, 50, 70]
 
 
+def test_fixed_rate_sampling_uses_cell_centres_and_partial_final_second() -> None:
+    indices, timestamps = fixed_rate_frame_indices(300, 30.0, 0.0, 2.4, 5.0)
+    assert len(indices) == 12
+    assert indices == sorted(set(indices))
+    assert timestamps == [index / 30.0 for index in indices]
+    assert timestamps[0] == pytest.approx(0.1)
+    assert timestamps[-1] == pytest.approx(2.3)
+
+
+def test_fixed_rate_sampling_is_anchored_to_non_integer_start() -> None:
+    indices, timestamps = fixed_rate_frame_indices(300, 30.0, 0.35, 2.75, 5.0)
+    assert len(indices) == 12
+    assert timestamps[0] == pytest.approx(indices[0] / 30.0)
+    assert abs(timestamps[0] - 0.45) <= 1 / 60
+
+
+def test_fixed_rate_sampling_breaks_half_frame_ties_earlier() -> None:
+    indices, timestamps = fixed_rate_frame_indices(20, 5.0, 0.0, 2.0, 5.0)
+    assert indices == list(range(10))
+    assert timestamps == pytest.approx([index / 5.0 for index in range(10)])
+
+
+def test_fixed_rate_sampling_rejects_low_source_rate() -> None:
+    with pytest.raises(ValueError, match="below requested candidate rate"):
+        fixed_rate_frame_indices(100, 4.99, 0.0, 2.0, 5.0)
+
+
 def test_fake_mediasdk_exports_only_requested_frames(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -149,6 +177,59 @@ def test_fake_mediasdk_exports_only_requested_frames(
     assert all(item.is_file() for item in prepared.frame_paths)
     assert prepared.source_probe is not None
     assert prepared.source_probe["camera_model"] == "Insta360 X5"
+
+
+def test_rate_sampled_prepared_input_records_schema_and_dynamic_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw = tmp_path / "capture.insv"
+    raw.write_bytes(b"fake insv")
+    raw.with_suffix(".insv.probe.json").write_text(
+        json.dumps(
+            {
+                "width": 40,
+                "height": 20,
+                "fps": 10,
+                "frame_count": 100,
+                "duration_seconds": 10,
+                "camera_model": "Insta360 X5",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        "GSDB_MEDIA_HELPER",
+        str(Path(__file__).resolve().parents[1] / "tools/mediasdk-helper/fake-helper.py"),
+    )
+    capture = CaptureManifestV2(
+        id="capture-rate",
+        location_id="site-001",
+        scene_id="scene-001",
+        source=PanoramaSource(
+            kind="insta360_insv",
+            projection="dual_fisheye",
+            files=[_source_file(raw)],
+        ),
+        camera=Camera(make="Insta360", model="X5"),
+        selection=TimeSelection(end_seconds=10),
+        normalization=NormalizationSettings(width=40, height=20),
+    )
+
+    prepared = prepare_capture_input(
+        tmp_path / "scene",
+        capture,
+        candidate_fps=5.0,
+        selection_end_seconds=2.4,
+    )
+    payload = json.loads(prepared.manifest_path.read_text(encoding="utf-8"))
+    assert prepared.schema_version == 2
+    assert prepared.candidate_fps == 5.0
+    assert len(prepared.frame_paths) == 12
+    assert payload["lineage"]["candidate_frame_count"] == 12
+    assert payload["lineage"]["sampling"] == {
+        "mode": "fixed_rate_v1",
+        "candidate_fps": 5.0,
+    }
 
 
 def test_python_media_helper_requires_explicit_test_gate(

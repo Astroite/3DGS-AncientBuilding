@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .gpu_lock import gpu_locked
+
 import json
 import math
 import os
@@ -70,6 +72,8 @@ class CandidateFrameSet:
     helper_version: str | None = None
     sdk_version: str | None = None
     source_probe: dict[str, Any] | None = None
+    schema_version: int = 1
+    candidate_fps: float | None = None
 
 
 def _utc_now() -> str:
@@ -550,6 +554,52 @@ def uniform_frame_indices(
     ]
 
 
+def fixed_rate_frame_indices(
+    frame_count: int,
+    source_fps: float,
+    start_seconds: float,
+    end_seconds: float,
+    candidate_fps: float,
+) -> tuple[list[int], list[float]]:
+    """Sample unique source frames at the centres of fixed-rate time cells."""
+
+    if candidate_fps <= 0:
+        raise ValueError("candidate_fps must be positive")
+    if source_fps + 1e-9 < candidate_fps:
+        raise ValueError(
+            f"Source frame rate {source_fps:.6g} is below requested candidate rate "
+            f"{candidate_fps:.6g}; duplicate source frames are not allowed"
+        )
+    if end_seconds <= start_seconds:
+        raise ValueError("Selection end must be after its start")
+    step = 1.0 / candidate_fps
+    requested: list[float] = []
+    sample = 0
+    while True:
+        timestamp = start_seconds + (sample + 0.5) * step
+        if timestamp >= end_seconds - 1e-12:
+            break
+        requested.append(timestamp)
+        sample += 1
+    indices = [
+        # Nearest source frame, resolving exact half-frame ties toward the
+        # earlier timestamp so a source running exactly at candidate_fps keeps
+        # each sample inside its intended one-second bucket.
+        min(
+            frame_count - 1,
+            max(0, int(math.floor(timestamp * source_fps + 0.5 - 1e-12))),
+        )
+        for timestamp in requested
+    ]
+    if len(indices) < 2:
+        raise ValueError("Selection contains fewer than two fixed-rate candidate frames")
+    if len(set(indices)) != len(indices):
+        raise ValueError(
+            "Fixed-rate sampling mapped multiple timestamps to the same source frame"
+        )
+    return indices, [index / source_fps for index in indices]
+
+
 def _validate_frame(path: Path, width: int, height: int) -> str:
     with path.open("rb") as stream:
         if stream.read(3) != b"\xff\xd8\xff":
@@ -585,13 +635,19 @@ def _normalize_image(source: Path, destination: Path, width: int, height: int, q
 def _dataset_from_manifest(path: Path) -> CandidateFrameSet:
     manifest_path = path / "dataset.json"
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if payload.get("schema_version") != 1 or payload.get("integrity") != "complete":
+    schema_version = int(payload.get("schema_version", 0))
+    if schema_version not in {1, 2} or payload.get("integrity") != "complete":
         raise RuntimeError(f"Prepared input is incomplete: {manifest_path}")
     records = payload.get("frames") or []
     lineage = payload["lineage"]
     if records != lineage.get("frames"):
         raise RuntimeError(f"Prepared input frame lineage is inconsistent: {manifest_path}")
-    if len(records) != int(lineage.get("target_frames", -1)):
+    expected_count = (
+        lineage.get("target_frames")
+        if schema_version == 1
+        else lineage.get("candidate_frame_count")
+    )
+    if len(records) != int(expected_count or -1):
         raise RuntimeError(f"Prepared input frame count is invalid: {manifest_path}")
     preparation = {key: value for key, value in lineage.items() if key != "frames"}
     preparation_hash = canonical_hash(preparation)
@@ -630,6 +686,12 @@ def _dataset_from_manifest(path: Path) -> CandidateFrameSet:
         helper_version=lineage.get("helper_version"),
         sdk_version=lineage.get("sdk_version"),
         source_probe=dict(lineage["source_probe"]),
+        schema_version=schema_version,
+        candidate_fps=(
+            float(lineage["sampling"]["candidate_fps"])
+            if schema_version == 2
+            else None
+        ),
     )
 
 
@@ -644,7 +706,7 @@ def _trusted_cached_frame_hashes(path: Path, preparation_hash: str) -> dict[str,
         lineage = payload["lineage"]
         records = payload["frames"]
         if (
-            payload.get("schema_version") != 1
+            payload.get("schema_version") not in {1, 2}
             or payload.get("integrity") != "complete"
             or payload.get("preparation_hash") != preparation_hash
             or payload.get("dataset_sha256") != canonical_hash(lineage)
@@ -665,27 +727,51 @@ def _trusted_cached_frame_hashes(path: Path, preparation_hash: str) -> dict[str,
         return {}
 
 
+@gpu_locked
 def prepare_capture_input(
     scene_path: Path,
     capture: CaptureManifestV2,
-    target_frames: int = 270,
+    target_frames: int | None = None,
+    candidate_fps: float | None = None,
+    selection_end_seconds: float | None = None,
     resume: bool = False,
 ) -> CandidateFrameSet:
     protocol_dir = scene_path / "prepared" / ".protocol"
     probe = probe_capture_source(capture, protocol_dir)
     paths = source_paths(capture)
-    if capture.selection.end_seconds > float(probe["duration_seconds"]) + 0.5:
+    effective_end = min(
+        capture.selection.end_seconds,
+        selection_end_seconds
+        if selection_end_seconds is not None
+        else capture.selection.end_seconds,
+    )
+    if effective_end > float(probe["duration_seconds"]) + 0.5:
         raise ValueError(
-            f"Selected range ends at {capture.selection.end_seconds:.3f}s but source is "
+            f"Selected range ends at {effective_end:.3f}s but source is "
             f"{float(probe['duration_seconds']):.3f}s"
         )
-    indices = uniform_frame_indices(
-        int(probe["frame_count"]),
-        float(probe["fps"]),
-        capture.selection.start_seconds,
-        capture.selection.end_seconds,
-        target_frames,
-    )
+    if (target_frames is None) == (candidate_fps is None):
+        raise ValueError("Provide exactly one of target_frames or candidate_fps")
+    if candidate_fps is not None:
+        indices, timestamps = fixed_rate_frame_indices(
+            int(probe["frame_count"]),
+            float(probe["fps"]),
+            capture.selection.start_seconds,
+            effective_end,
+            candidate_fps,
+        )
+        manifest_schema_version = 2
+    else:
+        assert target_frames is not None
+        indices = uniform_frame_indices(
+            int(probe["frame_count"]),
+            float(probe["fps"]),
+            capture.selection.start_seconds,
+            effective_end,
+            target_frames,
+        )
+        timestamps = [index / float(probe["fps"]) for index in indices]
+        manifest_schema_version = 1
     width = int(capture.normalization.width or probe["width"])
     height = int(capture.normalization.height or probe["height"])
     if width != height * 2:
@@ -696,7 +782,10 @@ def prepare_capture_input(
         "capture_id": capture.id,
         "source_kind": capture.source.kind,
         "source_files": [item.model_dump(mode="json") for item in capture.source.files],
-        "selection": capture.selection.model_dump(mode="json"),
+        "selection": {
+            "start_seconds": capture.selection.start_seconds,
+            "end_seconds": effective_end,
+        },
         "normalization": capture.normalization.model_dump(mode="json"),
         "source_probe": SourceProbe(
             **{
@@ -705,11 +794,18 @@ def prepare_capture_input(
                 if name in SourceProbe.model_fields
             }
         ).model_dump(mode="json"),
-        "target_frames": target_frames,
         "source_frame_indices": indices,
         "helper_version": probe.get("helper_version"),
         "sdk_version": probe.get("sdk_version"),
     }
+    if manifest_schema_version == 1:
+        preparation["target_frames"] = len(indices)
+    else:
+        preparation["sampling"] = {
+            "mode": "fixed_rate_v1",
+            "candidate_fps": candidate_fps,
+        }
+        preparation["candidate_frame_count"] = len(indices)
     preparation_hash = canonical_hash(preparation)
     target = scene_path / "prepared" / capture.id / preparation_hash
     if (target / "dataset.json").is_file():
@@ -720,7 +816,7 @@ def prepare_capture_input(
                 raise RuntimeError(
                     f"Prepared input cache is invalid; use --resume to repair it: {target}"
                 ) from error
-    required_bytes = target_frames * width * height + (1 << 30)
+    required_bytes = len(indices) * width * height + (1 << 30)
     disk_path = scene_path
     while not disk_path.exists() and disk_path.parent != disk_path:
         disk_path = disk_path.parent
@@ -745,8 +841,7 @@ def prepare_capture_input(
         raise RuntimeError(f"Partial prepared input exists; use --resume: {building}")
     frames_dir = building / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
-    output_paths = [frames_dir / f"frame_{index + 1:06d}.jpg" for index in range(target_frames)]
-    timestamps = [index / float(probe["fps"]) for index in indices]
+    output_paths = [frames_dir / f"frame_{index + 1:06d}.jpg" for index in range(len(indices))]
 
     # A completed cache carries trusted hashes.  On resume, invalidate only bytes
     # that no longer match that lineage; adapters then regenerate those candidates.
@@ -800,7 +895,7 @@ def prepare_capture_input(
     lineage = {**preparation, "frames": frame_records}
     dataset_sha256 = canonical_hash(lineage)
     manifest = {
-        "schema_version": 1,
+        "schema_version": manifest_schema_version,
         "generated_at": _utc_now(),
         "preparation_hash": preparation_hash,
         "dataset_sha256": dataset_sha256,

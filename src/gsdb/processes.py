@@ -94,6 +94,7 @@ def run_logged(
         try:
             for line in process.stdout:
                 log.write(line)
+                log.flush()
             returncode = process.wait()
         finally:
             stop_monitor.set()

@@ -339,6 +339,10 @@ class LegacyReconstructionAttemptV1(StrictModel):
     images_per_equirect: Literal[8, 14]
     crop_bottom: float = Field(ge=0, lt=0.5)
     matching_method: Literal["sequential"] = "sequential"
+    # No longer read by the pipeline (the downscale pyramid it configured was
+    # removed as dead weight under RealityScan+Postshot). Kept only so existing
+    # runs' persisted manifests -- which already serialized this field -- still
+    # deserialize under StrictModel's extra="forbid".
     num_downscales: int = Field(default=2, ge=0, le=4)
 
 
@@ -388,6 +392,10 @@ class ReconstructionAttempt(StrictModel):
     crop_bottom: float = Field(ge=0, lt=0.5)
     use_rig: bool = True
     matching_method: Literal["sequential"] = "sequential"
+    # No longer read by the pipeline (the downscale pyramid it configured was
+    # removed as dead weight under RealityScan+Postshot). Kept only so existing
+    # runs' persisted manifests -- which already serialized this field -- still
+    # deserialize under StrictModel's extra="forbid".
     num_downscales: int = Field(default=2, ge=0, le=4)
 
 
@@ -545,6 +553,177 @@ class RunConfigV3(StrictModel):
         return self
 
 
+class PreparedInputConfigV2(StrictModel):
+    """Rate-sampled prepared input used by schema-v4 runs."""
+
+    source_kind: Literal["equirect_video", "equirect_sequence", "insta360_insv"]
+    source_sha256: list[str] = Field(min_length=1)
+    source_probe: SourceProbe
+    normalization: NormalizationSettings
+    selection: TimeSelection
+    candidate_frame_indices: list[int] = Field(min_length=2)
+    candidate_fps: float = Field(default=5.0, gt=0, le=120)
+    helper_version: str | None = None
+    sdk_version: str | None = None
+
+
+class PreprocessConfigV4(StrictModel):
+    candidate_fps: float = Field(default=5.0, gt=0, le=120)
+    selected_per_second: int = Field(default=2, ge=1, le=120)
+    minimum_free_gib: float = Field(default=20.0, ge=1)
+
+
+class MaskingConfigV4(StrictModel):
+    enabled: bool = True
+    model: Literal["maskrcnn_resnet50_fpn_v2"] = "maskrcnn_resnet50_fpn_v2"
+    weights: Literal["DEFAULT"] = "DEFAULT"
+    device: Literal["cuda", "cpu"] = "cuda"
+    person_class_id: int = 1
+    score_threshold: float = Field(default=0.25, ge=0, le=1)
+    probability_threshold: float = Field(default=0.50, ge=0, le=1)
+    inference_gamma: float = Field(default=0.75, gt=0, le=2)
+    dilation_pixels: int = Field(default=24, ge=0, le=256)
+    closing_pixels: int = Field(default=7, ge=0, le=255)
+    mask_discard_threshold: float = Field(default=0.05, gt=0, lt=1)
+    qa_sample_count: int = Field(default=16, ge=1, le=256)
+    classes: list[Literal["person", "car", "bus", "truck", "bicycle", "motorcycle"]] = Field(
+        default_factory=lambda: ["person"], min_length=1
+    )
+    mask_review_required: bool = False
+
+    @field_validator("closing_pixels")
+    @classmethod
+    def validate_closing_kernel(cls, value: int) -> int:
+        if value not in (0, 1) and value % 2 == 0:
+            raise ValueError("closing_pixels must be odd (or 0/1 to disable closing)")
+        return value
+
+    @field_validator("classes")
+    @classmethod
+    def validate_unique_classes(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("masking classes must be unique")
+        return value
+
+
+class ReconstructionAttemptV4(StrictModel):
+    temporal_rank_limit: int = Field(ge=1, le=120)
+    images_per_equirect: Literal[8, 14]
+    projection_fov_degrees: float = Field(gt=0, lt=180)
+    projection_size: int = Field(ge=256, le=8192)
+    crop_bottom: float = Field(ge=0, lt=0.5)
+    use_rig: bool = True
+    matching_method: Literal["sequential"] = "sequential"
+
+
+class ReconstructionConfigV4(StrictModel):
+    use_gpu_sift: bool = True
+    gpu_index: int = Field(default=0, ge=0)
+    fix_intrinsics: bool = True
+    registration_threshold: float = Field(default=0.70, gt=0, le=1)
+    rig_center_spread_ratio_limit: float = Field(default=0.001, gt=0, le=0.1)
+    primary: ReconstructionAttemptV4 = Field(
+        default_factory=lambda: ReconstructionAttemptV4(
+            temporal_rank_limit=1,
+            images_per_equirect=8,
+            projection_fov_degrees=120.0,
+            projection_size=2048,
+            crop_bottom=0.20,
+        )
+    )
+    fallback: ReconstructionAttemptV4 = Field(
+        default_factory=lambda: ReconstructionAttemptV4(
+            temporal_rank_limit=2,
+            images_per_equirect=14,
+            projection_fov_degrees=110.0,
+            projection_size=1746,
+            crop_bottom=0.15,
+        )
+    )
+    loop_closure: LoopClosureConfig = Field(default_factory=LoopClosureConfig)
+
+
+class RunConfigV4(StrictModel):
+    schema_version: Literal[4] = 4
+    capture_id: str = Field(pattern=SLUG_PATTERN)
+    input_dataset_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    prepared_relative_path: str
+    input: PreparedInputConfigV2
+    frame_selection: FrameSelectionConfig = Field(default_factory=FrameSelectionConfig)
+    preprocess: PreprocessConfigV4 = Field(default_factory=PreprocessConfigV4)
+    masking: MaskingConfigV4 = Field(default_factory=MaskingConfigV4)
+    vision_qa: VisionQAConfig = Field(default_factory=VisionQAConfig)
+    reconstruction: ReconstructionConfigV4 = Field(default_factory=ReconstructionConfigV4)
+    train: TrainConfig = Field(default_factory=TrainConfig)
+    export: RunExportConfig = Field(default_factory=RunExportConfig)
+
+    @field_validator("prepared_relative_path")
+    @classmethod
+    def validate_prepared_relative_path(cls, value: str) -> str:
+        if value.startswith(("/", "\\")) or ":" in value:
+            raise ValueError("prepared_relative_path must be relative to the scene directory")
+        return value
+
+    @model_validator(mode="after")
+    def validate_temporal_sampling(self) -> "RunConfigV4":
+        selected = self.preprocess.selected_per_second
+        primary = self.reconstruction.primary.temporal_rank_limit
+        fallback = self.reconstruction.fallback.temporal_rank_limit
+        if not 1 <= primary <= fallback <= selected <= self.preprocess.candidate_fps:
+            raise ValueError(
+                "temporal sampling requires 1 <= primary <= fallback <= "
+                "selected_per_second <= candidate_fps"
+            )
+        if abs(self.input.candidate_fps - self.preprocess.candidate_fps) > 1e-9:
+            raise ValueError("prepared input candidate_fps must match preprocess.candidate_fps")
+        if self.reconstruction.primary.images_per_equirect != 8:
+            raise ValueError("RunConfigV4 Primary must use 8 views per panorama")
+        if self.reconstruction.fallback.images_per_equirect != 14:
+            raise ValueError("RunConfigV4 Fallback must use 14 views per panorama")
+        return self
+
+
+class SegmentQAConfig(StrictModel):
+    max_gap_seconds: float = Field(default=2.0, gt=0)
+    speed_multiplier: float = Field(default=10.0, gt=1)
+    minimum_samples: int = Field(default=10, ge=2)
+    minimum_positions: int = Field(default=3, ge=2)
+    minimum_views: int = Field(default=3, ge=1)
+    registration_threshold: float = Field(default=0.70, gt=0, le=1)
+    center_spread_step_ratio: float = Field(default=3.0, gt=0)
+
+
+class ReconstructionConfigV5(ReconstructionConfigV4):
+    primary: ReconstructionAttemptV4 = Field(default_factory=lambda: ReconstructionAttemptV4(
+        temporal_rank_limit=2, images_per_equirect=14, projection_fov_degrees=110,
+        projection_size=1746, crop_bottom=0.15, use_rig=False,
+    ))
+    fallback: ReconstructionAttemptV4 = Field(default_factory=lambda: ReconstructionAttemptV4(
+        temporal_rank_limit=2, images_per_equirect=14, projection_fov_degrees=110,
+        projection_size=1746, crop_bottom=0.15, use_rig=False,
+    ))
+    alignment_masks: bool = True
+    repair_padding_seconds: float = Field(default=2.0, ge=0)
+    repair_attempts: Literal[1] = 1
+
+
+class RunConfigV5(RunConfigV4):
+    schema_version: Literal[5] = 5
+    reconstruction: ReconstructionConfigV5 = Field(default_factory=ReconstructionConfigV5)
+    masking: MaskingConfigV4 = Field(default_factory=lambda: MaskingConfigV4(mask_discard_threshold=0.005))
+    segment_qa: SegmentQAConfig = Field(default_factory=SegmentQAConfig)
+
+    @model_validator(mode="after")
+    def validate_temporal_sampling(self) -> "RunConfigV5":
+        if not 1 <= self.reconstruction.primary.temporal_rank_limit <= self.preprocess.selected_per_second <= self.preprocess.candidate_fps:
+            raise ValueError("primary ranks <= selected_per_second <= candidate_fps required")
+        if abs(self.input.candidate_fps - self.preprocess.candidate_fps) > 1e-9:
+            raise ValueError("prepared input candidate_fps must match preprocess.candidate_fps")
+        if self.reconstruction.primary.use_rig or self.reconstruction.fallback.use_rig:
+            raise ValueError("RealityScan rig constraints are not implemented")
+        return self
+
+
 class StageRecord(StrictModel):
     status: StageStatus = StageStatus.PENDING
     started_at: datetime | None = None
@@ -584,7 +763,7 @@ class RunManifest(StrictModel):
     scene_id: str = Field(pattern=SLUG_PATTERN)
     status: RunStatus = RunStatus.DRAFT
     config_hash: str
-    config: LegacyRunConfigV1 | RunConfig | RunConfigV3
+    config: LegacyRunConfigV1 | RunConfig | RunConfigV3 | RunConfigV4 | RunConfigV5
     created_at: datetime
     updated_at: datetime
     active_stage: str | None = None

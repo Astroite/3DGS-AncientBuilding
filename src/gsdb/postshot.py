@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .gpu_lock import gpu_locked
+
 import csv
 import hashlib
 import json
@@ -26,6 +28,7 @@ from .masking import (
     image_files,
     io_worker_count,
     mask_path_for_image,
+    validate_mask_filter,
 )
 from .models import RunManifest, StageStatus
 from .paths import ensure_run_dir, ensure_within, host_path, wsl_to_windows
@@ -59,20 +62,38 @@ def default_postshot_dataset(scene_path: Path, run: RunManifest) -> Path:
 def _validate_v3_quality_gates(
     scene_path: Path, run: RunManifest, dataset: Path
 ) -> dict[str, Any] | None:
-    if getattr(run.config, "schema_version", 1) != 3:
+    schema_version = int(getattr(run.config, "schema_version", 1))
+    if schema_version == 5:
+        raise RuntimeError("Schema 5 requires train --segment with a validated segment package")
+    if schema_version not in (3, 4):
         return None
     selected_label = "fallback" if run.fallback_attempted else "primary"
     attempt = getattr(run.config.reconstruction, selected_label)
-    expected = expected_reconstruction_images(
-        attempt.frame_count, attempt.images_per_equirect
-    )
+    if schema_version == 4:
+        filtered = validate_mask_filter(dataset, verify_hashes=False)
+        expected = {str(item["image"]) for item in filtered["accepted"]}
+    else:
+        expected = expected_reconstruction_images(
+            attempt.frame_count, attempt.images_per_equirect
+        )
     mask_final = validate_mask_finalization(dataset, expected)
+    included = expected - set(mask_final.get("excluded_images", []))
     timestamps = timestamps_from_metrics(
         ensure_run_dir(scene_path, run.id)
         / f"selected-{selected_label}-metrics.jsonl"
     )
+    if schema_version == 4:
+        expected_frames = sorted(
+            {
+                int(match.group(1))
+                for name in included
+                if (match := re.search(r"frame_(\d+)\.jpg$", name))
+            }
+        )
+    else:
+        expected_frames = range(1, attempt.frame_count + 1)
     validate_trajectory_qa(
-        dataset, timestamps, range(1, attempt.frame_count + 1)
+        dataset, timestamps, expected_frames
     )
     return mask_final
 
@@ -900,6 +921,7 @@ def _training_sidecars(target: Path) -> tuple[Path, Path]:
     )
 
 
+@gpu_locked
 def train_postshot(
     scene_path: Path,
     run: RunManifest,

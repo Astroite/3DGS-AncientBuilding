@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import struct
@@ -406,6 +407,409 @@ def validate_mask_set(
         "max_masked_fraction": max(fractions, default=0.0),
         "deterministic_qa": "passed",
     }
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, path)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
+
+
+def _safe_relative(value: str) -> Path:
+    relative = Path(value)
+    if relative.is_absolute() or ".." in relative.parts or ":" in value:
+        raise RuntimeError(f"Unsafe mask-filter path: {value}")
+    return relative
+
+
+def validate_mask_filter(
+    dataset: Path, *, verify_hashes: bool = True
+) -> dict[str, Any]:
+    path = dataset / "mask-filter.json"
+    if not path.is_file():
+        raise RuntimeError(f"Mask filter manifest is missing: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != 1 or payload.get("status") != "complete":
+        raise RuntimeError(f"Mask filter manifest is incomplete: {path}")
+    accepted = payload.get("accepted")
+    rejected = payload.get("rejected")
+    if not isinstance(accepted, list) or not isinstance(rejected, list):
+        raise RuntimeError("Mask filter manifest has invalid inventories")
+    accepted_images = {str(item["image"]) for item in accepted}
+    accepted_masks = {str(item["mask"]) for item in accepted}
+    rejected_images = {str(item["image"]) for item in rejected}
+    rejected_masks = {str(item["mask"]) for item in rejected}
+    if len(accepted_images) != len(accepted) or len(accepted_masks) != len(accepted):
+        raise RuntimeError("Mask filter accepted inventory contains duplicates")
+    if len(rejected_images) != len(rejected) or len(rejected_masks) != len(rejected):
+        raise RuntimeError("Mask filter rejected inventory contains duplicates")
+    if accepted_images & rejected_images or accepted_masks & rejected_masks:
+        raise RuntimeError("Mask filter accepted/rejected inventories overlap")
+    if int(payload.get("original_image_count", -1)) != len(accepted) + len(rejected):
+        raise RuntimeError("Mask filter original inventory count is invalid")
+    threshold = float(payload.get("threshold", -1.0))
+    for item in accepted + rejected:
+        _safe_relative(str(item["image"]))
+        _safe_relative(str(item["mask"]))
+        for field in ("image_sha256", "mask_sha256"):
+            if not isinstance(item.get(field), str) or len(str(item[field])) != 64:
+                raise RuntimeError(f"Mask filter entry has invalid {field}")
+    if any(float(item["masked_fraction"]) > threshold for item in accepted):
+        raise RuntimeError("Mask filter accepted inventory violates its threshold")
+    if any(float(item["masked_fraction"]) <= threshold for item in rejected):
+        raise RuntimeError("Mask filter rejected inventory violates its threshold")
+    images_dir = dataset / "images"
+    masks_dir = dataset / "masks"
+    actual_images = {
+        item.relative_to(images_dir).as_posix() for item in image_files(images_dir)
+    }
+    actual_masks = {
+        item.relative_to(masks_dir).as_posix() for item in image_files(masks_dir)
+    }
+    if actual_images != accepted_images or actual_masks != accepted_masks:
+        raise RuntimeError("Filtered image/mask inventory no longer matches mask-filter.json")
+    for item in rejected:
+        image = images_dir / _safe_relative(str(item["image"]))
+        mask = masks_dir / _safe_relative(str(item["mask"]))
+        if image.exists() or mask.exists():
+            raise RuntimeError("Rejected mask-filter files still exist")
+    if verify_hashes:
+        for item in accepted:
+            image = images_dir / _safe_relative(str(item["image"]))
+            mask = masks_dir / _safe_relative(str(item["mask"]))
+            if _sha256(image) != item["image_sha256"] or _sha256(mask) != item["mask_sha256"]:
+                raise RuntimeError("Accepted mask-filter file hash changed")
+    return payload
+
+
+def _recover_mask_filter(
+    dataset: Path, threshold: float, *, review_required: bool = False,
+) -> dict[str, Any] | None:
+    """Preflight all retained media before resuming authoritative deletions.
+
+    This explicit recovery operation does not relax the read-only validator.
+    A completed record is immutable; pending intent is completed atomically.
+    """
+    import math
+    import stat
+    from pathlib import PureWindowsPath
+    from .manifests import canonical_hash
+
+    if not math.isfinite(threshold) or not 0 < threshold < 1:
+        raise ValueError("Mask discard threshold must be between 0 and 1")
+
+    # These caches belong only to this invocation's read-only preflight. Never
+    # reuse them after cleanup starts or across recovery attempts.
+    verified_parts: set[Path] = set()
+    resolved_paths: dict[Path, Path] = {}
+    safe_paths: dict[tuple[Path, str], Path] = {}
+
+    def resolved(path: Path) -> Path:
+        if path not in resolved_paths:
+            resolved_paths[path] = path.resolve()
+        return resolved_paths[path]
+
+    def safe(root: Path, name: object) -> Path:
+        if isinstance(name, str) and (root, name) in safe_paths:
+            return safe_paths[root, name]
+        if (not isinstance(name, str) or not name or "\\" in name
+                or PureWindowsPath(name).drive or ":" in name
+                or any(part in {"", ".", ".."} or part.endswith((".", " "))
+                       or PureWindowsPath(part).is_reserved() for part in name.split("/"))):
+            raise RuntimeError(f"Unsafe mask-filter path: {name}")
+        target = root / name
+        for part in [target, *target.parents]:
+            if part in verified_parts:
+                # A verified part includes every ancestor above it.
+                break
+            try:
+                info = part.lstat()
+            except FileNotFoundError:
+                # Missing rejected files and optional records are allowed;
+                # their existing ancestors still need to be checked.
+                continue
+            if (stat.S_ISLNK(info.st_mode)
+                    or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+                raise RuntimeError(f"Unsafe mask-filter link: {part}")
+        if (resolved(target) != target.absolute()
+                or not resolved(target).is_relative_to(resolved(root))):
+            raise RuntimeError(f"Escaping mask-filter path: {target}")
+        verified_parts.update(target.parents)
+        verified_parts.add(target)
+        safe_paths[root, name] = target
+        return target
+
+    def read(path: Path, status: str) -> dict[str, Any]:
+        print(f"Mask-filter recovery: preflight record {path.name}", flush=True)
+        safe(dataset, path.name)
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            if (not isinstance(value, dict) or type(value.get("schema_version")) is not int
+                    or value.get("schema_version") != 1
+                    or value.get("status") != status):
+                raise ValueError("invalid schema/status")
+            limit = value["threshold"]
+            if type(limit) not in (float, int) or not math.isfinite(limit) or not 0 < limit < 1:
+                raise ValueError("invalid threshold")
+            if abs(limit - threshold) > 1e-12:
+                raise RuntimeError(f"Mask-filter threshold conflict: {path}")
+            inventories = []
+            for kind in ("accepted", "rejected"):
+                entries = value[kind]
+                if not isinstance(entries, list):
+                    raise ValueError(f"invalid {kind} inventory")
+                print(f"Mask-filter recovery: validating {len(entries)} {kind} entries", flush=True)
+                names: list[set[str]] = [set(), set()]
+                for entry_index, entry in enumerate(entries, 1):
+                    for index, field in enumerate(("image", "mask")):
+                        target = safe(dataset / ("images" if index == 0 else "masks"), entry[field])
+                        key = entry[field].casefold()
+                        if key in names[index]:
+                            raise RuntimeError(f"Duplicate mask-filter path: {target}")
+                        names[index].add(key)
+                        digest = entry[field + "_sha256"]
+                        if (not isinstance(digest, str) or len(digest) != 64
+                                or any(c not in "0123456789abcdef" for c in digest)):
+                            raise RuntimeError(f"Invalid mask-filter hash: {target}")
+                    fraction = entry["masked_fraction"]
+                    if (Path(entry["image"]).suffix.lower() not in IMAGE_SUFFIXES
+                            or entry["mask"] != entry["image"] + ".png"
+                            or type(fraction) not in (int, float)
+                            or not math.isfinite(fraction) or not 0 <= fraction <= 1
+                            or (fraction <= limit) != (kind == "accepted")):
+                        raise RuntimeError(f"Invalid mask-filter entry: {path}: {entry['image']}")
+                    if entry_index % 1000 == 0:
+                        print(f"Mask-filter recovery: validated {entry_index}/{len(entries)} {kind} entries",
+                              flush=True)
+                inventories.append(names)
+            for index in (0, 1):
+                overlap = inventories[0][index] & inventories[1][index]
+                if overlap:
+                    raise RuntimeError(f"Overlapping mask-filter paths: {path}: {sorted(overlap)}")
+            if (type(value["original_image_count"]) is not int
+                    or value["original_image_count"] != len(value["accepted"]) + len(value["rejected"])):
+                raise ValueError("invalid original count")
+            return value
+        except (KeyError, TypeError, ValueError) as error:
+            raise RuntimeError(f"Invalid mask-filter record: {path}: {error}") from error
+
+    final = dataset / "mask-filter.json"
+    pending = dataset / ".mask-filter.pending.json"
+    complete = read(final, "complete") if final.exists() or final.is_symlink() else None
+    intent = read(pending, "pending") if pending.exists() or pending.is_symlink() else None
+    if complete is None and intent is None:
+        return None
+    if complete is not None and intent is not None:
+        def comparable(value: dict[str, Any]) -> dict[str, Any]:
+            return {**value, "status": "complete",
+                    "accepted": sorted(value["accepted"], key=lambda item: item["image"]),
+                    "rejected": sorted(value["rejected"], key=lambda item: item["image"])}
+        if comparable(intent) != comparable(complete):
+            raise RuntimeError(f"Conflicting mask-filter records: {final}, {pending}")
+    payload = complete if complete is not None else intent
+    accepted, rejected = payload["accepted"], payload["rejected"]
+    for folder, field in (("images", "image"), ("masks", "mask")):
+        print(f"Mask-filter recovery: beginning {folder} inventory "
+              f"({len(accepted)} accepted, {len(rejected)} rejected)", flush=True)
+        root = safe(dataset, folder)
+        known = {item[field] for item in accepted + rejected}
+        inventory_count = 0
+        for inventory_count, path in enumerate(sorted(root.rglob("*")), 1):
+            safe(root, path.relative_to(root).as_posix())
+            if not path.is_dir() and path.relative_to(root).as_posix() not in known:
+                raise RuntimeError(f"Unknown mask-filter file: {path}")
+            if inventory_count % 1000 == 0:
+                print(f"Mask-filter recovery: {folder} inventory {inventory_count} paths", flush=True)
+        for entry in accepted:
+            path = safe(root, entry[field])
+            if not path.is_file():
+                raise RuntimeError(f"Missing accepted mask-filter file: {path}")
+        for entry in rejected:
+            path = safe(root, entry[field])
+            if path.exists() and not path.is_file():
+                raise RuntimeError(f"Invalid rejected mask-filter file: {path}")
+        print(f"Mask-filter recovery: {folder} inventory complete ({inventory_count} paths)", flush=True)
+
+    review_path = safe(dataset, "mask-review.json")
+    review = json.loads(review_path.read_text(encoding="utf-8")) if review_path.is_file() else {}
+    finalization_path = safe(dataset, "mask-final.json")
+    finalization = json.loads(finalization_path.read_text(encoding="utf-8")) if finalization_path.is_file() else None
+    hashes = {}
+    print(f"Mask-filter recovery: checking hashes/masks for {len(accepted)} accepted pairs", flush=True)
+    for index, entry in enumerate(sorted(accepted, key=lambda e: e["image"]), 1):
+        image = dataset / "images" / entry["image"]
+        mask = dataset / "masks" / entry["mask"]
+        if _sha256(image) != entry["image_sha256"]:
+            raise RuntimeError(f"Accepted mask-filter image hash changed: {image}")
+        digest = _sha256(mask)
+        hashes[entry["mask"]] = digest
+        if digest != entry["mask_sha256"]:
+            key = str(index)
+            if not (review_required and review.get("schema_version") == 1
+                    and review.get("reviews", {}).get(key, {}).get("status") in
+                    {"ok", "exclude", "false_positive", "false_negative"}
+                    and review.get("mask_sha256", {}).get(key) == digest
+                    and review.get("image_path", {}).get(key, entry["image"]) == entry["image"]):
+                raise RuntimeError(f"Accepted mask-filter mask hash changed without current review: {mask}")
+        try:
+            ignored = _read_existing_mask(mask, image_dimensions(image))
+        except ValueError as error:
+            raise RuntimeError(f"Invalid accepted mask: {mask}: {error}") from error
+        if not review_required and float(np.count_nonzero(ignored) / ignored.size) > threshold:
+            raise RuntimeError(f"Accepted mask exceeds threshold: {mask}")
+        if index % 1000 == 0 or index == len(accepted):
+            print(f"Mask-filter recovery: hashes/masks {index}/{len(accepted)} accepted pairs", flush=True)
+    if finalization is not None:
+        excluded = finalization.get("excluded_images")
+        if (not isinstance(excluded, list) or any(not isinstance(x, str) for x in excluded)
+                or excluded != sorted(set(excluded))
+                or not set(excluded).issubset({e["image"] for e in accepted})):
+            raise RuntimeError(f"Invalid exclusions: {finalization_path}")
+        immutable = {
+            "mask_sha256": hashes,
+            "review_sha256": _sha256(review_path) if review_path.is_file() else None,
+            "image_inventory_sha256": canonical_hash(sorted(e["image"] for e in accepted)),
+            "excluded_images": excluded,
+            "excluded_images_sha256": canonical_hash({"images": excluded}),
+        }
+        if (finalization.get("schema_version") != 1 or finalization.get("status") != "passed"
+                or any(finalization.get(k) != v for k, v in immutable.items())
+                or finalization.get("finalization_sha256") != canonical_hash(immutable)):
+            raise RuntimeError(f"Stale or corrupt finalization: {finalization_path}")
+
+    qa_review_path = safe(dataset, "mask-qa/codex-local-review.json")
+    if qa_review_path.is_file():
+        qa_review = json.loads(qa_review_path.read_text(encoding="utf-8"))
+        bound = qa_review.get("contact_sheet_sha256")
+        if not isinstance(bound, dict) or not bound:
+            raise RuntimeError(f"Invalid QA sheet hashes: {qa_review_path}")
+        for name, digest in bound.items():
+            sheet = safe(dataset / "mask-qa", name)
+            if not sheet.is_file() or _sha256(sheet) != digest:
+                raise RuntimeError(f"Missing or changed reviewed QA sheet: {sheet}")
+
+    # Everything above is read-only. Partial cleanup is safe to repeat.
+    safe_paths.clear()
+    resolved_paths.clear()
+    verified_parts.clear()
+    print(f"Mask-filter recovery: preflight complete; cleaning up {len(rejected)} rejected pairs", flush=True)
+    for entry in rejected:
+        for folder, field in (("images", "image"), ("masks", "mask")):
+            (dataset / folder / entry[field]).unlink(missing_ok=True)
+    if complete is None:
+        payload = {**payload, "status": "complete"}
+        _atomic_json(final, payload)
+    pending.unlink(missing_ok=True)
+    print("Mask-filter recovery: cleanup complete", flush=True)
+    return payload
+
+
+def _recover_mask_records(
+    dataset: Path, payload: dict[str, Any], metrics: Path,
+) -> list[dict[str, object]]:
+    previous = {}
+    if metrics.is_file():
+        for line in metrics.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict) and isinstance(item.get("image"), str):
+                previous[item["image"]] = item
+    records = []
+    for entry in payload["accepted"]:
+        old = previous.get(entry["image"], {})
+        fraction = entry["masked_fraction"]
+        mask = dataset / "masks" / entry["mask"]
+        if _sha256(mask) != entry["mask_sha256"]:
+            ignored = _read_existing_mask(mask, image_dimensions(dataset / "images" / entry["image"]))
+            fraction = float(np.count_nonzero(ignored) / ignored.size)
+        records.append({"image": entry["image"], "mask": entry["mask"],
+                        "masked_fraction": fraction, "detections": old.get("detections"),
+                        "classes": old.get("classes", {}), "reused": True})
+    return records
+
+
+def filter_masked_images(
+    dataset: Path,
+    records: list[dict[str, object]],
+    threshold: float,
+) -> dict[str, Any]:
+    """Delete views above the threshold using a recoverable intent manifest."""
+
+    if not 0.0 < threshold < 1.0:
+        raise ValueError("Mask discard threshold must be between 0 and 1")
+
+    pending_path = dataset / ".mask-filter.pending.json"
+    recovered = _recover_mask_filter(dataset, threshold)
+    if recovered is not None:
+        return recovered
+    else:
+        images_dir = dataset / "images"
+        masks_dir = dataset / "masks"
+        entries: list[dict[str, Any]] = []
+        for record in records:
+            image_name = str(record["image"])
+            mask_name = str(record["mask"])
+            image = images_dir / _safe_relative(image_name)
+            mask = masks_dir / _safe_relative(mask_name)
+            fraction = float(record["masked_fraction"])
+            entries.append(
+                {
+                    "image": image_name,
+                    "mask": mask_name,
+                    "masked_fraction": fraction,
+                    "image_sha256": _sha256(image),
+                    "mask_sha256": _sha256(mask),
+                }
+            )
+        image_names = {item.relative_to(images_dir).as_posix() for item in image_files(images_dir)}
+        mask_names = {item.relative_to(masks_dir).as_posix() for item in image_files(masks_dir)}
+        recorded_images = {str(item["image"]) for item in entries}
+        recorded_masks = {str(item["mask"]) for item in entries}
+        if (
+            len(recorded_images) != len(entries)
+            or len(recorded_masks) != len(entries)
+            or recorded_images != image_names
+            or recorded_masks != mask_names
+        ):
+            raise RuntimeError("Mask metrics do not exactly cover the projected image/mask inventory")
+        accepted = [item for item in entries if item["masked_fraction"] <= threshold]
+        rejected = [
+            {**item, "reason": "masked_fraction_above_threshold"}
+            for item in entries
+            if item["masked_fraction"] > threshold
+        ]
+        payload = {
+            "schema_version": 1,
+            "status": "pending",
+            "threshold": threshold,
+            "comparison": "masked_fraction > threshold",
+            "original_image_count": len(entries),
+            "accepted": accepted,
+            "rejected": rejected,
+        }
+        _atomic_json(pending_path, payload)
+    return _recover_mask_filter(dataset, threshold)
 
 
 def select_qa_records(

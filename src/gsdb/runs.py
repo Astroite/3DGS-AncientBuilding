@@ -7,6 +7,7 @@ from .manifests import canonical_hash, load_model, save_yaml
 from .models import (
     RunConfig,
     RunConfigV3,
+    RunConfigV4,
     RunManifest,
     RunStatus,
     StageRecord,
@@ -50,7 +51,7 @@ def create_run(
     scene_path: Path,
     location_id: str,
     scene_id: str,
-    config: RunConfig | RunConfigV3,
+    config: RunConfig | RunConfigV3 | RunConfigV4,
     now: datetime | None = None,
 ) -> RunManifest:
     created_at = now or utc_now()

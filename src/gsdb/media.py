@@ -378,3 +378,84 @@ def create_blur_aware_subset(
             shutil.copy2(source, destination)
         outputs.append(destination)
     return outputs
+
+
+def select_temporal_records(
+    metrics: list[dict[str, Any]],
+    start_seconds: float,
+    selected_per_second: int,
+    selection_metric: str = "selection_score",
+) -> list[dict[str, Any]]:
+    """Keep the best N candidates in each one-second bucket."""
+
+    if selected_per_second < 1:
+        raise ValueError("selected_per_second must be positive")
+    buckets: dict[int, list[dict[str, Any]]] = {}
+    for item in metrics:
+        timestamp = float(item["timestamp_seconds"])
+        bucket = max(0, int(math.floor(timestamp - start_seconds + 1e-9)))
+        buckets.setdefault(bucket, []).append(item)
+    selected: list[dict[str, Any]] = []
+    for bucket_index in sorted(buckets):
+        ranked = sorted(
+            buckets[bucket_index],
+            key=lambda item: (
+                -float(item[selection_metric]),
+                float(item.get("timestamp_seconds", 0.0)),
+            ),
+        )
+        for rank, item in enumerate(ranked[:selected_per_second], start=1):
+            selected.append(
+                {
+                    **item,
+                    "time_bucket": bucket_index,
+                    "temporal_rank": rank,
+                }
+            )
+    return sorted(selected, key=lambda item: float(item["timestamp_seconds"]))
+
+
+def create_temporal_subset(
+    source_dir: Path,
+    metrics: list[dict[str, Any]],
+    output_dir: Path,
+    start_seconds: float,
+    selected_per_second: int,
+    rank_limit: int | None = None,
+    selection_metric: str = "selection_score",
+) -> tuple[list[Path], list[dict[str, Any]]]:
+    selected = select_temporal_records(
+        metrics,
+        start_seconds,
+        selected_per_second,
+        selection_metric=selection_metric,
+    )
+    if rank_limit is not None:
+        selected = [
+            item for item in selected if int(item["temporal_rank"]) <= rank_limit
+        ]
+    if not selected:
+        raise ValueError("Temporal selection contains no frames")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    existing = sorted(output_dir.glob("frame_*.jpg"))
+    if existing and len(existing) != len(selected):
+        raise RuntimeError("Partial temporal frame directory exists; create a new run")
+    outputs: list[Path] = []
+    rewritten: list[dict[str, Any]] = []
+    for index, item in enumerate(selected, start=1):
+        source = source_dir / str(item["file"])
+        destination = output_dir / f"frame_{index:06d}.jpg"
+        if not destination.is_file():
+            try:
+                os.link(source, destination)
+            except OSError:
+                shutil.copy2(source, destination)
+        outputs.append(destination)
+        rewritten.append(
+            {
+                **item,
+                "source_file": item["file"],
+                "file": destination.name,
+            }
+        )
+    return outputs, rewritten

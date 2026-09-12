@@ -1,13 +1,16 @@
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from gsdb.manifests import canonical_hash
 from gsdb.mask_finalize import MaskFinalizationMissingError
 from gsdb.models import (
     ArtifactRecord,
+    LegacyRunConfigV1,
     RunConfig,
     RunConfigV3,
+    RunConfigV4,
     RunManifest,
     RunStatus,
     StageRecord,
@@ -26,6 +29,8 @@ from gsdb.pipeline import (
     compare_quality_runs,
     densification_schedule,
     metrics_for_version,
+    export_run,
+    mask_run,
     preprocess_run,
     read_eval_curve,
     reconstruct_run,
@@ -282,6 +287,276 @@ def test_fallback_waits_for_review_and_resumes_only_after_valid_finalization(
     ]
 
 
+@pytest.mark.parametrize("marker", ["complete", "pending", "both"])
+@pytest.mark.parametrize("statistics", ["missing", "truncated"])
+@pytest.mark.parametrize("manual_review", [False, True])
+def test_v4_mask_resume_recovers_without_metrics_source_or_models(
+    tmp_path, monkeypatch, marker, statistics, manual_review,
+):
+    import json
+    import cv2
+    import numpy as np
+    from gsdb.masking import filter_masked_images
+    from gsdb.pipeline import _prepare_masked_dataset
+
+    run = _v4_run()
+    run.config.masking.mask_review_required = manual_review
+    run.config.vision_qa.enabled = False
+    work = tmp_path / "work"
+    dataset = work / "reconstruction-fallback"
+    (dataset / "images").mkdir(parents=True)
+    (dataset / "masks").mkdir()
+    records, rejected = [], {}
+    for name, pixels in (("keep.jpg", 20), ("drop.jpg", 21)):
+        image = dataset / "images" / name
+        mask = dataset / "masks" / f"{name}.png"
+        assert cv2.imwrite(str(image), np.full((20, 20, 3), 100, np.uint8))
+        values = np.full((20, 20), 255, np.uint8)
+        values.flat[:pixels] = 0
+        assert cv2.imwrite(str(mask), values)
+        records.append({"image": name, "mask": mask.name, "masked_fraction": pixels / 400})
+        if name == "drop.jpg":
+            rejected = {image: image.read_bytes(), mask: mask.read_bytes()}
+    payload = filter_masked_images(dataset, records, 0.05)
+    if manual_review:
+        qa = dataset / "mask-qa"
+        qa.mkdir()
+        (qa / "mask-contact-01.jpg").write_bytes(b"existing QA artifact")
+    if marker in {"pending", "both"}:
+        (dataset / ".mask-filter.pending.json").write_text(json.dumps({**payload, "status": "pending"}))
+    if marker == "pending":
+        (dataset / "mask-filter.json").unlink()
+    for path, content in rejected.items():
+        path.write_bytes(content)
+    if statistics == "truncated":
+        (work / "mask-metrics-fallback.jsonl").write_text(
+            json.dumps({"image": "keep.jpg", "detections": 3, "masked_fraction": 0.9}) + '\n{"image":'
+        )
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Recovery must not project or instantiate segmentation")
+    monkeypatch.setattr("gsdb.pipeline.project_equirectangular_frames", forbidden)
+    monkeypatch.setattr("gsdb.pipeline.generate_person_masks", forbidden)
+    monkeypatch.setattr("gsdb.masking.TorchvisionPersonSegmenter", forbidden)
+    monkeypatch.setattr("gsdb.pipeline.create_mask_contact_sheets", forbidden)
+    for _ in range(2):
+        result = _prepare_masked_dataset(
+            tmp_path, work, work / "missing-source", dataset,
+            run.config.reconstruction.fallback, run, "fallback",
+        )
+        assert result["planar_images"] == result["projected_planar_images"] == 2
+        assert result["reconstruction_input_images"] == 1
+        assert result["automatic_rejected_fraction"] == 0.5
+        assert result["validation"]["max_masked_fraction"] == 0.05
+        assert result["detection"]["images_with_detection_metrics"] == (statistics == "truncated")
+        assert result["detection"]["per_class"] == {}
+        run.metrics.setdefault("masking", {})["fallback"] = result
+    assert not any(path.exists() for path in rejected)
+    assert (dataset / "mask-final.json").is_file() == (not manual_review)
+    if manual_review:
+        assert (dataset / "mask-qa/mask-contact-01.jpg").read_bytes() == b"existing QA artifact"
+
+
+def _v4_run() -> RunManifest:
+    config = RunConfigV4(
+        capture_id="capture-001",
+        input_dataset_sha256="b" * 64,
+        prepared_relative_path="prepared/capture-001/hash",
+        input={
+            "source_kind": "equirect_sequence",
+            "source_sha256": ["a" * 64],
+            "source_probe": {
+                "width": 40,
+                "height": 20,
+                "fps": 30,
+                "frame_count": 72,
+                "duration_seconds": 2.4,
+            },
+            "normalization": {"width": 40, "height": 20},
+            "selection": {"end_seconds": 2.4},
+            "candidate_frame_indices": list(range(12)),
+            "candidate_fps": 5.0,
+        },
+        reconstruction={
+            "primary": {
+                "temporal_rank_limit": 1,
+                "images_per_equirect": 8,
+                "projection_fov_degrees": 120,
+                "projection_size": 256,
+                "crop_bottom": 0.2,
+            },
+            "fallback": {
+                "temporal_rank_limit": 2,
+                "images_per_equirect": 14,
+                "projection_fov_degrees": 110,
+                "projection_size": 256,
+                "crop_bottom": 0.15,
+            },
+        },
+    )
+    now = utc_now()
+    run = RunManifest(
+        id="20260906T000000Z-v4",
+        location_id="site-001",
+        scene_id="scene-001",
+        config_hash=canonical_hash(config),
+        config=config,
+        created_at=now,
+        updated_at=now,
+    )
+    run.stages["preprocess"] = StageRecord(status=StageStatus.SUCCEEDED)
+    run.stages["mask"] = StageRecord(status=StageStatus.SUCCEEDED)
+    return run
+
+
+def test_v4_reconstruction_fallback_uses_actual_filtered_inventories(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    scene = tmp_path / "scene"
+    run = _v4_run()
+    work = scene / run.id
+    work.mkdir(parents=True)
+    (work / "equirect-selected").mkdir()
+    (work / "equirect-fallback").mkdir()
+    primary_records = [
+        {
+            "file": f"frame_{index:06d}.jpg",
+            "timestamp_seconds": float(index) - 0.9,
+            "time_bucket": index - 1,
+            "temporal_rank": 1,
+        }
+        for index in range(1, 4)
+    ]
+    fallback_records = [
+        {
+            "file": f"frame_{index:06d}.jpg",
+            "timestamp_seconds": 0.1 + (index - 1) * 0.4,
+            "time_bucket": (index - 1) // 2,
+            "temporal_rank": 1 + (index - 1) % 2,
+        }
+        for index in range(1, 7)
+    ]
+    for label, records in (("primary", primary_records), ("fallback", fallback_records)):
+        (work / f"selected-{label}-metrics.jsonl").write_text(
+            "".join(json.dumps(item) + "\n" for item in records), encoding="utf-8"
+        )
+    for label in ("primary", "fallback"):
+        (work / f"reconstruction-{label}").mkdir()
+    run.metrics["masking"] = {
+        "primary": {
+            "projected_planar_images": 24,
+            "automatic_rejected_images": 2,
+            "reconstruction_input_images": 22,
+        }
+    }
+    save_run(scene, run)
+
+    primary_images = {"view_00/frame_000001.jpg", "view_00/frame_000002.jpg"}
+    fallback_images = {
+        f"view_00/frame_{index:06d}.jpg" for index in range(1, 7)
+    }
+
+    def filtered(dataset: Path, **kwargs: object) -> dict[str, object]:
+        images = primary_images if dataset.name.endswith("primary") else fallback_images
+        return {"accepted": [{"image": name} for name in sorted(images)], "rejected": []}
+
+    def inventory(dataset: Path, run: RunManifest):
+        images = primary_images if dataset.name.endswith("primary") else fallback_images
+        return {"excluded_images": []}, images
+
+    monkeypatch.setattr("gsdb.pipeline.validate_mask_filter", filtered)
+    monkeypatch.setattr("gsdb.pipeline._v4_attempt_inventory", inventory)
+    monkeypatch.setattr(
+        "gsdb.pipeline._prepare_masked_dataset",
+        lambda *args, **kwargs: {
+            "projected_planar_images": 84,
+            "automatic_rejected_images": 3,
+            "reconstruction_input_images": 81,
+        },
+    )
+    calls: list[tuple[str, set[str], int]] = []
+
+    def align(dataset: Path, *args: object, **kwargs: object) -> dict[str, float]:
+        included = set(kwargs["included_images"])
+        calls.append((dataset.name, included, int(kwargs["projected_image_count"])))
+        score = 0.5 if dataset.name.endswith("primary") else 0.9
+        return {
+            "registration_ratio": score,
+            "largest_component_coverage": score,
+            "registered_images": len(included),
+        }
+
+    monkeypatch.setattr("gsdb.pipeline.run_realityscan_alignment", align)
+    observed: dict[str, object] = {}
+
+    def trajectory(dataset: Path, **kwargs: object) -> dict[str, object]:
+        observed.update(kwargs)
+        return {"blocking": [], "warnings": [], "samples": []}
+
+    monkeypatch.setattr("gsdb.pipeline.write_trajectory_qa", trajectory)
+    monkeypatch.setattr("gsdb.pipeline._record_resources", lambda *args, **kwargs: None)
+
+    completed = reconstruct_run(scene, run)
+    assert completed.stages["reconstruct"].status == StageStatus.SUCCEEDED
+    assert completed.fallback_attempted is True
+    assert completed.selected_dataset.endswith("reconstruction-fallback")
+    assert calls == [
+        ("reconstruction-primary", primary_images, 24),
+        ("reconstruction-fallback", fallback_images, 84),
+    ]
+    assert observed["expected_frames"] == [1, 2, 3, 4, 5, 6]
+    assert not (work / "equirect-selected").exists()
+    assert not (work / "equirect-fallback").exists()
+
+
+def test_v4_realityscan_tool_error_does_not_trigger_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+
+    scene = tmp_path / "scene"
+    run = _v4_run()
+    work = scene / run.id
+    primary = work / "reconstruction-primary"
+    primary.mkdir(parents=True)
+    records = [
+        {
+            "file": f"frame_{index:06d}.jpg",
+            "timestamp_seconds": float(index),
+            "time_bucket": index - 1,
+            "temporal_rank": 1,
+        }
+        for index in range(1, 3)
+    ]
+    (work / "selected-primary-metrics.jsonl").write_text(
+        "".join(json.dumps(item) + "\n" for item in records), encoding="utf-8"
+    )
+    images = {"view_00/frame_000001.jpg", "view_00/frame_000002.jpg"}
+    run.metrics["masking"] = {"primary": {"projected_planar_images": 16}}
+    save_run(scene, run)
+    monkeypatch.setattr(
+        "gsdb.pipeline.validate_mask_filter",
+        lambda *args, **kwargs: {
+            "accepted": [{"image": name} for name in sorted(images)],
+            "rejected": [],
+        },
+    )
+    monkeypatch.setattr(
+        "gsdb.pipeline._v4_attempt_inventory",
+        lambda *args, **kwargs: ({"excluded_images": []}, images),
+    )
+    monkeypatch.setattr(
+        "gsdb.pipeline.run_realityscan_alignment",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("license failure")),
+    )
+
+    with pytest.raises(RuntimeError, match="license failure"):
+        reconstruct_run(scene, run)
+    assert run.fallback_attempted is False
+    assert not (work / "reconstruction-fallback").exists()
+
+
 def test_qa_comparison_reports_baseline_deltas(tmp_path: Path) -> None:
     now = utc_now()
 
@@ -333,6 +608,106 @@ def _run(**overrides) -> RunManifest:
         updated_at=now,
         **overrides,
     )
+
+
+@pytest.mark.parametrize(
+    ("config", "removed"),
+    [
+        (RunConfig(capture_id="test-capture", input_sha256="a" * 64), True),
+        (LegacyRunConfigV1(capture_id="test-capture", input_sha256="a" * 64), False),
+    ],
+)
+def test_mask_cleanup_preserves_only_legacy_primary_equirects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config: RunConfig | LegacyRunConfigV1,
+    removed: bool,
+) -> None:
+    scene = tmp_path / "scene"
+    work = scene / "run-001"
+    primary = work / "equirect-primary"
+    primary.mkdir(parents=True)
+    (primary / "frame_000001.jpg").write_bytes(b"frame")
+    now = utc_now()
+    run = RunManifest(
+        id="run-001",
+        location_id="test-location",
+        scene_id="test-scene",
+        config_hash=canonical_hash(config),
+        config=config,
+        created_at=now,
+        updated_at=now,
+    )
+    run.stages["preprocess"] = StageRecord(status=StageStatus.SUCCEEDED)
+    monkeypatch.setattr(
+        "gsdb.pipeline._prepare_masked_dataset",
+        lambda *args, **kwargs: {"planar_images": 16},
+    )
+    monkeypatch.setattr("gsdb.pipeline._record_resources", lambda *args, **kwargs: None)
+
+    result = mask_run(scene, run)
+
+    assert result.stages["mask"].status == StageStatus.SUCCEEDED
+    assert primary.exists() is not removed
+
+
+def test_export_cleanup_removes_superseded_version_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scene = tmp_path / "scene"
+    run = _run()
+    work = scene / run.id
+    dataset = work / "reconstruction-primary"
+    training = work / "training"
+    staging = work / "export-staging" / "v001"
+    export_dir = scene / "exports" / "v001"
+    for path in (dataset, training, staging, export_dir):
+        path.mkdir(parents=True, exist_ok=True)
+    (dataset / "transforms.json").write_text("{}\n", encoding="utf-8")
+    (training / "config.yml").write_text("config\n", encoding="utf-8")
+    (training / "dataparser_transforms.json").write_text("{}\n", encoding="utf-8")
+    (staging / "canonical.ply").write_bytes(b"staged")
+    (export_dir / "preview.mp4").write_bytes(b"preview")
+    (export_dir / "thumbnail.jpg").write_bytes(b"thumbnail")
+    run.selected_dataset = dataset.relative_to(scene).as_posix()
+    run.metrics["train"] = {
+        "config_path": (training / "config.yml").relative_to(scene).as_posix()
+    }
+    for stage in ("preprocess", "mask", "reconstruct", "postshot_prepare", "train"):
+        run.stages[stage] = StageRecord(status=StageStatus.SUCCEEDED)
+
+    monkeypatch.setattr(
+        "gsdb.pipeline.resolve_publish_frame",
+        lambda *args, **kwargs: {
+            "metrics": {},
+            "rotation": np.eye(3),
+            "cameras_model": np.empty((0, 3)),
+            "trajectory_radius": 1.0,
+            "dataparser": (np.eye(4), 1.0),
+        },
+    )
+
+    def fake_publish(source: Path, target: Path, *args: object) -> dict[str, int]:
+        target.write_bytes(b"published")
+        return {"input_gaussians": 1, "published_gaussians": 1, "removed_total": 0}
+
+    def fake_transforms(source: Path, target: Path, *args: object) -> None:
+        target.write_text("{}\n", encoding="utf-8")
+
+    monkeypatch.setattr("gsdb.pipeline.publish_gaussian_ply", fake_publish)
+    monkeypatch.setattr("gsdb.pipeline.write_published_transforms", fake_transforms)
+    monkeypatch.setattr("gsdb.pipeline.gaussian_count", lambda path: 1)
+
+    result = export_run(
+        scene,
+        run,
+        version="v001",
+        resume=True,
+        cull=CullSettings(enabled=False),
+    )
+
+    assert result.stages["export"].status == StageStatus.SUCCEEDED
+    assert not staging.exists()
 
 
 def test_training_keeps_every_checkpoint_so_one_run_answers_the_step_question() -> None:

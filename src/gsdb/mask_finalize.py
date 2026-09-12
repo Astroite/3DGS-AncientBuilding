@@ -59,7 +59,9 @@ def _current_mask_hashes(dataset: MaskReviewDataset) -> dict[str, str]:
 
 
 def finalize_mask_dataset(
-    path: Path, expected_images: set[str] | None = None
+    path: Path,
+    expected_images: set[str] | None = None,
+    maximum_included_masked_fraction: float | None = None,
 ) -> dict[str, Any]:
     dataset = MaskReviewDataset(path)
     actual_images = {item.source_image for item in dataset.items}
@@ -85,6 +87,22 @@ def finalize_mask_dataset(
             f"{image_id}:{review['status']}" for image_id, review in blocking.items()
         )
         raise RuntimeError(f"Mask finalization blocked by unresolved reviews: {summary}")
+    if maximum_included_masked_fraction is not None:
+        over_limit = {
+            str(item.image_id): item.masked_fraction
+            for item in dataset.items
+            if item.masked_fraction > maximum_included_masked_fraction
+            and reviews[str(item.image_id)]["status"] != "exclude"
+        }
+        if over_limit:
+            summary = ", ".join(
+                f"{image_id}:{fraction:.2%}"
+                for image_id, fraction in sorted(over_limit.items())
+            )
+            raise RuntimeError(
+                "Reviewed masks above the configured discard threshold must be "
+                f"explicitly excluded: {summary}"
+            )
     excluded = sorted(
         item.source_image
         for item in dataset.items

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .gpu_lock import gpu_locked
+
 import json
 import math
 import re
@@ -13,21 +15,27 @@ import numpy as np
 from .doctor import collect_tool_versions
 from .manifests import load_capture_manifest, load_model, save_yaml
 from .masking import (
+    _recover_mask_filter,
+    _recover_mask_records,
     create_mask_contact_sheets,
+    filter_masked_images,
     generate_person_masks,
     image_files,
     summarize_detection_records,
+    validate_mask_filter,
     validate_mask_set,
 )
 from .mask_finalize import (
     MaskFinalizationMissingError,
     expected_reconstruction_images,
+    finalize_mask_dataset,
     validate_mask_finalization,
 )
 from .media import (
     analyze_frames,
     check_disk_budget,
     create_blur_aware_subset,
+    create_temporal_subset,
     extract_uniform_frames,
     probe_video,
     sha256_file,
@@ -41,6 +49,7 @@ from .models import (
     CaptureManifest,
     CaptureManifestV2,
     ReconstructionAttempt,
+    ReconstructionAttemptV4,
     RunManifest,
     RunStatus,
     SceneManifest,
@@ -63,7 +72,6 @@ from .postshot import prepare_postshot_dataset, train_postshot
 from .processes import CommandError, run_logged
 from .reconstruction import (
     _selected_model_dir,
-    build_image_pyramid,
     center_spread_metrics,
     projection_fov_degrees,
     project_equirectangular_frames,
@@ -158,12 +166,22 @@ def densification_schedule(image_count: int, max_iterations: int) -> dict[str, i
 
 
 def training_image_count(run: RunManifest) -> int:
-    """Views the training set will hold, from configuration alone.
+    """Views the selected training input actually contains.
 
-    Deliberately not the registered-image count: that depends on how
-    reconstruction went, and the schedule must stay a pure function of the hashed
-    configuration so one config hash still means one model.
+    V1-V3 retain the configuration-derived count used by historical config hashes.
+    V4 is inventory-driven, so its count comes from the prepared Postshot dataset
+    when available and otherwise from the selected RealityScan component.
     """
+    if int(getattr(run.config, "schema_version", 1)) >= 4:
+        prepared = run.metrics.get("postshot_prepare", {})
+        if isinstance(prepared, dict) and "images" in prepared:
+            return int(prepared["images"])
+        selected_label = "fallback" if run.fallback_attempted else "primary"
+        reconstruction = run.metrics.get("reconstruction", {}).get(selected_label, {})
+        registered = int(reconstruction.get("registered_images", 0))
+        if registered < 1:
+            raise RuntimeError("RunConfigV4 has no registered training-image inventory")
+        return registered
     attempt = getattr(
         run.config.reconstruction, "fallback" if run.fallback_attempted else "primary"
     )
@@ -357,9 +375,9 @@ def preprocess_run(scene_path: Path, run: RunManifest, resume: bool = False) -> 
             "equirect-candidates" if modern else "equirect-primary"
         )
         explicit_timestamps: tuple[float, ...] | None = None
-        if schema_version == 3:
+        if schema_version >= 3:
             if not isinstance(capture, CaptureManifestV2):
-                raise RuntimeError("RunConfigV3 requires a schema 2 capture")
+                raise RuntimeError("Modern runs require a schema 2 capture")
             from .sources import _dataset_from_manifest
 
             prepared = ensure_within(
@@ -368,11 +386,23 @@ def preprocess_run(scene_path: Path, run: RunManifest, resume: bool = False) -> 
             candidate_set = _dataset_from_manifest(prepared)
             if candidate_set.dataset_sha256 != run.config.input_dataset_sha256:
                 raise RuntimeError("Prepared input hash changed after the run was created")
-            frames = copy_candidate_frames(candidate_set, candidates_dir, resume=resume)
+            if schema_version >= 4:
+                frames = list(candidate_set.frame_paths)
+                if candidate_set.schema_version != 2:
+                    raise RuntimeError("RunConfigV4 requires a rate-sampled prepared input")
+                if (
+                    candidate_set.candidate_fps is None
+                    or abs(candidate_set.candidate_fps - run.config.preprocess.candidate_fps)
+                    > 1e-9
+                ):
+                    raise RuntimeError("Prepared input candidate rate changed after run creation")
+            else:
+                frames = copy_candidate_frames(candidate_set, candidates_dir, resume=resume)
             explicit_timestamps = candidate_set.timestamps_seconds
             probe = capture.source.probe.model_dump(mode="json")
             selection_duration = (
-                capture.selection.end_seconds - capture.selection.start_seconds
+                run.config.input.selection.end_seconds
+                - run.config.input.selection.start_seconds
             )
             budget = check_disk_budget(
                 work,
@@ -418,14 +448,77 @@ def preprocess_run(scene_path: Path, run: RunManifest, resume: bool = False) -> 
             start_seconds=capture.selection.start_seconds,
             timestamps_seconds=explicit_timestamps,
             selection_algorithm=(
-                "composite_v1" if schema_version == 3 else "legacy_laplacian"
+                "composite_v1" if schema_version >= 3 else "legacy_laplacian"
             ),
         )
         run.metrics["input"] = probe
-        run.metrics["selection"] = capture.selection.model_dump(mode="json")
+        run.metrics["selection"] = (
+            run.config.input.selection.model_dump(mode="json")
+            if schema_version >= 4
+            else capture.selection.model_dump(mode="json")
+        )
         run.metrics["disk_budget"] = budget
         candidate_summary = summarize_frame_metrics(records)
-        if modern:
+        if schema_version >= 4:
+            selected_dir = work / "equirect-selected"
+            selected_frames, selected_records = create_temporal_subset(
+                candidate_set.path / "frames",
+                records,
+                selected_dir,
+                run.config.input.selection.start_seconds,
+                run.config.preprocess.selected_per_second,
+            )
+            primary_dir = work / "equirect-primary"
+            primary_frames, primary_records = create_temporal_subset(
+                candidate_set.path / "frames",
+                records,
+                primary_dir,
+                run.config.input.selection.start_seconds,
+                run.config.preprocess.selected_per_second,
+                rank_limit=run.config.reconstruction.primary.temporal_rank_limit,
+            )
+            fallback_dir = work / "equirect-fallback"
+            fallback_frames, fallback_records = create_temporal_subset(
+                candidate_set.path / "frames",
+                records,
+                fallback_dir,
+                run.config.input.selection.start_seconds,
+                run.config.preprocess.selected_per_second,
+                rank_limit=run.config.reconstruction.fallback.temporal_rank_limit,
+            )
+            for name, output_records in (
+                ("selected-temporal-metrics.jsonl", selected_records),
+                ("selected-primary-metrics.jsonl", primary_records),
+                ("selected-fallback-metrics.jsonl", fallback_records),
+            ):
+                (work / name).write_text(
+                    "".join(
+                        json.dumps(item, ensure_ascii=False) + "\n"
+                        for item in output_records
+                    ),
+                    encoding="utf-8",
+                )
+            selected_summary = summarize_frame_metrics(selected_records)
+            candidate_blur = float(candidate_summary["blur_median"])
+            selected_blur = float(selected_summary["blur_median"])
+            run.metrics["preprocess"] = {
+                "candidate": candidate_summary,
+                "selected": selected_summary,
+                "candidate_fps": run.config.preprocess.candidate_fps,
+                "selected_per_second": run.config.preprocess.selected_per_second,
+                "candidate_frame_count": len(frames),
+                "selected_frame_count": len(selected_frames),
+                "primary_frame_count": len(primary_frames),
+                "fallback_frame_count": len(fallback_frames),
+                "time_bucket_count": len(
+                    {int(item["time_bucket"]) for item in selected_records}
+                ),
+                "blur_median_improvement": selected_blur - candidate_blur,
+                "blur_median_improvement_ratio": (
+                    selected_blur / candidate_blur if candidate_blur else 0.0
+                ),
+            }
+        elif modern:
             selection_metric = (
                 "selection_score"
                 if schema_version == 3
@@ -472,9 +565,13 @@ def preprocess_run(scene_path: Path, run: RunManifest, resume: bool = False) -> 
             message=(
                 f"Extracted and analyzed {len(frames)} candidate equirectangular frames"
                 + (
-                    f"; selected {run.config.reconstruction.primary.frame_count} blur-aware frames"
-                    if modern
-                    else ""
+                    f"; selected {run.metrics['preprocess']['selected_frame_count']} temporal frames"
+                    if schema_version >= 4
+                    else (
+                        f"; selected {run.config.reconstruction.primary.frame_count} blur-aware frames"
+                        if modern
+                        else ""
+                    )
                 )
             ),
             log_path=log_path.relative_to(scene_path).as_posix(),
@@ -490,16 +587,29 @@ def preprocess_run(scene_path: Path, run: RunManifest, resume: bool = False) -> 
 def _cached_masking_result(
     scene_path: Path,
     dataset: Path,
-    attempt: ReconstructionAttempt,
+    attempt: ReconstructionAttempt | ReconstructionAttemptV4,
     run: RunManifest,
     label: str,
 ) -> dict[str, Any] | None:
     cached = run.metrics.get("masking", {}).get(label)
     if not isinstance(cached, dict):
         return None
-    expected_count = attempt.frame_count * attempt.images_per_equirect
-    if int(cached.get("planar_images", 0)) != expected_count:
-        return None
+    schema_version = int(getattr(run.config, "schema_version", 1))
+    if schema_version >= 4:
+        try:
+            filtered = validate_mask_filter(
+                dataset,
+                verify_hashes=not run.config.masking.mask_review_required,
+            )
+        except (OSError, RuntimeError, KeyError, TypeError, json.JSONDecodeError):
+            return None
+        expected_count = len(filtered["accepted"])
+        if int(cached.get("reconstruction_input_images", -1)) != expected_count:
+            return None
+    else:
+        expected_count = attempt.frame_count * attempt.images_per_equirect
+        if int(cached.get("planar_images", 0)) != expected_count:
+            return None
     images_dir = dataset / "images"
     masks_dir = dataset / "masks"
     images = image_files(images_dir)
@@ -515,22 +625,11 @@ def _cached_masking_result(
     }
     if actual_masks != expected_masks:
         return None
-    for level in range(1, attempt.num_downscales + 1):
-        factor = 2**level
-        image_pyramid = dataset / f"images_{factor}"
-        mask_pyramid = dataset / f"masks_{factor}"
-        if {
-            path.relative_to(image_pyramid).as_posix()
-            for path in image_files(image_pyramid)
-        } != image_names:
-            return None
-        if {
-            path.relative_to(mask_pyramid).as_posix()
-            for path in image_files(mask_pyramid)
-        } != expected_masks:
-            return None
     sheets = [scene_path / str(path) for path in cached.get("contact_sheets", [])]
-    if not sheets or not all(path.is_file() for path in sheets):
+    sheets_required = run.config.vision_qa.enabled or bool(
+        getattr(run.config.masking, "mask_review_required", False)
+    )
+    if sheets_required and (not sheets or not all(path.is_file() for path in sheets)):
         return None
     if run.config.vision_qa.enabled:
         local_review_path = dataset / "mask-qa" / "codex-local-review.json"
@@ -549,40 +648,96 @@ def _prepare_masked_dataset(
     work: Path,
     source: Path,
     dataset: Path,
-    attempt: ReconstructionAttempt,
+    attempt: ReconstructionAttempt | ReconstructionAttemptV4,
     run: RunManifest,
     label: str,
 ) -> dict[str, Any]:
-    cached = _cached_masking_result(scene_path, dataset, attempt, run, label)
+    schema_version = int(getattr(run.config, "schema_version", 1))
+    mask_filter = (
+        _recover_mask_filter(
+            dataset, run.config.masking.mask_discard_threshold,
+            review_required=run.config.masking.mask_review_required,
+        )
+        if schema_version >= 4 else None
+    )
+    recovered = mask_filter is not None
+    cached = (
+        _cached_masking_result(scene_path, dataset, attempt, run, label)
+        if not recovered else None
+    )
     if cached is not None:
         print(f"Masked dataset: {label} (validated cached result)", flush=True)
         return cached
-    images = project_equirectangular_frames(source, dataset, attempt)
-    build_image_pyramid(
-        dataset / "images", dataset, "images", attempt.num_downscales, is_mask=False
-    )
-    records = generate_person_masks(
-        dataset / "images",
-        dataset / "masks",
-        run.config.masking,
-        work / f"mask-metrics-{label}.jsonl",
-    )
-    deterministic = validate_mask_set(
-        dataset / "images",
-        dataset / "masks",
-        run.config.masking.max_masked_fraction,
-    )
-    build_image_pyramid(
-        dataset / "masks", dataset, "masks", attempt.num_downscales, is_mask=True
-    )
-    sheets = create_mask_contact_sheets(
-        dataset / "images",
-        dataset / "masks",
-        records,
-        dataset / "mask-qa",
-        run.config.masking.qa_sample_count,
-        run.config.vision_qa.max_contact_sheets,
-    )
+    if recovered:
+        records = _recover_mask_records(
+            dataset, mask_filter, work / f"mask-metrics-{label}.jsonl",
+        )
+        projected_count = mask_filter["original_image_count"]
+    else:
+        images = project_equirectangular_frames(source, dataset, attempt)
+        projected_count = len(images)
+        records = generate_person_masks(
+            dataset / "images",
+            dataset / "masks",
+            run.config.masking,
+            work / f"mask-metrics-{label}.jsonl",
+        )
+    if schema_version >= 4:
+        mask_filter = mask_filter if recovered else filter_masked_images(
+            dataset,
+            records,
+            run.config.masking.mask_discard_threshold,
+        )
+        accepted_names = {str(item["image"]) for item in mask_filter["accepted"]}
+        accepted_records = [
+            item for item in records if str(item["image"]) in accepted_names
+        ]
+        deterministic = validate_mask_set(
+            dataset / "images",
+            dataset / "masks",
+            # Review edits can cross the automatic threshold. Finalization still
+            # requires explicit exclusion; recovery must not re-filter them.
+            1.0 if recovered and run.config.masking.mask_review_required
+            else run.config.masking.mask_discard_threshold,
+        )
+        if accepted_names and not run.config.masking.mask_review_required:
+            finalize_mask_dataset(
+                dataset,
+                expected_images=accepted_names,
+                maximum_included_masked_fraction=run.config.masking.mask_discard_threshold,
+            )
+        make_sheets = bool(accepted_records) and (
+            run.config.masking.mask_review_required or run.config.vision_qa.enabled
+        )
+        existing_sheets = sorted((dataset / "mask-qa").glob("mask-contact-*.jpg"))
+        review_bound = (dataset / "mask-qa" / "codex-local-review.json").is_file()
+        sheets = existing_sheets if recovered and (existing_sheets or review_bound) else (
+            create_mask_contact_sheets(
+                dataset / "images",
+                dataset / "masks",
+                accepted_records,
+                dataset / "mask-qa",
+                run.config.masking.qa_sample_count,
+                run.config.vision_qa.max_contact_sheets,
+            )
+            if make_sheets
+            else []
+        )
+    else:
+        accepted_records = records
+        deterministic = validate_mask_set(
+            dataset / "images",
+            dataset / "masks",
+            run.config.masking.max_masked_fraction,
+        )
+        sheets = create_mask_contact_sheets(
+            dataset / "images",
+            dataset / "masks",
+            records,
+            dataset / "mask-qa",
+            run.config.masking.qa_sample_count,
+            run.config.vision_qa.max_contact_sheets,
+        )
     vision: dict[str, Any]
     if run.config.vision_qa.enabled:
         local_review_path = dataset / "mask-qa" / "codex-local-review.json"
@@ -612,16 +767,40 @@ def _prepare_masked_dataset(
                 "DeepSeek multimodal endpoint"
             ),
         }
-    return {
-        "planar_images": len(images),
+    result = {
+        "planar_images": projected_count,
         "model": run.config.masking.model if run.config.masking.enabled else "disabled-all-white",
-        "detection": summarize_detection_records(records),
+        "detection": summarize_detection_records(accepted_records),
         "validation": deterministic,
         "contact_sheets": [path.relative_to(scene_path).as_posix() for path in sheets],
         "vision_qa": vision,
     }
+    if mask_filter is not None:
+        surviving_frame_ids = sorted(
+            {
+                int(match.group(1))
+                for item in mask_filter["accepted"]
+                if (match := re.search(r"frame_(\d+)\.jpg$", str(item["image"])))
+            }
+        )
+        result.update(
+            {
+                "projected_planar_images": projected_count,
+                "automatic_rejected_images": len(mask_filter["rejected"]),
+                "automatic_rejected_fraction": (
+                    len(mask_filter["rejected"]) / projected_count if projected_count else 0.0
+                ),
+                "reconstruction_input_images": len(mask_filter["accepted"]),
+                "surviving_frame_ids": surviving_frame_ids,
+                "mask_filter": (dataset / "mask-filter.json")
+                .relative_to(scene_path)
+                .as_posix(),
+            }
+        )
+    return result
 
 
+@gpu_locked
 def mask_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunManifest:
     if not begin_stage(run, "mask", resume=resume):
         return run
@@ -653,6 +832,20 @@ def mask_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunMan
             ),
             log_path=log_path.relative_to(scene_path).as_posix(),
         )
+        if (
+            getattr(run.config, "schema_version", 1) >= 4
+            and run.config.masking.mask_review_required
+            and primary.get("reconstruction_input_images", 0)
+        ):
+            run.status = RunStatus.WAITING_REVIEW
+            run.stages["mask"].message = (
+                f"{run.stages['mask'].message}; awaiting primary mask review/finalization"
+            )
+        if getattr(run.config, "schema_version", 1) >= 2:
+            # Persist the validated mask inventory before deleting its projection
+            # source so a process interruption remains resumable from the cache.
+            save_run(scene_path, run)
+            shutil.rmtree(work / "equirect-primary", ignore_errors=True)
     except Exception as error:
         fail_stage(run, "mask", str(error), log_path.relative_to(scene_path).as_posix())
         save_run(scene_path, run)
@@ -661,7 +854,256 @@ def mask_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunMan
     return run
 
 
+def _v4_attempt_inventory(
+    dataset: Path, run: RunManifest
+) -> tuple[dict[str, Any], set[str]]:
+    filtered = validate_mask_filter(dataset, verify_hashes=False)
+    accepted = {str(item["image"]) for item in filtered["accepted"]}
+    finalized = validate_mask_finalization(dataset, accepted)
+    included = accepted - set(finalized.get("excluded_images", []))
+    return finalized, included
+
+
+def _v4_attempt_time_buckets(
+    included_images: set[str], records: list[dict[str, Any]]
+) -> set[int]:
+    frame_buckets = {
+        index: int(record["time_bucket"])
+        for index, record in enumerate(records, start=1)
+    }
+    frame_ids = {
+        int(match.group(1))
+        for name in included_images
+        if (match := re.search(r"frame_(\d+)\.jpg$", name))
+    }
+    return {frame_buckets[index] for index in frame_ids if index in frame_buckets}
+
+
+def _v4_skipped_attempt_metrics(
+    masking: dict[str, Any], included_images: set[str], reason: str
+) -> dict[str, Any]:
+    return {
+        "expected_planar_images": len(included_images),
+        "written_planar_images": int(masking.get("projected_planar_images", 0)),
+        "excluded_images": int(masking.get("automatic_rejected_images", 0)),
+        "registered_images": 0,
+        "selected_component_images": 0,
+        "registration_ratio": 0.0,
+        "largest_component_coverage": 0.0,
+        "component_count": 0,
+        "component_sizes": [],
+        "skipped_reason": reason,
+    }
+
+
+def _wait_for_mask_review(
+    scene_path: Path,
+    run: RunManifest,
+    attempts: dict[str, Any],
+    attempt: str,
+) -> RunManifest:
+    run.metrics["reconstruction"] = attempts
+    run.status = RunStatus.WAITING_REVIEW
+    run.active_stage = "reconstruct"
+    run.stages["reconstruct"].message = (
+        f"{attempt.capitalize()} masks are ready; run mask-review and mask-finalize "
+        f"for --attempt {attempt}, then reconstruct --resume"
+    )
+    save_run(scene_path, run)
+    return run
+
+
+def _reconstruct_run_v4(
+    scene_path: Path, run: RunManifest, resume: bool = False
+) -> RunManifest:
+    if not begin_stage(run, "reconstruct", resume=resume):
+        return run
+    save_run(scene_path, run)
+    work = ensure_run_dir(scene_path, run.id)
+    attempts: dict[str, Any] = {}
+    threshold = run.config.reconstruction.registration_threshold
+    try:
+        primary_output = work / "reconstruction-primary"
+        primary_records = [
+            json.loads(line)
+            for line in (work / "selected-primary-metrics.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line
+        ]
+        primary_masking = run.metrics.get("masking", {}).get("primary", {})
+        primary_filter = validate_mask_filter(primary_output, verify_hashes=False)
+        primary_accepted = {str(item["image"]) for item in primary_filter["accepted"]}
+        if primary_accepted:
+            try:
+                _, primary_included = _v4_attempt_inventory(primary_output, run)
+            except MaskFinalizationMissingError:
+                return _wait_for_mask_review(
+                    scene_path, run, attempts, "primary"
+                )
+        else:
+            primary_included = set()
+        primary_buckets = _v4_attempt_time_buckets(primary_included, primary_records)
+        primary_viable = len(primary_included) >= 2 and len(primary_buckets) >= 2
+        if primary_viable:
+            primary_metrics = run_realityscan_alignment(
+                primary_output,
+                run.config.reconstruction.primary,
+                work / "logs" / "reconstruct-primary",
+                run.config.reconstruction,
+                included_images=primary_included,
+                projected_image_count=int(
+                    primary_masking.get("projected_planar_images", 0)
+                ),
+            )
+        else:
+            primary_metrics = _v4_skipped_attempt_metrics(
+                primary_masking,
+                primary_included,
+                "fewer than two surviving images or time buckets",
+            )
+        attempts["primary"] = primary_metrics
+        selected = primary_output
+        selected_label = "primary"
+        selected_included = primary_included
+        selected_records = primary_records
+
+        if (not primary_viable) or min(
+            primary_metrics["registration_ratio"],
+            primary_metrics["largest_component_coverage"],
+        ) < threshold:
+            run.fallback_attempted = True
+            fallback_output = work / "reconstruction-fallback"
+            fallback_records = [
+                json.loads(line)
+                for line in (work / "selected-fallback-metrics.jsonl")
+                .read_text(encoding="utf-8")
+                .splitlines()
+                if line
+            ]
+            fallback_masking = _prepare_masked_dataset(
+                scene_path,
+                work,
+                work / "equirect-fallback",
+                fallback_output,
+                run.config.reconstruction.fallback,
+                run,
+                "fallback",
+            )
+            run.metrics.setdefault("masking", {})["fallback"] = fallback_masking
+            # The masked fallback dataset is now self-contained.  Commit its
+            # cache metadata before reclaiming the panorama projection source.
+            save_run(scene_path, run)
+            shutil.rmtree(work / "equirect-fallback", ignore_errors=True)
+            fallback_filter = validate_mask_filter(fallback_output, verify_hashes=False)
+            fallback_accepted = {
+                str(item["image"]) for item in fallback_filter["accepted"]
+            }
+            if fallback_accepted:
+                try:
+                    _, fallback_included = _v4_attempt_inventory(
+                        fallback_output, run
+                    )
+                except MaskFinalizationMissingError:
+                    _record_resources(run, work)
+                    return _wait_for_mask_review(
+                        scene_path, run, attempts, "fallback"
+                    )
+            else:
+                fallback_included = set()
+            fallback_buckets = _v4_attempt_time_buckets(
+                fallback_included, fallback_records
+            )
+            if len(fallback_included) < 2 or len(fallback_buckets) < 2:
+                raise RuntimeError(
+                    "Fallback has fewer than two surviving images or time buckets; "
+                    "stop and prepare a recapture report"
+                )
+            fallback_metrics = run_realityscan_alignment(
+                fallback_output,
+                run.config.reconstruction.fallback,
+                work / "logs" / "reconstruct-fallback",
+                run.config.reconstruction,
+                included_images=fallback_included,
+                projected_image_count=int(
+                    fallback_masking.get("projected_planar_images", 0)
+                ),
+            )
+            attempts["fallback"] = fallback_metrics
+            if min(
+                fallback_metrics["registration_ratio"],
+                fallback_metrics["largest_component_coverage"],
+            ) < threshold:
+                raise RuntimeError(
+                    "Both reconstruction attempts were below the 70% "
+                    "registration/coverage threshold; stop and prepare a recapture report"
+                )
+            selected = fallback_output
+            selected_label = "fallback"
+            selected_included = fallback_included
+            selected_records = fallback_records
+
+        timestamps_by_frame = {
+            index: float(record["timestamp_seconds"])
+            for index, record in enumerate(selected_records, start=1)
+        }
+        expected_frames = sorted(
+            {
+                int(match.group(1))
+                for name in selected_included
+                if (match := re.search(r"frame_(\d+)\.jpg$", name))
+            }
+        )
+        trajectory = write_trajectory_qa(
+            selected,
+            timestamps_by_frame=timestamps_by_frame,
+            expected_frames=expected_frames,
+        )
+        run.metrics["trajectory_qa"] = {
+            **trajectory,
+            "report": (selected / "trajectory-qa.json")
+            .relative_to(scene_path)
+            .as_posix(),
+            "top_view": (selected / "trajectory-top.svg")
+            .relative_to(scene_path)
+            .as_posix(),
+        }
+        if trajectory["blocking"]:
+            raise RuntimeError(
+                f"Trajectory QA found {len(trajectory['blocking'])} blocking issue(s)"
+            )
+        run.metrics["reconstruction"] = attempts
+        run.selected_dataset = selected.relative_to(scene_path).as_posix()
+        _record_resources(run, work)
+        complete_stage(
+            run,
+            "reconstruct",
+            message=f"Selected dataset: {run.selected_dataset}",
+            log_path=(work / "logs").relative_to(scene_path).as_posix(),
+        )
+        shutil.rmtree(work / "equirect-selected", ignore_errors=True)
+        shutil.rmtree(work / "equirect-fallback", ignore_errors=True)
+    except Exception as error:
+        run.metrics["reconstruction"] = attempts
+        fail_stage(
+            run,
+            "reconstruct",
+            str(error),
+            (work / "logs").relative_to(scene_path).as_posix(),
+        )
+        save_run(scene_path, run)
+        raise
+    save_run(scene_path, run)
+    return run
+
+
+@gpu_locked
 def reconstruct_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunManifest:
+    if getattr(run.config, "schema_version", 1) == 5:
+        from .pipeline_v5 import reconstruct_v5
+        return reconstruct_v5(scene_path, run, resume)
+    if getattr(run.config, "schema_version", 1) >= 4:
+        return _reconstruct_run_v4(scene_path, run, resume=resume)
     if not begin_stage(run, "reconstruct", resume=resume):
         return run
     save_run(scene_path, run)
@@ -973,6 +1415,11 @@ def postshot_prepare_run(
             + "\n",
             encoding="utf-8",
         )
+        run.metrics["postshot_prepare"] = {
+            **result["counts"],
+            "output_path": result["output_path"],
+            "reused": result["reused"],
+        }
         complete_stage(
             run,
             "postshot_prepare",
@@ -1627,6 +2074,8 @@ def export_run(
             message=f"Exported {len(artifacts)} artifacts to {export_dir.relative_to(scene_path)}",
             log_path=log_dir.relative_to(scene_path).as_posix(),
         )
+        if y_up_export:
+            shutil.rmtree(work / "export-staging" / version, ignore_errors=True)
     except Exception as error:
         fail_stage(run, "export", str(error), log_dir.relative_to(scene_path).as_posix())
         save_run(scene_path, run)
@@ -1655,11 +2104,16 @@ def _transforms_payload(scene_path: Path, run: RunManifest) -> dict[str, Any]:
 
 
 def quality_snapshot(scene_path: Path, run: RunManifest) -> dict[str, Any]:
-    selected_name = "fallback" if run.fallback_attempted else "primary"
-    selected_attempt = getattr(run.config.reconstruction, selected_name)
+    schema_version = int(getattr(run.config, "schema_version", 1))
+    selected_name = run.metrics.get('selected_attempt','primary') if schema_version==5 else ('fallback' if run.fallback_attempted else 'primary')
+    selected_attempt = getattr(run.config.reconstruction, 'primary' if selected_name=='repair' else selected_name)
     reconstruction = run.metrics.get("reconstruction", {}).get(selected_name, {})
     preprocess = run.metrics.get("preprocess", {})
-    selected_preprocess = preprocess.get("selected_primary", preprocess)
+    selected_preprocess = (
+        preprocess.get("selected", {})
+        if schema_version >= 4
+        else preprocess.get("selected_primary", preprocess)
+    )
     transforms = _transforms_payload(scene_path, run)
     width = int(transforms.get("w", getattr(selected_attempt, "projection_size", 0)))
     fov = projection_fov_degrees(selected_attempt)
@@ -1686,12 +2140,26 @@ def quality_snapshot(scene_path: Path, run: RunManifest) -> dict[str, Any]:
         or (gaussian_count(ply_path) if ply_path else 0)
     )
     resources = run.metrics.get("resources", {})
-    return {
+    if schema_version >= 4:
+        candidate_frames = int(preprocess.get("candidate_frame_count", 0))
+        selected_frames = int(
+            preprocess.get(f"{selected_name}_frame_count", 0)
+        )
+        if schema_version==5:
+            records_path=scene_path/run.id/f'selected-{selected_name}-metrics.jsonl'
+            if records_path.is_file():
+                selected_frames=sum(bool(line.strip()) for line in records_path.read_text(encoding='utf-8').splitlines())
+    else:
+        candidate_frames = int(
+            preprocess.get(
+                "candidate_frame_count", run.config.preprocess.target_frames
+            )
+        )
+        selected_frames = int(selected_attempt.frame_count)
+    snapshot = {
         "angular_resolution_px_per_degree": focal * math.pi / 180.0,
-        "candidate_frames": int(
-            preprocess.get("candidate_frame_count", run.config.preprocess.target_frames)
-        ),
-        "selected_frames": int(selected_attempt.frame_count),
+        "candidate_frames": candidate_frames,
+        "selected_frames": selected_frames,
         "blur_median": float(selected_preprocess.get("blur_median", 0.0)),
         "registration_ratio": float(reconstruction.get("registration_ratio", 0.0)),
         "largest_component_coverage": float(
@@ -1706,6 +2174,41 @@ def quality_snapshot(scene_path: Path, run: RunManifest) -> dict[str, Any]:
         "gpu_memory_peak_mib": float(resources.get("gpu_memory_observed_peak_mib", 0.0)),
         "disk_peak_gib": float(resources.get("disk_observed_peak_bytes", 0.0)) / 1024**3,
     }
+    if schema_version >= 4:
+        masking = run.metrics.get("masking", {}).get(selected_name, {})
+        manual_excluded = 0
+        final_input = int(masking.get("reconstruction_input_images", 0))
+        if run.selected_dataset:
+            dataset = ensure_within(scene_path / run.selected_dataset, scene_path)
+            try:
+                finalized, included = _v4_attempt_inventory(dataset, run)
+                manual_excluded = len(finalized.get("excluded_images", []))
+                final_input = len(included)
+            except (OSError, RuntimeError, KeyError, TypeError, json.JSONDecodeError):
+                pass
+        snapshot.update(
+            {
+                "candidate_fps": float(preprocess.get("candidate_fps", 0.0)),
+                "selected_per_second": int(
+                    preprocess.get("selected_per_second", 0)
+                ),
+                "projected_planar_images": int(
+                    masking.get("projected_planar_images", 0)
+                ),
+                "automatic_rejected_images": int(
+                    masking.get("automatic_rejected_images", 0)
+                ),
+                "automatic_rejected_fraction": float(
+                    masking.get("automatic_rejected_fraction", 0.0)
+                ),
+                "manual_excluded_images": manual_excluded,
+                "reconstruction_input_images": final_input,
+            }
+        )
+    if schema_version==5:
+        snapshot['coverage_status']=run.metrics.get('segment_qa',{}).get('coverage_status','unknown')
+        snapshot['segment_training_status']=run.metrics.get('segment_qa',{}).get('training_status','unknown')
+    return snapshot
 
 
 def compare_quality_runs(
@@ -1748,6 +2251,11 @@ def write_qa_report(
     baseline: RunManifest | None = None,
     resume: bool = False,
 ) -> Path:
+    if getattr(run.config,'schema_version',1)==5:
+        if baseline is not None:
+            raise ValueError('Schema 5 backend comparison requires a shared segment package; use compare-backends-v5.py')
+        from .segments import write_v5_qa_report
+        return write_v5_qa_report(scene_path,run,resume=resume)
     if not begin_stage(run, "qa", resume=resume):
         return scene_path / "qa" / f"{run.id}.md"
     save_run(scene_path, run)
@@ -1786,6 +2294,18 @@ def write_qa_report(
             f"- PLY 轴向：`{run.metrics.get('export', {}).get('ply_axis', 'unknown')}`",
             "",
         ]
+        if int(getattr(run.config, "schema_version", 1)) >= 4:
+            lines[5:5] = [
+                f"- 候选帧：{int(snapshot.get('candidate_frames', 0))} "
+                f"（{float(snapshot.get('candidate_fps', 0)):.3g} fps）",
+                f"- 每秒保留：{int(snapshot.get('selected_per_second', 0))}",
+                f"- 当前尝试全景数：{int(snapshot.get('selected_frames', 0))}",
+                f"- 投影前视图数：{int(snapshot.get('projected_planar_images', 0))}",
+                f"- 5% 自动淘汰：{int(snapshot.get('automatic_rejected_images', 0))} "
+                f"（{float(snapshot.get('automatic_rejected_fraction', 0)):.2%}）",
+                f"- 人工排除：{int(snapshot.get('manual_excluded_images', 0))}",
+                f"- 最终重建输入：{int(snapshot.get('reconstruction_input_images', 0))}",
+            ]
         export_metrics = run.metrics.get("export", {})
         cull_metrics = export_metrics.get("cull", {})
         if cull_metrics.get("removed_total") is not None:

@@ -77,3 +77,32 @@ def test_mask_finalize_rejects_nonbinary_or_wrong_size_mask(tmp_path: Path) -> N
     assert cv2.imwrite(str(mask_path), np.full((8, 8), 255, np.uint8))
     with pytest.raises(RuntimeError, match="size mismatch"):
         finalize_mask_dataset(path)
+
+
+def test_mask_finalize_requires_explicit_exclusion_after_edit_above_v4_threshold(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "dataset"
+    image_path = path / "images/view_00/frame_000001.jpg"
+    mask_path = path / "masks/view_00/frame_000001.jpg.png"
+    image_path.parent.mkdir(parents=True)
+    mask_path.parent.mkdir(parents=True)
+    assert cv2.imwrite(str(image_path), np.full((20, 20, 3), 80, np.uint8))
+    mask = np.full((20, 20), 255, np.uint8)
+    mask.flat[:21] = 0
+    assert cv2.imwrite(str(mask_path), mask)
+
+    with pytest.raises(RuntimeError, match="explicitly exclude"):
+        finalize_mask_dataset(
+            path,
+            {"view_00/frame_000001.jpg"},
+            maximum_included_masked_fraction=0.05,
+        )
+
+    MaskReviewDataset(path).update_review(1, "exclude", "above 5% after edit")
+    result = finalize_mask_dataset(
+        path,
+        {"view_00/frame_000001.jpg"},
+        maximum_included_masked_fraction=0.05,
+    )
+    assert result["excluded_images"] == ["view_00/frame_000001.jpg"]

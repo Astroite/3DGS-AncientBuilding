@@ -6,6 +6,8 @@ __pycache__/
 .coverage
 htmlcov/
 .venv/
+.venv-gsplat/
+.runtime-locks/
 env/
 condaenv.*.requirements.txt
 
