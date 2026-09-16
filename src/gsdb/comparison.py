@@ -7,8 +7,10 @@ from .media import sha256_file
 from .runs import load_run, save_run
 from .training import train_package
 from .training_data import prepare_segment, json_write
+from .run_lock import run_dir_locked
 
 
+@run_dir_locked
 def compare_backends(run_dir: Path, segment: str, output: Path, *,
                      backends=("postshot", "gsplat"), photo_comp=(False, True),
                      steps=None, duration_seconds=None, resume=False, dry_run=False):
@@ -25,14 +27,14 @@ def compare_backends(run_dir: Path, segment: str, output: Path, *,
     run_dir, output = run_dir.resolve(), output.resolve()
     scene = run_dir.parent
     run = load_run(scene, run_dir.name)
-    if run.id != run_dir.name or run.config.schema_version != 5 or not run.selected_dataset or run.stages['reconstruct'].status.value != 'succeeded':
-        raise RuntimeError('Requires a completed schema 5 reconstruction with segment QA')
+    if run.id != run_dir.name or run.config.schema_version not in (5, 6) or not run.selected_dataset or run.stages['reconstruct'].status.value != 'succeeded':
+        raise RuntimeError('Requires a completed schema 5/6 reconstruction with segment QA')
     label = run.metrics['selected_attempt']
     records = [json.loads(line) for line in (run_dir / f'selected-{label}-metrics.jsonl').read_text(encoding='utf-8').splitlines() if line]
     package_name = segment if duration_seconds is None else f'{segment}-first-{duration_seconds:g}s'
     package = run_dir / 'training-data' / package_name
     meta = prepare_segment(scene / run.selected_dataset, records, run.config.reconstruction.primary,
-                           run.config.segment_qa, segment, package, duration_seconds=duration_seconds)
+                           run.config.segment_qa, segment, package, duration_seconds=duration_seconds, **({"reuse_files":True} if run.config.schema_version == 6 else {}))
     output.mkdir(parents=True, exist_ok=True)
     expected_steps = max(30000, 30 * sum(r['split'] == 'train' for r in meta['images'])) if steps is None else steps
     package_hash = sha256_file(package / 'dataset.json')

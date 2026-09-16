@@ -16,6 +16,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+studio = [
+  "Pillow>=10,<12",
+]
 dev = [
   "pytest>=8.3,<9",
   "pytest-cov>=5,<7",
@@ -23,6 +26,7 @@ dev = [
 
 [project.scripts]
 gsdb = "gsdb.cli:app"
+gsdb-studio = "gsdb.studio:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

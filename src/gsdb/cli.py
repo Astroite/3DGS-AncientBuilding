@@ -17,6 +17,7 @@ from .manifests import load_capture_manifest, load_model, save_yaml
 from .mask_finalize import expected_reconstruction_images, finalize_mask_dataset
 from .masking import validate_mask_filter
 from .mask_review import create_mask_review_server
+from .run_lock import run_cli_locked
 from .models import (
     CaptureManifest,
     CaptureManifestV2,
@@ -32,6 +33,7 @@ from .models import (
     RunConfigV3,
     RunConfigV4,
     RunConfigV5,
+    RunConfigV6,
     SceneManifest,
     SourceFile,
     SourceProbe,
@@ -429,16 +431,17 @@ def preprocess(
         int, typer.Option(help="Primary square perspective image size")
     ] = 1746,
     fallback_frames: Annotated[int | None, typer.Option(help="Deprecated; legacy runs only")] = None,
-    candidate_fps: Annotated[float, typer.Option(help="Candidate panorama sampling rate")] = 5.0,
+    candidate_fps: Annotated[float, typer.Option(help="Candidate panorama sampling rate")] = 1.0,
     selected_per_second: Annotated[
         int, typer.Option(help="Best panorama candidates retained in each one-second bucket")
-    ] = 2,
+    ] = 1,
     primary_per_second: Annotated[
         int, typer.Option(help="Temporal ranks used by the primary attempt")
-    ] = 2,
+    ] = 1,
     fallback_per_second: Annotated[
         int, typer.Option(help="Temporal ranks used by the fallback attempt")
-    ] = 2,
+    ] = 1,
+    keep_intermediates: Annotated[bool, typer.Option(help="Keep schema 6 intermediate files for debugging")] = False,
     fallback_fov: Annotated[float, typer.Option()] = 110.0,
     fallback_projection_size: Annotated[int, typer.Option()] = 1746,
     mask_device: Annotated[str, typer.Option(help="Person segmenter device: cuda or cpu")] = "cuda",
@@ -493,7 +496,7 @@ def preprocess(
         typer.Option(
             "--smoke",
             help=(
-                "Process only the first 5 seconds at the same 5/2 temporal density, "
+                "Process only the first 5 seconds at the same 1/1 temporal density, "
                 "with smaller projections; does not start training"
             ),
         ),
@@ -593,14 +596,14 @@ def preprocess(
                         "--mask-discard-threshold"
                     )
                 if smoke and (
-                    abs(candidate_fps - 5.0) > 1e-9
-                    or selected_per_second != 2
-                    or primary_per_second != 2
-                    or fallback_per_second != 2
+                    abs(candidate_fps - 1.0) > 1e-9
+                    or selected_per_second != 1
+                    or primary_per_second != 1
+                    or fallback_per_second != 1
                 ):
                     raise ValueError(
-                        "--smoke fixes temporal density at 5 candidate fps, 2 selected "
-                        "per second, Primary and repair baseline ranks 1-2"
+                        "--smoke fixes temporal density at 1 candidate fps, 1 selected "
+                        "per second, Primary and repair baseline rank 1"
                     )
                 if smoke:
                     primary_projection_size = min(primary_projection_size, 1024)
@@ -615,17 +618,18 @@ def preprocess(
                     if smoke
                     else capture.selection.end_seconds
                 )
+                import uuid
+                staging = path / '.preparing' / uuid.uuid4().hex
                 candidate_set = prepare_capture_input(
                     path,
                     capture,
                     candidate_fps=candidate_fps,
                     selection_end_seconds=effective_end,
                     resume=resume,
+                    cache_root=staging,
+                    anchored=True,
                 )
-                capture.prepared_relative_path = candidate_set.path.relative_to(
-                    path
-                ).as_posix()
-                save_yaml(path / "captures" / f"{capture_id}.yaml", capture)
+                owned_input = f'inputs/primary/{candidate_set.path.name}'
                 classes = [
                     item.strip() for item in mask_classes.split(",") if item.strip()
                 ]
@@ -666,10 +670,11 @@ def preprocess(
                         "vocabulary_tree_sha256": loop_sha256,
                     },
                 }
-                config = RunConfigV5(
+                config = RunConfigV6(
                     capture_id=capture_id,
                     input_dataset_sha256=candidate_set.dataset_sha256,
-                    prepared_relative_path=capture.prepared_relative_path,
+                    prepared_relative_path=owned_input,
+                    retention={"mode": "keep" if keep_intermediates else "minimal"},
                     input=PreparedInputConfigV2(
                         source_kind=capture.source.kind,
                         source_sha256=[
@@ -709,10 +714,23 @@ def preprocess(
             if train_iterations is not None:
                 config.train.max_iterations = train_iterations
             run = create_run(path, location_id, scene_id, config)
+            if config.schema_version == 6:
+                from .training_data import json_write
+                json_write(path / run.id / 'input-adoption.json', dict(
+                    source=candidate_set.path.relative_to(path).as_posix(),
+                    target=config.prepared_relative_path, input_sha256=config.input_dataset_sha256))
+                destination = path / run.id / config.prepared_relative_path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                candidate_set.path.rename(destination)
+                protocol = staging / '.protocol'
+                if protocol.exists():
+                    (path / run.id / 'logs').mkdir(exist_ok=True)
+                    protocol.rename(path / run.id / 'logs' / 'prepare-protocol')
+                staging.rmdir()
             if smoke:
                 console.print(
-                    "[yellow]Smoke profile[/yellow]: first 5 seconds at 5 candidate fps "
-                    "and 2 selected per second, smaller projections; training is separate. "
+                    "[yellow]Smoke profile[/yellow]: first 5 seconds at 1 candidate fps "
+                    "and 1 selected per second, smaller projections; training is separate. "
                     "Use it to validate the pipeline, never to judge quality."
                 )
         run = preprocess_run(path, run, resume=resume)
@@ -759,8 +777,8 @@ def reconstruct(
 
 
 def _mask_attempt_path(path: Path, run_id: str, attempt: str) -> Path:
-    if attempt not in {"primary", "fallback"}:
-        raise ValueError("Attempt must be primary or fallback")
+    if attempt not in {"primary", "fallback", "repair"}:
+        raise ValueError("Attempt must be primary, fallback or repair")
     dataset = path / run_id / f"reconstruction-{attempt}"
     if not (dataset / "images").is_dir() or not (dataset / "masks").is_dir():
         raise FileNotFoundError(f"Masked {attempt} dataset is missing: {dataset}")
@@ -768,11 +786,12 @@ def _mask_attempt_path(path: Path, run_id: str, attempt: str) -> Path:
 
 
 @app.command("mask-review")
+@run_cli_locked
 def mask_review(
     location_id: Annotated[str, typer.Argument()],
     scene_id: Annotated[str, typer.Argument()],
     run_id: Annotated[str, typer.Argument()],
-    attempt: Annotated[str, typer.Option(help="primary or fallback")] = "primary",
+    attempt: Annotated[str, typer.Option(help="primary, repair, or legacy fallback")] = "primary",
     host: Annotated[str, typer.Option()] = "127.0.0.1",
     port: Annotated[int, typer.Option(min=0, max=65535)] = 8765,
 ) -> None:
@@ -781,8 +800,8 @@ def mask_review(
     try:
         path = _scene(location_id, scene_id)
         run = load_run(path, run_id)
-        if getattr(run.config, "schema_version", 1) not in (3, 4):
-            raise RuntimeError("mask-review is available only for RunConfigV3/V4 runs")
+        if getattr(run.config, "schema_version", 1) not in (3, 4, 5, 6):
+            raise RuntimeError("mask-review is available only for schema 3-6 runs")
         dataset = _mask_attempt_path(path, run_id, attempt)
         server = create_mask_review_server(dataset, host=host, port=port)
         actual_host, actual_port = server.server_address[:2]
@@ -803,21 +822,22 @@ def mask_review(
 
 
 @app.command("mask-finalize")
+@run_cli_locked
 def mask_finalize(
     location_id: Annotated[str, typer.Argument()],
     scene_id: Annotated[str, typer.Argument()],
     run_id: Annotated[str, typer.Argument()],
-    attempt: Annotated[str, typer.Option(help="primary or fallback")] = "primary",
+    attempt: Annotated[str, typer.Option(help="primary, repair, or legacy fallback")] = "primary",
 ) -> None:
     """Freeze the reviewed mask set and exclusion list for reconstruction."""
     try:
         path = _scene(location_id, scene_id)
         run = load_run(path, run_id)
         schema_version = int(getattr(run.config, "schema_version", 1))
-        if schema_version not in (3, 4):
-            raise RuntimeError("mask-finalize is available only for RunConfigV3/V4 runs")
+        if schema_version not in (3, 4, 5, 6):
+            raise RuntimeError("mask-finalize is available only for schema 3-6 runs")
         dataset = _mask_attempt_path(path, run_id, attempt)
-        attempt_config = getattr(run.config.reconstruction, attempt)
+        attempt_config = getattr(run.config.reconstruction, "primary" if attempt == "repair" else attempt)
         if schema_version >= 4:
             filtered = validate_mask_filter(dataset, verify_hashes=False)
             expected_images = {str(item["image"]) for item in filtered["accepted"]}
@@ -832,6 +852,8 @@ def mask_finalize(
             expected_images,
             maximum_included_masked_fraction=maximum_fraction,
         )
+        from .retention import auto_cleanup
+        auto_cleanup(path, run)
         console.print(
             f"Mask final [green]passed[/green]: masks={result['counts']['masks']}; "
             f"excluded={result['counts']['excluded']}; "
@@ -851,7 +873,7 @@ def postshot_prepare(
     ] = False,
     output: Annotated[
         Path | None,
-        typer.Option(help="Optional legacy dataset output directory; schema 5 uses train --segment"),
+        typer.Option(help="Optional legacy dataset output directory; schema 5/6 uses train --segment"),
     ] = None,
 ) -> None:
     """Legacy Run preparation. Schema 5 uses train --backend postshot --segment --dry-run."""
@@ -1019,7 +1041,7 @@ def export_command(
         ),
     ] = False,
 ) -> None:
-    """Legacy Nerfstudio asset publishing; not the schema 5 segment PLY export.
+    """Legacy Nerfstudio asset publishing; not the schema 5/6 segment PLY export.
 
     Culling is a publishing decision, not a training one, so these options are not
     part of the run's config hash: the same run can publish several versions.
@@ -1156,10 +1178,10 @@ def qa_segments(
     try:
         scene=_scene(location_id,scene_id)
         run=load_run(scene,run_id)
-        if run.config.schema_version not in (4,5):
-            raise ValueError('Temporal segment QA requires schema 4 or 5')
+        if run.config.schema_version not in (4,5,6):
+            raise ValueError('Temporal segment QA requires schema 4, 5 or 6')
         label=attempt or run.metrics.get('selected_attempt','primary')
-        if label not in ('primary','fallback','repair') or (label=='repair' and run.config.schema_version!=5):
+        if label not in ('primary','fallback','repair') or (label=='repair' and run.config.schema_version not in (5,6)):
             raise ValueError('Unknown reconstruction attempt')
         work=scene/run_id
         if run.config.schema_version==4 and (output is None or output.resolve()==work.resolve() or work.resolve() in output.resolve().parents):
@@ -1178,6 +1200,7 @@ def qa_segments(
 
 
 @app.command("train")
+@run_cli_locked
 def train_segment(
     location_id: Annotated[str, typer.Argument()],
     scene_id: Annotated[str, typer.Argument()],
@@ -1198,8 +1221,8 @@ def train_segment(
     try:
         scene = _scene(location_id,scene_id)
         run = load_run(scene,run_id)
-        if run.config.schema_version != 5 or run.stages['reconstruct'].status.value != 'succeeded' or not run.selected_dataset:
-            raise RuntimeError('train --segment requires a successful schema 5 reconstruction')
+        if run.config.schema_version not in (5, 6) or run.stages['reconstruct'].status.value != 'succeeded' or not run.selected_dataset:
+            raise RuntimeError('train --segment requires a successful schema 5/6 reconstruction')
         label = run.metrics['selected_attempt']
         records = [json.loads(line) for line in (scene/run_id/f'selected-{label}-metrics.jsonl').read_text(encoding='utf-8').splitlines() if line]
         dataset = scene/run.selected_dataset
@@ -1207,7 +1230,7 @@ def train_segment(
         package = scene/run_id/'training-data'/package_name
         if segment not in {s['id'] for s in json.loads((dataset/'segments.json').read_text(encoding='utf-8'))['segments']}:
             raise ValueError('Unknown segment ID')
-        prepare_segment(dataset,records,run.config.reconstruction.primary,run.config.segment_qa,segment,package,duration_seconds=duration_seconds)
+        prepare_segment(dataset,records,run.config.reconstruction.primary,run.config.segment_qa,segment,package,duration_seconds=duration_seconds, **({"reuse_files":True} if run.config.schema_version == 6 else {}))
         experiment = dict(segment=segment,backend=backend,output=str(output.resolve()),status='preparing')
         run.metrics.setdefault('training_experiments',[]).append(experiment)
         save_run(scene,run)
@@ -1220,6 +1243,22 @@ def train_segment(
         finally:
             save_run(scene,run)
         console.print(json.dumps(result,ensure_ascii=False,indent=2))
+    except Exception as error:
+        _fatal(error)
+
+
+@app.command("cleanup")
+def cleanup_command(
+    location_id: Annotated[str, typer.Argument()],
+    scene_id: Annotated[str, typer.Argument()],
+    run_id: Annotated[str, typer.Argument()],
+    apply: Annotated[bool, typer.Option(help="Execute verified schema 6 cleanup; default is preview")] = False,
+) -> None:
+    """Preview or retry dependency-aware cleanup for a schema 6 Run."""
+    from .retention import cleanup_run
+    try:
+        scene = _scene(location_id, scene_id)
+        console.print_json(json.dumps(cleanup_run(scene, load_run(scene, run_id), apply=apply)))
     except Exception as error:
         _fatal(error)
 

@@ -78,6 +78,8 @@ from .reconstruction import (
 )
 from .reconstruction_realityscan import run_realityscan_alignment
 from .runs import begin_stage, complete_stage, fail_stage, save_run
+from .run_lock import run_locked
+from .retention import auto_cleanup
 from .sources import copy_candidate_frames, validate_source_fingerprints
 from .vision_qa import load_local_mask_qa_review, run_deepseek_mask_qa
 from .trajectory import (
@@ -359,7 +361,11 @@ def ingest_capture(
     return capture
 
 
+@run_locked
 def preprocess_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunManifest:
+    if getattr(run.config, "schema_version", 0) == 6:
+        from .pipeline_v6 import preprocess_v6
+        return preprocess_v6(scene_path, run, resume)
     if not begin_stage(run, "preprocess", resume=resume):
         return run
     save_run(scene_path, run)
@@ -683,6 +689,13 @@ def _prepare_masked_dataset(
             work / f"mask-metrics-{label}.jsonl",
         )
     if schema_version >= 4:
+        if schema_version == 6 and run.config.retention.mode == 'keep' and not recovered:
+            from .storage import link_or_copy
+            for item in records:
+                if float(item['masked_fraction']) > run.config.masking.mask_discard_threshold:
+                    for folder, key in (('images', 'image'), ('masks', 'mask')):
+                        link_or_copy(dataset / folder / str(item[key]),
+                                     work / 'rejected-inputs' / label / folder / str(item[key]))
         mask_filter = mask_filter if recovered else filter_masked_images(
             dataset,
             records,
@@ -801,8 +814,10 @@ def _prepare_masked_dataset(
 
 
 @gpu_locked
+@run_locked
 def mask_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunManifest:
     if not begin_stage(run, "mask", resume=resume):
+        auto_cleanup(scene_path, run)
         return run
     save_run(scene_path, run)
     work = ensure_run_dir(scene_path, run.id)
@@ -841,7 +856,7 @@ def mask_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunMan
             run.stages["mask"].message = (
                 f"{run.stages['mask'].message}; awaiting primary mask review/finalization"
             )
-        if getattr(run.config, "schema_version", 1) >= 2:
+        if 2 <= getattr(run.config, "schema_version", 1) < 6:
             # Persist the validated mask inventory before deleting its projection
             # source so a process interruption remains resumable from the cache.
             save_run(scene_path, run)
@@ -851,6 +866,7 @@ def mask_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunMan
         save_run(scene_path, run)
         raise
     save_run(scene_path, run)
+    auto_cleanup(scene_path, run)
     return run
 
 
@@ -1098,8 +1114,9 @@ def _reconstruct_run_v4(
 
 
 @gpu_locked
+@run_locked
 def reconstruct_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunManifest:
-    if getattr(run.config, "schema_version", 1) == 5:
+    if getattr(run.config, "schema_version", 1) in (5, 6):
         from .pipeline_v5 import reconstruct_v5
         return reconstruct_v5(scene_path, run, resume)
     if getattr(run.config, "schema_version", 1) >= 4:
@@ -2105,7 +2122,7 @@ def _transforms_payload(scene_path: Path, run: RunManifest) -> dict[str, Any]:
 
 def quality_snapshot(scene_path: Path, run: RunManifest) -> dict[str, Any]:
     schema_version = int(getattr(run.config, "schema_version", 1))
-    selected_name = run.metrics.get('selected_attempt','primary') if schema_version==5 else ('fallback' if run.fallback_attempted else 'primary')
+    selected_name = run.metrics.get('selected_attempt','primary') if schema_version in (5, 6) else ('fallback' if run.fallback_attempted else 'primary')
     selected_attempt = getattr(run.config.reconstruction, 'primary' if selected_name=='repair' else selected_name)
     reconstruction = run.metrics.get("reconstruction", {}).get(selected_name, {})
     preprocess = run.metrics.get("preprocess", {})
@@ -2122,9 +2139,13 @@ def quality_snapshot(scene_path: Path, run: RunManifest) -> dict[str, Any]:
     for frame in transforms.get("frames", []):
         matrix = frame.get("transform_matrix")
         if matrix and len(matrix) >= 3:
+            name = str(frame.get("file_path", ""))
+            if schema_version == 6:
+                from .segments import image_name
+                name = image_name(name)
             frame_centers.append(
                 (
-                    str(frame.get("file_path", "")),
+                    name,
                     [float(matrix[index][3]) for index in range(3)],
                 )
             )
@@ -2145,7 +2166,7 @@ def quality_snapshot(scene_path: Path, run: RunManifest) -> dict[str, Any]:
         selected_frames = int(
             preprocess.get(f"{selected_name}_frame_count", 0)
         )
-        if schema_version==5:
+        if schema_version in (5, 6):
             records_path=scene_path/run.id/f'selected-{selected_name}-metrics.jsonl'
             if records_path.is_file():
                 selected_frames=sum(bool(line.strip()) for line in records_path.read_text(encoding='utf-8').splitlines())
@@ -2205,7 +2226,7 @@ def quality_snapshot(scene_path: Path, run: RunManifest) -> dict[str, Any]:
                 "reconstruction_input_images": final_input,
             }
         )
-    if schema_version==5:
+    if schema_version in (5, 6):
         snapshot['coverage_status']=run.metrics.get('segment_qa',{}).get('coverage_status','unknown')
         snapshot['segment_training_status']=run.metrics.get('segment_qa',{}).get('training_status','unknown')
     return snapshot
@@ -2251,9 +2272,9 @@ def write_qa_report(
     baseline: RunManifest | None = None,
     resume: bool = False,
 ) -> Path:
-    if getattr(run.config,'schema_version',1)==5:
+    if getattr(run.config,'schema_version',1) in (5, 6):
         if baseline is not None:
-            raise ValueError('Schema 5 backend comparison requires a shared segment package; use compare-backends-v5.py')
+            raise ValueError('Schema 5/6 backend comparison requires a shared segment package; use compare-backends-v5.py')
         from .segments import write_v5_qa_report
         return write_v5_qa_report(scene_path,run,resume=resume)
     if not begin_stage(run, "qa", resume=resume):

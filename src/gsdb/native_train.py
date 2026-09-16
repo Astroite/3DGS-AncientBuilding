@@ -131,8 +131,9 @@ def render(params, row, degree=3, antialiased=False):
 
 
 def load_observation(package, row, device='cuda'):
-    image = cv2.imread(str(package/row['image']),cv2.IMREAD_COLOR)
-    mask = cv2.imread(str(package/row['mask']),cv2.IMREAD_GRAYSCALE)
+    from .studio_data import read_image
+    image = read_image(package/row['image'])
+    mask = read_image(package/row['mask'],True)
     if image is None or mask is None or image.shape[:2] != mask.shape or mask.shape != (row['height'],row['width']):
         raise RuntimeError(f'Observation dimensions changed: {row["image"]}')
     return torch.tensor(image[...,::-1].copy(),device=device,dtype=torch.float32)/255, torch.tensor(mask==255,device=device)
@@ -205,17 +206,18 @@ def evaluate(package, meta, params, output, antialiased=False):
     return result
 
 
-def train(package, output, steps=None, photo_comp=True, resume=False, antialiased=False, checkpoint_every=1000):
+def train(package, output, steps=None, photo_comp=True, resume=False, antialiased=False, checkpoint_every=1000,
+          observer=None, run_evaluation=True, sh_degree=3):
     from gsplat import DefaultStrategy
     if not torch.cuda.is_available():
         raise RuntimeError('Native CUDA is unavailable')
     meta = validate_package(package)
     observations = [r for r in meta['images'] if r['split']=='train']
     steps = max(30000,30*len(observations)) if steps is None else steps
-    if steps<1 or checkpoint_every<1:
+    if steps<1 or checkpoint_every<1 or sh_degree not in (0,1,2,3):
         raise ValueError('Training and checkpoint budgets must be positive')
     config = dict(schema_version=1,package_sha256=sha256_file(package/'dataset.json'),steps=steps,
-        photo_comp=photo_comp,antialiased=antialiased,sh_degree=3,seed=20260912,high_order_l2=1e-6,checkpoint_every=checkpoint_every)
+        photo_comp=photo_comp,antialiased=antialiased,sh_degree=sh_degree,seed=20260912,high_order_l2=1e-6,checkpoint_every=checkpoint_every)
     output.mkdir(parents=True,exist_ok=True)
     checkpoint = output/'checkpoint.pt'
     if (output/'config.json').exists() and not resume:
@@ -273,10 +275,24 @@ def train(package, output, steps=None, photo_comp=True, resume=False, antialiase
     torch.cuda.reset_peak_memory_stats()
     completed_step = start
     try:
+        def observe(loss=None):
+            if observer is None:
+                return None
+            return observer(params, dict(step=completed_step,target=steps,loss=loss,splats=len(params['means']),
+                elapsed_seconds=elapsed_before+time.monotonic()-started,
+                vram_bytes=torch.cuda.memory_allocated()), lambda: save(completed_step))
+        action = observe()
         for step in range(start,steps):
+            if action == 'stop':
+                save(completed_step)
+                export_ply(output/'model.ply',params,sh_degree)
+                summary = dict(status='stopped',steps=completed_step,target=steps,
+                    model_sha256=sha256_file(output/'model.ply'))
+                json_write(output/'training.json',summary)
+                return summary
             row = observations[int(torch.randint(len(observations),(1,)))]
             target,keep = load_observation(package,row)
-            degree = min(3,step//1000)
+            degree = min(sh_degree,step//1000)
             raw,alpha,info = render(params,row,degree,antialiased)
             strategy.step_pre_backward(params,optimizers,state,step,info)
             pred = exposure(raw[0],group_ids[row['frame']]) if photo_comp else raw[0]
@@ -300,8 +316,10 @@ def train(package, output, steps=None, photo_comp=True, resume=False, antialiase
                 print(json.dumps({'step':completed_step,'loss':float(loss.detach()),'splats':len(params['means'])}),flush=True)
             if completed_step % checkpoint_every == 0:
                 save(completed_step)
+            action = observe(float(loss.detach()))
         save(steps)
-        export_ply(output/'model.ply',params)
+        # Unused SH bands are kept zero throughout training for lower degrees.
+        export_ply(output/'model.ply',params,sh_degree)
         export_ply(output/'diagnostic-sh0.ply',params,0)
         reloaded = load_ply(output/'model.ply')
         with torch.no_grad():
@@ -326,11 +344,14 @@ def train(package, output, steps=None, photo_comp=True, resume=False, antialiase
             export_roundtrip_rms_error=export_rms,
             model_sha256=sha256_file(output/'model.ply'),versions=versions)
         json_write(output/'training.json',summary)
-        evaluate(package,meta,params,output/'evaluation',antialiased)
+        if run_evaluation:
+            evaluate(package,meta,params,output/'evaluation',antialiased)
+        summary['evaluation_status'] = 'completed' if run_evaluation else 'not_run'
         summary['status']='succeeded'
         json_write(output/'training.json',summary)
         if (output/'failure.json').exists():
             (output/'failure.json').rename(output/f'failure-before-success-{time.time_ns()}.json')
+        return summary
     except Exception as error:
         json_write(output/'failure.json',dict(status='failed',error=str(error),completed_step=completed_step,
             recoverable_checkpoint=str(checkpoint),note='Resume only from the last atomically completed checkpoint; no automatic quality reduction.'))

@@ -614,6 +614,19 @@ def _validate_frame(path: Path, width: int, height: int) -> str:
     return sha256_file(path)
 
 
+def anchored_frame_indices(frame_count: int, source_fps: float, start: float,
+                           end: float, rate: float) -> tuple[list[int], list[float]]:
+    """Nested grids anchored at Capture start; unlike historical cell centres."""
+    if not all(math.isfinite(v) for v in (source_fps, start, end, rate)) or not 0 < rate <= source_fps or end <= start:
+        raise ValueError('Invalid anchored sampling range/rate')
+    indices = sorted({min(frame_count - 1, max(math.ceil(start * source_fps),
+        int(math.floor((start + i / rate) * source_fps + 0.5 - 1e-12))))
+        for i in range(math.ceil((end - start) * rate))
+        if start + i / rate < end - 1e-12})
+    indices = [i for i in indices if 0 <= i < frame_count and i / source_fps < end]
+    return indices, [i / source_fps for i in indices]
+
+
 def _normalize_image(source: Path, destination: Path, width: int, height: int, quality: int) -> None:
     image = cv2.imread(str(source), cv2.IMREAD_COLOR)
     if image is None:
@@ -735,8 +748,10 @@ def prepare_capture_input(
     candidate_fps: float | None = None,
     selection_end_seconds: float | None = None,
     resume: bool = False,
+    cache_root: Path | None = None,
+    anchored: bool = False,
 ) -> CandidateFrameSet:
-    protocol_dir = scene_path / "prepared" / ".protocol"
+    protocol_dir = (cache_root / ".protocol") if cache_root is not None else scene_path / "prepared" / ".protocol"
     probe = probe_capture_source(capture, protocol_dir)
     paths = source_paths(capture)
     effective_end = min(
@@ -753,13 +768,16 @@ def prepare_capture_input(
     if (target_frames is None) == (candidate_fps is None):
         raise ValueError("Provide exactly one of target_frames or candidate_fps")
     if candidate_fps is not None:
-        indices, timestamps = fixed_rate_frame_indices(
+        sampler = anchored_frame_indices if anchored else fixed_rate_frame_indices
+        indices, timestamps = sampler(
             int(probe["frame_count"]),
             float(probe["fps"]),
             capture.selection.start_seconds,
             effective_end,
             candidate_fps,
         )
+        if len(indices) < 2:
+            raise ValueError('At least two candidate frames are required')
         manifest_schema_version = 2
     else:
         assert target_frames is not None
@@ -802,12 +820,12 @@ def prepare_capture_input(
         preparation["target_frames"] = len(indices)
     else:
         preparation["sampling"] = {
-            "mode": "fixed_rate_v1",
+            "mode": "anchored_rate_v1" if anchored else "fixed_rate_v1",
             "candidate_fps": candidate_fps,
         }
         preparation["candidate_frame_count"] = len(indices)
     preparation_hash = canonical_hash(preparation)
-    target = scene_path / "prepared" / capture.id / preparation_hash
+    target = (cache_root if cache_root is not None else scene_path / "prepared" / capture.id) / preparation_hash
     if (target / "dataset.json").is_file():
         try:
             return _dataset_from_manifest(target)

@@ -13,7 +13,7 @@ GPU_LOCK_PATH=Path(__file__).resolve().parents[2]/'.runtime-locks'/'gpu.lock'
 
 
 @contextmanager
-def gpu_session(path: Path | None = None):
+def gpu_session(path: Path | None = None, *, cancel=None, timeout: float | None = None):
     with _mutex:
         if getattr(_local,'active',False):
             yield
@@ -25,7 +25,12 @@ def gpu_session(path: Path | None = None):
                 stream.write(b'0')
                 stream.flush()
             announced=False
+            waiting_since=time.monotonic()
             while True:
+                if cancel is not None and cancel.is_set():
+                    raise InterruptedError('GPU wait cancelled')
+                if timeout is not None and time.monotonic()-waiting_since>=timeout:
+                    raise TimeoutError('Workspace GPU is busy')
                 try:
                     stream.seek(0)
                     if os.name=='nt':

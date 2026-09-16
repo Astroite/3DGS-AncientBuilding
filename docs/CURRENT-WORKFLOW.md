@@ -1,6 +1,6 @@
 # Windows 360 重建工作手册
 
-本文件是 APP 唯一的日常操作手册。现行流程为 INSV / 标准全景输入 → schema 5 → RealityScan → 分段 QA → Postshot Splat ADC 或 Windows gsplat。脚本清单、兼容范围和历史归档见 [维护说明](MAINTENANCE.md)。
+本文件是 APP 唯一的日常操作手册。现行流程为 INSV / 标准全景输入 → schema 6 → RealityScan → 分段 QA → Postshot Splat ADC 或 Windows gsplat。脚本清单、兼容范围和历史归档见 [维护说明](MAINTENANCE.md)。
 
 新 Run 使用现行默认，已有 Run 按原清单恢复。代码接入、短测试通过和最终画质验收分别记录，不互相替代。
 
@@ -70,7 +70,10 @@ Invoke-Gsdb ingest $LocationId $SceneId $CaptureId
 Data/<location>/location.yaml
 Data/<location>/<scene>/scene.yaml
   captures/<capture>.yaml
-  prepared/<capture>/<hash>/
+  prepared/<capture>/<hash>/        仅历史 Run 的共享输入
+  <run>/inputs/primary/<hash>/       schema 6 私有候选；过滤确认后删除 frames
+  <run>/inputs/repair/               仅按需补抽；合并确认后删除 frames
+  <run>/cleanup/                     可恢复删除计划及逐文件结果
   <run>/manifest.yaml
   <run>/reconstruction-primary/
   <run>/reconstruction-repair/       仅触发补选时产生
@@ -92,11 +95,12 @@ Invoke-Gsdb qa report $LocationId $SceneId $RunId
 
 | 设置 | 新 Run 默认 |
 | --- | --- |
-| 候选 / 初选全景 | 5 fps / 每秒两张 |
+| 候选 / 初选全景 | 1 fps / 每秒一张 |
 | 每张全景投影 | 14 视图、110°、1746 × 1746 |
 | 底部裁切 | 15% |
 | 遮罩整图剔除 | 严格大于 0.005（0.5%）；等于保留 |
-| 重试 | 最多一次局部补选，不放宽阈值 |
+| 重试 | 薄弱区间按需 2 fps 补抽，最多一次，不放宽阈值 |
+| 中间文件 | 默认按阶段清理；`--keep-intermediates` 保留调试输入 |
 | 正式训练外观 | SH 3 |
 | 默认后端 | Postshot Splat ADC |
 
@@ -104,7 +108,9 @@ Invoke-Gsdb qa report $LocationId $SceneId $RunId
 
 RealityScan 白色保留、黑色忽略，实际输入为 `图像名.jpg.mask.png` 图层和 `inpMaskOpts=1`。`alignment-masks.json` 核验逐图对应、哈希和启用命令，不声称读取了软件内部全部被屏蔽特征。刚性 rig 未启用；另做同全景中心一致性 QA。
 
-初次对齐后，对少于三个剩余视图、未注册采样、超过两秒的缺口及异常区间，在前后各两秒内补入未选候选。原轮与 repair 独立 QA，选择有效覆盖更好的模型，不拼接不同坐标系。
+初次对齐后，对少于三个剩余视图、未注册采样、超过两秒的缺口及异常区间，合并前后各两秒的窗口并裁到 Capture 范围。以 Capture 起点为基准，在 2 fps 网格上从原片补抽尚未处理的帧，按源帧索引去重。只投影和检测新增全景，复用 primary 已过滤的图片与遮罩；补抽计划先落盘，恢复不增加第二轮。原轮与 repair 独立 QA，选择有效覆盖更好的模型，不拼接不同坐标系。
+
+新 Run 的候选目录归该 Run 独占，不更新 Capture 的历史 prepared 指针。初始候选量约为旧默认的 20%，初次投影量约为 50%，补抽另计；该估算不代表覆盖或画质已经验收。旧 schema 1–5 Run 保持原配置及恢复行为，不能通过 `--resume` 改成新采样。
 
 `--smoke` 仅为前五秒、较小投影的链路检查，不自动训练，也不作为正式画质对照。改配置应新建 Run，恢复不能更换输入或阈值。
 
@@ -186,6 +192,33 @@ OOM 保留可恢复状态，不自动降分辨率或 SH。没有检查点的初�
 
 Postshot 返回零但无模型时查看 Studio license 日志；导入包存在只表示准备成功。源模型或输入已清理后，历史报告无法代替可恢复数据。
 
+### 阶段清理与磁盘占用
+
+schema 6 默认 `retention.mode=minimal`。遮罩过滤及最终确认通过、清单保存后，删除候选及选中全景；repair 合并输入通过后删除补抽全景。对齐、分段 QA 和选择结果完成后，删除临时导入图片、可识别的 Run 内项目中间文件及未选中尝试的大体积输入。有效图片、遮罩、COLMAP、位姿、检查点、模型、日志及来源清单保留。
+
+同盘训练包与后端图片使用硬链接，共享内容不得原地修改。不同极性的遮罩单独保存；不支持硬链接或跨盘时校验后复制，`storage.json` 报告复制占用。资源管理器将多个目录大小相加会重复计算硬链接，清理报告分别列出 `logical_bytes` 和预计可回收的 `reclaimable_bytes`。
+
+```powershell
+# 只预览，不删除数据；仅支持 schema 6。
+Invoke-Gsdb cleanup $LocationId $SceneId $RunId
+# 重试已满足依赖的清理，自动清理通常无需手动调用。
+Invoke-Gsdb cleanup $LocationId $SceneId $RunId --apply
+# 调试时在新建 Run 的 preprocess 命令追加 --keep-intermediates。
+```
+
+每次清理在 `cleanup/<hash>.json` 中先写删除计划，再逐项保存结果，记录文件哈希、大小和消费者验证依据。锁定当前 Run，拒绝路径越界及目录连接；不清理全局缓存、其他 Run、原片、外部实验目录或不认识的文件。清理失败保留 `pending`，计算阶段已验证成功的状态不变；下次恢复或 `cleanup --apply` 重试。
+
+`retention-retired.json` 标记未选中尝试仅保留审计记录，不能把这些记录视为可直接恢复的输入。选中重建保留完整过滤输入，仍可重跑 QA、选择其他有效分段及准备两后端对照。训练成功不删除这些输入或检查点，也不代表已通过人工验收。已按计划清理的候选不会因恢复已完成阶段而自动重新生成；有效输入缺失或哈希不符仍然阻断。
+
+人工遮罩确认开启时，先完成对应确认，再继续：
+
+```powershell
+Invoke-Gsdb mask-finalize $LocationId $SceneId $RunId --attempt primary
+# 仅出现 repair 人工确认门禁时执行：
+Invoke-Gsdb mask-finalize $LocationId $SceneId $RunId --attempt repair
+Invoke-Gsdb reconstruct $LocationId $SceneId $RunId --resume
+```
+
 ## 6. 对照、高亮诊断与全量条件
 
 通用对照入口不依赖预设地点、日期或旧 Run：
@@ -208,4 +241,4 @@ if ($LASTEXITCODE -ne 0) { throw '检查 comparison.json 中的失败原因' }
 
 默认角度扫描只覆盖前三个验证相机的 ±30°，不保证命中全部异常视角；特定异常诊断需要对应模型、相机和源图。CUDA 冒烟及短训练只能验证链路，不能接受细节画质。
 
-自动测试与分段检查通过后，先完成人工人物、高亮和细节对照，再执行各场景完整的新 Capture/Run。gsplat 不自动成为默认。schema 5 分段可输出 PLY 和评估，但旧 `export → qa approve` 不是它的完整发布验收链；人工验收应保存与具体模型哈希对应的记录。
+自动测试与分段检查通过后，先完成人工人物、高亮和细节对照，再执行各场景完整的新 Capture/Run。gsplat 不自动成为默认。schema 5/6 分段可输出 PLY 和评估，但旧 `export → qa approve` 不是它的完整发布验收链；人工验收应保存与具体模型哈希对应的记录。

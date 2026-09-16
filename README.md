@@ -5,7 +5,9 @@ Windows 原生流水线，按地点、场景、Capture 和 Run 管理全景输�
 **唯一操作入口：[Windows 360 重建工作手册](docs/CURRENT-WORKFLOW.md)**
 开发、脚本用途和历史归档见 [维护说明](docs/MAINTENANCE.md)。
 
-新 Run 使用 schema 5：5 fps 候选、每秒两张全景、14 视图、110°、1746²、底裁 15%、严格大于 0.5% 遮罩占比剔除，以及一次局部补选。正式外观保留 SH 3；Postshot Splat ADC 仍为默认后端，gsplat 使用独立 Windows 环境。有效分段不代表路线覆盖完整。
+本地可视化训练与基础编辑入口：`scripts/studio.ps1`。支持外部 COLMAP / 已通过 QA 的共享包、训练预览和快照编辑，使用现有 `.venv-gsplat` 环境。操作与验证边界见 [GS Studio 使用说明](docs/STUDIO.md)。
+
+新 Run 使用 schema 6：1 fps 候选、每秒一张全景、14 视图、110°、1746²、底裁 15%、严格大于 0.5% 遮罩占比剔除，以及一次按需 2 fps 局部补抽。阶段验证成功后自动清理可丢弃中间文件，保留一份有效数据。正式外观保留 SH 3；Postshot Splat ADC 仍为默认后端，gsplat 使用独立 Windows 环境。有效分段不代表路线覆盖完整。
 
 ## 快速入口
 

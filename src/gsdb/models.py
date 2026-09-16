@@ -724,6 +724,53 @@ class RunConfigV5(RunConfigV4):
         return self
 
 
+class RetentionConfig(StrictModel):
+    mode: Literal["minimal", "keep"] = "minimal"
+
+
+class PreprocessConfigV6(PreprocessConfigV4):
+    candidate_fps: float = Field(default=1.0, ge=1, le=120)
+    selected_per_second: int = Field(default=1, ge=1, le=120)
+
+
+class ReconstructionConfigV6(ReconstructionConfigV5):
+    primary: ReconstructionAttemptV4 = Field(default_factory=lambda: ReconstructionAttemptV4(
+        temporal_rank_limit=1, images_per_equirect=14, projection_fov_degrees=110,
+        projection_size=1746, crop_bottom=0.15, use_rig=False,
+    ))
+    fallback: ReconstructionAttemptV4 = Field(default_factory=lambda: ReconstructionAttemptV4(
+        temporal_rank_limit=1, images_per_equirect=14, projection_fov_degrees=110,
+        projection_size=1746, crop_bottom=0.15, use_rig=False,
+    ))
+    repair_candidate_fps: float = Field(default=2.0, ge=1, le=120)
+
+
+class RunConfigV6(RunConfigV5):
+    schema_version: Literal[6] = 6
+    # Unlike schemas 3-5, this path is relative to this Run, never shared.
+    preprocess: PreprocessConfigV6 = Field(default_factory=PreprocessConfigV6)
+    reconstruction: ReconstructionConfigV6 = Field(default_factory=ReconstructionConfigV6)
+    retention: RetentionConfig = Field(default_factory=RetentionConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_input_rate(cls, value):
+        if isinstance(value, dict) and isinstance(value.get('input'), dict):
+            value = {**value, 'input': {'candidate_fps': 1.0, **value['input']}}
+        return value
+
+    @field_validator("prepared_relative_path")
+    @classmethod
+    def validate_owned_input(cls, value: str) -> str:
+        from pathlib import PurePosixPath
+        parts = PurePosixPath(value.replace("\\", "/")).parts
+        if len(parts) != 3 or parts[:2] != ("inputs", "primary") or len(parts[2]) != 64:
+            raise ValueError("Schema 6 prepared input must be inputs/primary/<preparation hash>")
+        if any(c not in '0123456789abcdef' for c in parts[2]):
+            raise ValueError("Invalid preparation hash")
+        return '/'.join(parts)
+
+
 class StageRecord(StrictModel):
     status: StageStatus = StageStatus.PENDING
     started_at: datetime | None = None
@@ -763,7 +810,7 @@ class RunManifest(StrictModel):
     scene_id: str = Field(pattern=SLUG_PATTERN)
     status: RunStatus = RunStatus.DRAFT
     config_hash: str
-    config: LegacyRunConfigV1 | RunConfig | RunConfigV3 | RunConfigV4 | RunConfigV5
+    config: LegacyRunConfigV1 | RunConfig | RunConfigV3 | RunConfigV4 | RunConfigV5 | RunConfigV6
     created_at: datetime
     updated_at: datetime
     active_stage: str | None = None

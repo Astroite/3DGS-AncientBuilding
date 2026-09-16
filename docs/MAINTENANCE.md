@@ -11,11 +11,12 @@
 | `scripts/bootstrap-windows.ps1` | 首次安装主环境 | 写 .venv，下载依赖；不自动运行 doctor |
 | `scripts/bootstrap-gsplat-windows.ps1` | 安装独立训练/评估环境，支持 `-SkipPackages` | 写 .venv-gsplat，下载依赖 |
 | `scripts/apply_nerfstudio_patch.py` | 安装时核验并应用投影 clamp 和嵌套路径补丁 | 修改环境内依赖代码，不处理素材 |
-| `scripts/test-mediasdk-helper.ps1` | 指定 LocationId、SceneId、CaptureId，按 5 fps 验收；可用 RunId 恢复 | GPU、解码和 prepared 缓存；不是轻量单测 |
+| `scripts/test-mediasdk-helper.ps1` | 指定 LocationId、SceneId、CaptureId，独立 helper 按 5 fps 验收（不代表新 Run 默认）；可用 RunId 恢复 | GPU、解码和 prepared 缓存；不是轻量单测 |
 | `scripts/smoke-native-gsplat.py` | 独立环境，`--output` 指定新的合成测试目录 | GPU、少量合成训练与检查点；不访问 Capture |
 | `scripts/check-native-export.py` | 独立环境，`--experiment` 与 `--dataset` 核验 PLY 回读 | GPU，写 export-diagnostic.json；不重训 |
 | `scripts/compare-backends-v5.py` | 主环境，`--run-dir --segment --output` 对照通过的分段 | 默认实际训练；`--dry-run` 仍会准备包及记录 |
 | `tools/mediasdk-helper/build.ps1` | 构建连接本机 SDK 的 helper | 写 build，不运行采集 |
+| `cleanup` | schema 6 的 LocationId、SceneId、RunId；默认预览，`--apply` 执行 | 不使用 GPU；持有 Run 锁，仅删除验证后的白名单文件 |
 | `doctor` | 检查当前 Windows 重建与所选后端 | 使用 GPU 锁，产生并清理诊断临时文件；不训练 |
 
 独立 GPU 诊断脚本应在流水线空闲时执行；不要从独立脚本绕过正在使用的生产 GPU 锁。环境、SDK、helper 构建产物和 `env` 配置不是历史垃圾，不在文档清理范围内。
@@ -24,9 +25,9 @@
 
 ## 兼容范围
 
-- 保留 schema 1–4 清单读取、配置哈希和恢复语义；新默认仅作用于新 schema 5 Run。
-- `postshot-prepare`、`postshot-review`、`postshot-train` 为历史数据入口。schema 5 使用 `train --segment --backend`，不通过历史实验脚本跳过 QA。
-- 旧 `export` 读取 Nerfstudio 训练记录，不能用于 schema 5 的分段成果。`qa approve/reject` 也不能替代未接通的分段成果发布。
+- 保留 schema 1–5 清单读取、配置哈希和恢复语义；新默认仅作用于新 schema 6 Run。
+- `postshot-prepare`、`postshot-review`、`postshot-train` 为历史数据入口。schema 5/6 使用 `train --segment --backend`，不通过历史实验脚本跳过 QA。
+- 旧 `export` 读取 Nerfstudio 训练记录，不能用于 schema 5/6 的分段成果。`qa approve/reject` 也不能替代未接通的分段成果发布。
 - 保留现行投影、COLMAP 文件转换、PLY 处理及路径兼容所需的底层代码；移除独立历史脚本不等于删除这些能力。
 - 默认 doctor 检查 RealityScan；只有 `--require colmap` 才运行旧 CUDA COLMAP 检查。Postshot 可执行文件/版本检查不验证 Studio 训练许可。
 - Nerfstudio 仍用于投影和转换，因此保留安装脚本调用的补丁程序。已归档的静态 patch 文本不是运行依赖。
@@ -64,3 +65,9 @@ try {
 | 历史文档 | 旧 V0.2/009/V5 手册、日期固定验证与评估、研究与规范草案、原 docs/archive |
 
 README、AGENTS、原 CURRENT-WORKFLOW 和保留入口的修改前版本也已备份。原本未被 Git 跟踪的运行环境、SDK、密钥及现有数据未纳入归档。测试结果与实际清理核验见归档目录内 `cleanup-result.json` 和 `pytest-result.txt`；历史实验记录不代表本轮重新完成了画质验收。
+
+## Schema 6 实施验证
+
+新增 CPU 模拟生命周期测试见 `tests/test_pipeline_v6.py`；覆盖采样、局部补抽身份、遮罩合并、清理中断、Windows 文件占用与目录连接、硬链接统计、清理后 QA 与两后端输入准备。实际 Capture 重建和画质验收另行执行。
+
+本轮结果与清理记录示例见 [Schema 6 验证记录](SCHEMA6-VALIDATION.md)。

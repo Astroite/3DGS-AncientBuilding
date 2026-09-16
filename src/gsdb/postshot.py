@@ -63,8 +63,8 @@ def _validate_v3_quality_gates(
     scene_path: Path, run: RunManifest, dataset: Path
 ) -> dict[str, Any] | None:
     schema_version = int(getattr(run.config, "schema_version", 1))
-    if schema_version == 5:
-        raise RuntimeError("Schema 5 requires train --segment with a validated segment package")
+    if schema_version in (5, 6):
+        raise RuntimeError("Schema 5/6 requires train --segment with a validated segment package")
     if schema_version not in (3, 4):
         return None
     selected_label = "fallback" if run.fallback_attempted else "primary"

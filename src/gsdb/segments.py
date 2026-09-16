@@ -219,6 +219,10 @@ def repair_records(candidates: list[dict], selected: list[dict], report: dict, p
     return extra
 
 
+from .run_lock import run_locked
+
+
+@run_locked
 def write_v5_qa_report(scene: Path, run, resume=False) -> Path:
     """Schema 5 report does not reuse legacy whole-route fallback metrics."""
     from .masking import validate_mask_filter
@@ -240,7 +244,7 @@ def write_v5_qa_report(scene: Path, run, resume=False) -> Path:
         report=validate_segments(dataset,records,included,run.config.reconstruction.primary,run.config.segment_qa)
         result={k:report[k] for k in ('integrity','training_status','coverage_status')}
         run.metrics.setdefault('qa',{})['segments']=result
-        lines=[f'# Schema 5 QA: {run.id}','',f'配置哈希：`{run.config_hash}`',
+        lines=[f'# Schema {run.config.schema_version} QA: {run.id}','',f'配置哈希：`{run.config_hash}`',
             f'选中尝试：`{label}`；刚性 rig：未启用。',
             f'遮罩剔除：严格大于 {run.config.masking.mask_discard_threshold:.2%}，等于时保留。','',
             '| 检查 | 结果 |','| --- | --- |',

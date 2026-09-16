@@ -8,6 +8,7 @@ htmlcov/
 .venv/
 .venv-gsplat/
 .runtime-locks/
+studio-projects/
 env/
 condaenv.*.requirements.txt
 
@@ -42,3 +43,4 @@ tools/mediasdk-helper/**/*.exe
 
 # The Insta360 MediaSDK payload is an external licensed dependency; never commit it.
 sdks/
+tests

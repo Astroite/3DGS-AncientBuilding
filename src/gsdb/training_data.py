@@ -19,11 +19,15 @@ from .mask_finalize import validate_mask_finalization
 from .models import SegmentQAConfig
 from .reconstruction import _write_colmap_binary_model
 from .segments import frame_id, image_name, validate_segments
+from .storage import link_or_copy
 
 
 def json_write(path: Path, payload):
     temporary = path.with_suffix(path.suffix+'.tmp')
-    temporary.write_text(json.dumps(payload,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+    with temporary.open('w', encoding='utf-8', newline='\n') as stream:
+        stream.write(json.dumps(payload,ensure_ascii=False,indent=2)+'\n')
+        stream.flush()
+        os.fsync(stream.fileno())
     temporary.replace(path)
 
 
@@ -66,12 +70,12 @@ def validate_package(path: Path) -> dict:
 
 def prepare_segment(dataset: Path, records: list[dict], attempt, settings: SegmentQAConfig,
                     segment_id: str, output: Path, report_path: Path | None = None,
-                    max_initial_points: int = 1_000_000, duration_seconds: float | None = None) -> dict:
+                    max_initial_points: int = 1_000_000, duration_seconds: float | None = None, reuse_files: bool = False) -> dict:
     if output.exists():
-        return _prepare_segment(dataset,records,attempt,settings,segment_id,output,report_path,max_initial_points,duration_seconds)
+        return _prepare_segment(dataset,records,attempt,settings,segment_id,output,report_path,max_initial_points,duration_seconds,reuse_files)
     staging=output.with_name(f'.{output.name}.building-{uuid.uuid4().hex[:12]}')
     try:
-        _prepare_segment(dataset,records,attempt,settings,segment_id,staging,report_path,max_initial_points,duration_seconds)
+        _prepare_segment(dataset,records,attempt,settings,segment_id,staging,report_path,max_initial_points,duration_seconds,reuse_files)
         staging.rename(output)
         return validate_package(output)
     except Exception as error:
@@ -111,7 +115,7 @@ def select_training_window(segment, report, records, included, settings, duratio
 
 def _prepare_segment(dataset: Path, records: list[dict], attempt, settings: SegmentQAConfig,
                     segment_id: str, output: Path, report_path: Path | None = None,
-                    max_initial_points: int = 1_000_000, duration_seconds: float | None = None) -> dict:
+                    max_initial_points: int = 1_000_000, duration_seconds: float | None = None, reuse_files: bool = False) -> dict:
     from nerfstudio.data.utils.colmap_parsing_utils import read_cameras_binary, read_images_binary, qvec2rotmat, Point3D
     filtered = validate_mask_filter(dataset,verify_hashes=True)
     expected = {r['image'] for r in filtered['accepted']}
@@ -148,6 +152,7 @@ def _prepare_segment(dataset: Path, records: list[dict], attempt, settings: Segm
         raise RuntimeError('Segment image/COLMAP inventory mismatch')
     split = grouped_split(segment['frames'])
     rows, train_images, valid_observations = [], {}, {}
+    storage = []
     for image_id,im in sorted(selected.items()):
         name = image_name(im.name)
         f = frame_id(name)
@@ -158,9 +163,13 @@ def _prepare_segment(dataset: Path, records: list[dict], attempt, settings: Segm
         mask = cv2.imread(str(dataset/'masks'/f'{name}.png'),cv2.IMREAD_GRAYSCALE)
         if mask is None or mask.shape != (camera.height,camera.width):
             raise RuntimeError(f'Mask/camera size mismatch: {name}')
-        shutil.copy2(dataset/'images'/name,output/'images'/output_name)
-        if not cv2.imwrite(str(output/'masks'/f'{output_name}.png'),mask):
-            raise RuntimeError('Mask write failed')
+        if reuse_files:
+            storage.append(link_or_copy(dataset/'images'/name,output/'images'/output_name))
+            storage.append(link_or_copy(dataset/'masks'/f'{name}.png',output/'masks'/f'{output_name}.png'))
+        else:
+            shutil.copy2(dataset/'images'/name,output/'images'/output_name)
+            if not cv2.imwrite(str(output/'masks'/f'{output_name}.png'),mask):
+                raise RuntimeError('Mask write failed')
         world_to_camera = np.eye(4)
         world_to_camera[:3,:3] = qvec2rotmat(im.qvec)
         world_to_camera[:3,3] = im.tvec
@@ -236,6 +245,8 @@ def _prepare_segment(dataset: Path, records: list[dict], attempt, settings: Segm
     np.savez(output/'points.npz',xyz=np.array([p.xyz for p in reservoir],dtype=np.float32),rgb=np.array([p.rgb for p in reservoir],dtype=np.uint8))
     json_write(output/'segments.json',report)
     json_write(output/'selection.json',segment)
+    if reuse_files:
+        json_write(output/'storage.json',dict(files=storage,duplicate_bytes=sum(r['duplicate_bytes'] for r in storage)))
     meta = dict(schema_version=1,validation='passed',source_identity=identity,source_dataset=str(dataset.resolve()),
                 segment=segment_id,coverage_status=report['coverage_status'],mask_polarity='white_keep',
                 selection=segment,
@@ -254,14 +265,16 @@ def postshot_adapter(package: Path, output: Path) -> Path:
     for name in ['images','masks']:
         (output/name).mkdir()
     shutil.copytree(package/'colmap',output/'colmap')
+    storage = []
     for row in meta['images']:
         if row['split']!='train':
             continue
         name = Path(row['image']).name
-        os.link(package/row['image'],output/'images'/name)
+        storage.append(link_or_copy(package/row['image'],output/'images'/name))
         mask = cv2.imread(str(package/row['mask']),cv2.IMREAD_GRAYSCALE)
         if not cv2.imwrite(str(output/'masks'/f'{Path(name).stem}.png'),255-mask):
             raise RuntimeError('Postshot mask conversion failed')
+    json_write(output/'storage.json',dict(files=storage,duplicate_bytes=sum(r['duplicate_bytes'] for r in storage)))
     json_write(output/'adapter.json',{'package_sha256':sha256_file(package/'dataset.json'),'mask_polarity':'white_ignore','split':'train'})
     validate_postshot_adapter(package,output,meta)
     return output
@@ -274,6 +287,8 @@ def validate_postshot_adapter(package: Path, output: Path, meta: dict | None = N
     if adapter != dict(package_sha256=sha256_file(package/'dataset.json'),mask_polarity='white_ignore',split='train'):
         raise RuntimeError('Postshot adapter identity changed')
     expected = {'adapter.json'}
+    if (output/'storage.json').is_file():
+        expected.add('storage.json')
     for source in (package/'colmap').rglob('*'):
         if source.is_file():
             name = source.relative_to(package).as_posix()
