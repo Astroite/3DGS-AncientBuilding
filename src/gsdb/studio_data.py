@@ -2,6 +2,9 @@
 
 No SfM is performed here. PINHOLE and SIMPLE_PINHOLE are deliberately the
 supported camera set: distorted images must first be exported undistorted.
+
+Text/JSON I/O in this package uses explicit UTF-8 (COLMAP txt may be utf-8-sig);
+image/model binaries stay binary. Chinese paths are supported end-to-end.
 """
 from __future__ import annotations
 

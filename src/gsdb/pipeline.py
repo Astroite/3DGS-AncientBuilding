@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 from .gpu_lock import gpu_locked
+from .schema_route import (
+    schema_version as run_schema_version,
+    uses_rate_sampled_prepared_input,
+    uses_run_owned_inputs,
+    uses_temporal_segment_pipeline,
+)
+from .training_schedule import (
+    CullSettings,
+    TrainSettings,
+    densification_schedule,
+)
 
 import json
 import math
 import re
 import shutil
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -97,76 +107,6 @@ PUBLISHED_HEIGHT_SPAN_LIMIT = 0.10
 UNSAFE_PUBLISH_MARKER = "UNSAFE-PUBLISH-FRAME.txt"
 
 
-# Splatfacto's densification schedule is written in steps, but what actually
-# matters is how many times each training view is sampled before splitting stops.
-# Nerfstudio's defaults were tuned on datasets around this size, and the validated
-# 90-second run happens to sit exactly here (135 frames x 8 views), so the defaults
-# are reproduced unchanged at this count and scaled from it.
-DENSIFICATION_BASELINE_IMAGES = 1080
-DENSIFICATION_BASELINE_STEPS = {
-    "warmup_length": 500,
-    "stop_screen_size_at": 4000,
-    "stop_split_at": 15000,
-}
-# Densification must always leave a refinement tail, however large the dataset.
-DENSIFICATION_MAX_FRACTION = 0.75
-
-# gsplat's DefaultStrategy (wired up in nerfstudio's SplatfactoModel) pauses ALL
-# refinement -- both growth and opacity-based pruning -- for
-# ``num_train_data + refine_every`` steps after every opacity reset, and resets fire
-# every ``reset_alpha_every * refine_every`` steps. On the Yunxiu run (5,128 images)
-# that pause (~5,228 steps) outlasted the reset interval at nerfstudio's default
-# reset_alpha_every=30 (3,000 steps), so each reset re-armed the pause before the
-# last one expired and refinement locked up for good around step 3,000: the model
-# trained to completion with 1,363,440 gaussians frozen since shortly after warmup,
-# 98.6% of them decayed to near-zero opacity and never pruned because pruning was
-# paused too, and the exporter's own opacity filter -- not gsdb's culling -- is what
-# actually dropped them, down to 19,705. Splatfacto's default refine_every (100) is
-# pinned explicitly here because reset_alpha_every is derived assuming this exact
-# value; if nerfstudio ever changes its own default, this schedule must not silently
-# drift out of sync with it.
-SPLATFACTO_REFINE_EVERY = 100
-SPLATFACTO_DEFAULT_RESET_ALPHA_EVERY = 30
-
-
-def densification_schedule(image_count: int, max_iterations: int) -> dict[str, int]:
-    """Step bounds that keep densification coverage constant as a scene grows.
-
-    A 427-second capture is 5,128 perspective views against the baseline's 1,080.
-    Left at the default 15,000 steps, splitting would stop after each view had been
-    sampled 2.8 times instead of 13.4, so most of the scene would never accumulate
-    enough positional gradient to densify at all -- the geometry would not be
-    under-refined, it would be missing. Scaling the schedule with the view count
-    keeps the per-view budget that the defaults assume.
-    """
-    if image_count < 1:
-        raise ValueError(f"Image count must be positive, got {image_count}")
-    ratio = image_count / DENSIFICATION_BASELINE_IMAGES
-    schedule = {
-        name: max(1, round(steps * ratio))
-        for name, steps in DENSIFICATION_BASELINE_STEPS.items()
-    }
-    schedule["stop_split_at"] = min(
-        schedule["stop_split_at"], max(1, int(max_iterations * DENSIFICATION_MAX_FRACTION))
-    )
-    schedule["stop_screen_size_at"] = min(
-        schedule["stop_screen_size_at"], max(1, schedule["stop_split_at"] - 1)
-    )
-    schedule["warmup_length"] = min(
-        schedule["warmup_length"], max(1, schedule["stop_screen_size_at"] - 1)
-    )
-    # image_count over-estimates nerfstudio's actual num_train_data (it applies its
-    # own train/eval split on top of this), which only makes the margin below safer.
-    minimum_reset_alpha_every = (
-        math.ceil((image_count + SPLATFACTO_REFINE_EVERY) / SPLATFACTO_REFINE_EVERY) + 1
-    )
-    schedule["reset_alpha_every"] = max(
-        SPLATFACTO_DEFAULT_RESET_ALPHA_EVERY, minimum_reset_alpha_every
-    )
-    schedule["refine_every"] = SPLATFACTO_REFINE_EVERY
-    return schedule
-
-
 def training_image_count(run: RunManifest) -> int:
     """Views the selected training input actually contains.
 
@@ -174,7 +114,7 @@ def training_image_count(run: RunManifest) -> int:
     V4 is inventory-driven, so its count comes from the prepared Postshot dataset
     when available and otherwise from the selected RealityScan component.
     """
-    if int(getattr(run.config, "schema_version", 1)) >= 4:
+    if uses_rate_sampled_prepared_input(run_schema_version(run)):
         prepared = run.metrics.get("postshot_prepare", {})
         if isinstance(prepared, dict) and "images" in prepared:
             return int(prepared["images"])
@@ -188,71 +128,6 @@ def training_image_count(run: RunManifest) -> int:
         run.config.reconstruction, "fallback" if run.fallback_attempted else "primary"
     )
     return int(attempt.frame_count) * int(attempt.images_per_equirect)
-
-
-@dataclass(frozen=True)
-class TrainSettings:
-    """Instrumentation around training that does not change what is learned.
-
-    Checkpoint frequency and logging backend affect neither the loss nor the
-    Gaussians, so like culling they stay out of the run's config hash — otherwise
-    turning on a metric would invalidate every manifest already on disk.
-    """
-
-    # Mirrors nerfstudio 1.1.5's TrainerConfig.vis literals, so a typo fails here
-    # rather than four hours into a run.
-    VIS_CHOICES = ("viewer", "wandb", "tensorboard", "comet", "viewer+tensorboard", "viewer+wandb")
-
-    steps_per_save: int = 10_000
-    vis: str = "tensorboard"
-
-    def __post_init__(self) -> None:
-        if self.vis not in self.VIS_CHOICES:
-            raise ValueError(f"vis must be one of {self.VIS_CHOICES}, got {self.vis!r}")
-        if self.steps_per_save < 1:
-            raise ValueError(f"steps_per_save must be positive, got {self.steps_per_save}")
-
-    def command_arguments(self) -> list[str]:
-        return [
-            # Densification stops at splatfacto's stop_split_at (15k), so the rest of
-            # a 100k run only refines a fixed Gaussian set. Keeping every checkpoint
-            # lets one run answer "where does quality stop improving?" by exporting
-            # from several steps, instead of retraining once per candidate.
-            "--save-only-latest-checkpoint",
-            "False",
-            "--steps-per-save",
-            str(self.steps_per_save),
-            # An unattended batch run has nobody watching a live viewer, and
-            # tensorboard leaves the eval curve on disk for that decision.
-            "--vis",
-            self.vis,
-        ]
-
-    def as_metrics(self) -> dict[str, Any]:
-        return {"steps_per_save": self.steps_per_save, "vis": self.vis}
-
-
-@dataclass(frozen=True)
-class CullSettings:
-    """Publish-time culling knobs.
-
-    Deliberately not part of RunConfig: culling changes what is published, not
-    what was trained, so adjusting it must not invalidate a run's config hash and
-    force a four-hour retrain.
-    """
-
-    enabled: bool = True
-    distance_factor: float = 3.0
-    scale_factor: float = 1.0
-    max_removed_fraction: float = 0.05
-
-    def as_metrics(self) -> dict[str, Any]:
-        return {
-            "enabled": self.enabled,
-            "distance_factor": self.distance_factor,
-            "scale_factor": self.scale_factor,
-            "max_removed_fraction": self.max_removed_fraction,
-        }
 
 
 def _tree_size(path: Path) -> int:
@@ -363,7 +238,8 @@ def ingest_capture(
 
 @run_locked
 def preprocess_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunManifest:
-    if getattr(run.config, "schema_version", 0) == 6:
+    version = run_schema_version(run)
+    if uses_run_owned_inputs(version):
         from .pipeline_v6 import preprocess_v6
         return preprocess_v6(scene_path, run, resume)
     if not begin_stage(run, "preprocess", resume=resume):
@@ -375,7 +251,7 @@ def preprocess_run(scene_path: Path, run: RunManifest, resume: bool = False) -> 
         if not run.tool_versions:
             run.tool_versions = collect_tool_versions()
         capture = load_capture(scene_path, run.config.capture_id)
-        schema_version = int(getattr(run.config, "schema_version", 1))
+        schema_version = version
         modern = schema_version >= 2
         candidates_dir = work / (
             "equirect-candidates" if modern else "equirect-primary"
@@ -1116,10 +992,11 @@ def _reconstruct_run_v4(
 @gpu_locked
 @run_locked
 def reconstruct_run(scene_path: Path, run: RunManifest, resume: bool = False) -> RunManifest:
-    if getattr(run.config, "schema_version", 1) in (5, 6):
+    version = run_schema_version(run)
+    if uses_temporal_segment_pipeline(version):
         from .pipeline_v5 import reconstruct_v5
         return reconstruct_v5(scene_path, run, resume)
-    if getattr(run.config, "schema_version", 1) >= 4:
+    if uses_rate_sampled_prepared_input(version):
         return _reconstruct_run_v4(scene_path, run, resume=resume)
     if not begin_stage(run, "reconstruct", resume=resume):
         return run

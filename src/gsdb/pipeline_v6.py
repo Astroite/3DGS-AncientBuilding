@@ -1,4 +1,8 @@
-"""Run-owned 1 fps inputs and a single source-indexed local repair."""
+"""Schema 6 run-owned inputs and a single source-indexed local repair.
+
+Identity rules: prepared bytes, repair plan, and merged inventories are pinned by
+hashes; resume never invents a second repair round or resurrects rejected pixels.
+"""
 from __future__ import annotations
 import json
 import re

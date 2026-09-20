@@ -1,4 +1,8 @@
-"""Single GPU worker shared by Studio training and live rendering."""
+"""Studio training runtime: GPU worker, checkpoints, project save/open.
+
+All project/progress JSON is UTF-8 on disk (`json_write` / explicit encoding);
+open() never relies on the Windows ANSI code page.
+"""
 from __future__ import annotations
 
 import json
@@ -136,8 +140,9 @@ class Runtime:
         if now-self.last_progress>=0.25 or progress['step']==0:
             self.emit('progress',**progress)
             if self.experiment:
-                with (self.experiment/'studio-progress.jsonl').open('a',encoding='utf-8') as f:
-                    f.write(json.dumps(progress)+'\n')
+                # utf-8 + ensure_ascii=False so Chinese status/progress text survives on disk.
+                with (self.experiment/'studio-progress.jsonl').open('a',encoding='utf-8',newline='\n') as f:
+                    f.write(json.dumps(progress,ensure_ascii=False)+'\n')
             self.last_progress=now
         if self.save_checkpoint.is_set():
             save()

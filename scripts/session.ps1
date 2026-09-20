@@ -9,6 +9,16 @@ if (-not $DataRoot) { $DataRoot = $env:GSDB_DATA_ROOT }
 if (-not $DataRoot) { $DataRoot = Join-Path (Split-Path $global:GsdbAppRoot -Parent) 'Data' }
 $env:GSDB_DATA_ROOT = (Resolve-Path -LiteralPath $DataRoot).Path
 $env:PYTHONUNBUFFERED = '1'
+# Force UTF-8 for child processes so Windows console code pages cannot
+# corrupt tool output capture (GBK vs UTF-8 decode failures).
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
+try {
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+} catch {
+    # Host may not expose a console; Python env vars above still apply.
+}
 $helper = Join-Path $global:GsdbAppRoot 'tools\mediasdk-helper\build\Release\gsdb-media-helper.exe'
 if (-not $env:GSDB_MEDIA_HELPER -and (Test-Path -LiteralPath $helper)) {
     $env:GSDB_MEDIA_HELPER = $helper

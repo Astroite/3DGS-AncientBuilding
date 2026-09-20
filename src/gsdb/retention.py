@@ -133,10 +133,23 @@ def cleanup_run(scene: Path, run, apply=False, *, checkpoint=False):
         groups = {}
         for e in entries:
             groups.setdefault(tuple(e['inode']), []).append(e)
+        status_counts = {}
+        for entry in entries:
+            status_counts[entry['status']] = status_counts.get(entry['status'], 0) + 1
+        logical_bytes = sum(e['bytes'] for e in entries)
+        reclaimable_bytes = sum(g[0]['bytes'] for g in groups.values() if len(g) >= g[0]['links'])
         report = dict(schema_version=1, config_hash=run.config_hash, roots=roots,
             trigger='verified downstream commit', consumer_verification=evidence, files=entries,
-            logical_bytes=sum(e['bytes'] for e in entries),
-            reclaimable_bytes=sum(g[0]['bytes'] for g in groups.values() if len(g) >= g[0]['links']),
+            planned_files=len(entries),
+            status_counts=status_counts,
+            logical_bytes=logical_bytes,
+            reclaimable_bytes=reclaimable_bytes,
+            logical_gib=round(logical_bytes / 1024**3, 3),
+            reclaimable_gib=round(reclaimable_bytes / 1024**3, 3),
+            hardlink_note=(
+                'logical_bytes double-counts hardlinked copies; reclaimable_bytes is '
+                'what unlinking each inode group once would free'
+            ),
             retained=retained, status='preview')
         if not apply:
             return report
@@ -197,6 +210,11 @@ def _execute(work, destination, report, allowed):
                 entry.update(status='pending', error=str(error))
         json_write(destination, report)
     report['status'] = 'complete' if all(e['status']=='deleted' for e in report['files']) else 'pending'
+    counts = {}
+    for entry in report.get('files', []):
+        counts[entry['status']] = counts.get(entry['status'], 0) + 1
+    report['status_counts'] = counts
+    report['planned_files'] = len(report.get('files', []))
     json_write(destination, report)
 
 
@@ -205,8 +223,13 @@ def auto_cleanup(scene, run, *, checkpoint=False):
         return
     try:
         result = cleanup_run(scene, run, apply=True, checkpoint=checkpoint)
-        print(f"Cleanup: {result['status']}; logical={result['logical_bytes']} bytes, "
-              f"reclaimable={result['reclaimable_bytes']} bytes", flush=True)
+        print(
+            f"Cleanup: {result['status']}; planned={result.get('planned_files', len(result.get('files', [])))}; "
+            f"counts={result.get('status_counts', {})}; "
+            f"logical={result.get('logical_gib', result['logical_bytes'] / 1024**3):.3f} GiB, "
+            f"reclaimable={result.get('reclaimable_gib', result['reclaimable_bytes'] / 1024**3):.3f} GiB",
+            flush=True,
+        )
         pending = scene/run.id/'cleanup-pending.json'
         if pending.exists() and result['status'] == 'complete':
             previous = json.loads(pending.read_text(encoding='utf-8'))

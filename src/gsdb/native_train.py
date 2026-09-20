@@ -34,12 +34,28 @@ def configure_windows_cuda():
     if not (cuda/'bin'/'nvcc.exe').is_file():
         raise RuntimeError('Pinned native trainer requires CUDA Toolkit 11.8')
     locator = Path(r'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe')
-    installation = subprocess.check_output([str(locator),'-latest','-products','*','-requires',
-        'Microsoft.VisualStudio.Component.VC.Tools.x86.x64','-property','installationPath'],text=True).strip()
+    installation = subprocess.check_output(
+        [str(locator), '-latest', '-products', '*', '-requires',
+         'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property', 'installationPath'],
+        text=True,
+        encoding='utf-8',
+        errors='replace',
+    ).strip()
     vcvars = Path(installation)/'VC'/'Auxiliary'/'Build'/'vcvars64.bat'
     if not vcvars.is_file():
         raise RuntimeError('MSVC build environment is unavailable')
-    environment = subprocess.check_output(['cmd.exe','/d','/s','/c',f'""{vcvars}" -vcvars_ver=14.38 >nul && set"'],text=True,errors='replace')
+    # cmd.exe writes OEM code-page bytes on Chinese Windows (often GBK), not UTF-8.
+    raw_environment = subprocess.check_output(
+        ['cmd.exe', '/d', '/s', '/c', f'""{vcvars}" -vcvars_ver=14.38 >nul && set"'],
+    )
+    for encoding in ('oem', 'mbcs', 'utf-8'):
+        try:
+            environment = raw_environment.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        environment = raw_environment.decode('utf-8', errors='replace')
     for line in environment.splitlines():
         if '=' in line and not line.startswith('='):
             key,value = line.split('=',1)

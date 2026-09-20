@@ -43,6 +43,8 @@ def _gpu_memory_used_mib(gpu_index: int | None = None) -> float | None:
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=5,
         )
         values = [float(line.strip()) for line in result.stdout.splitlines() if line.strip()]

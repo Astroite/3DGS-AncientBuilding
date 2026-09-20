@@ -62,7 +62,15 @@ from .sources import (
 from .media import sha256_file
 
 
-app = typer.Typer(no_args_is_help=True, help="360 video to Gaussian Splatting workflow and catalog")
+app = typer.Typer(
+    no_args_is_help=True,
+    help=(
+        "360 video to Gaussian Splatting workflow and catalog. "
+        "Current Windows path (schema 6): doctor → location/scene/capture → media/ingest → "
+        "preprocess → mask → reconstruct → qa → train --segment → cleanup. "
+        "Commands marked (legacy) remain for historical schema 1–4 Runs only."
+    ),
+)
 location_app = typer.Typer(no_args_is_help=True, help="Manage location manifests")
 scene_app = typer.Typer(no_args_is_help=True, help="Manage scene manifests")
 catalog_app = typer.Typer(no_args_is_help=True, help="Build and inspect the SQLite catalog")
@@ -138,7 +146,7 @@ def doctor(
         typer.Option("--require", help="Require additional component: mediasdk, postshot, or legacy colmap"),
     ] = None,
 ) -> None:
-    """Check Windows reconstruction dependencies and the selected training backend."""
+    """Current workflow: check Windows reconstruction deps and the training backend."""
     try:
         checks = run_doctor(
             _data_root(), minimum_free_gib=minimum_free_gib, require=set(require or []), backend=backend
@@ -876,7 +884,7 @@ def postshot_prepare(
         typer.Option(help="Optional legacy dataset output directory; schema 5/6 uses train --segment"),
     ] = None,
 ) -> None:
-    """Legacy Run preparation. Schema 5 uses train --backend postshot --segment --dry-run."""
+    """(legacy) Historical Run preparation. Schema 5/6: train --backend postshot --segment --dry-run."""
     try:
         root = _data_root()
         path = _scene(location_id, scene_id)
@@ -967,7 +975,7 @@ def postshot_train(
     export_ply: Annotated[Path | None, typer.Option()] = None,
     export_spz: Annotated[Path | None, typer.Option()] = None,
 ) -> None:
-    """Legacy dataset training. Schema 5 uses train --backend postshot --segment."""
+    """(legacy) Historical dataset training. Schema 5/6: train --backend postshot --segment."""
     try:
         root = _data_root()
         path = _scene(location_id, scene_id)
@@ -1041,7 +1049,7 @@ def export_command(
         ),
     ] = False,
 ) -> None:
-    """Legacy Nerfstudio asset publishing; not the schema 5/6 segment PLY export.
+    """(legacy) Nerfstudio asset publishing; not schema 5/6 segment PLY export.
 
     Culling is a publishing decision, not a training one, so these options are not
     part of the run's config hash: the same run can publish several versions.
@@ -1150,7 +1158,7 @@ def clean(
     location_id: Annotated[str, typer.Argument()],
     scene_id: Annotated[str, typer.Argument()],
 ) -> None:
-    """Preview generated work data that could be cleaned; never deletes files in v1."""
+    """(legacy) Preview Run directory sizes only. Schema 6 cleanup: use `cleanup`."""
     path = _scene(location_id, scene_id)
     total = 0
     for run_path in sorted(
@@ -1214,7 +1222,7 @@ def train_segment(
     dry_run: Annotated[bool, typer.Option(help="Prepare validated input and command without training")] = False,
     duration_seconds: Annotated[float | None, typer.Option(min=0.001,help="Earliest fully validated window within the segment")] = None,
 ) -> None:
-    """Train a QA-approved segment with one of the interchangeable backends."""
+    """Current workflow: train a QA-approved schema 5/6 segment (gsplat or postshot)."""
     from .training_data import prepare_segment
     from .training import train_package
     from .runs import save_run
@@ -1254,7 +1262,7 @@ def cleanup_command(
     run_id: Annotated[str, typer.Argument()],
     apply: Annotated[bool, typer.Option(help="Execute verified schema 6 cleanup; default is preview")] = False,
 ) -> None:
-    """Preview or retry dependency-aware cleanup for a schema 6 Run."""
+    """Current workflow: preview/apply schema 6 retention cleanup for a Run."""
     from .retention import cleanup_run
     try:
         scene = _scene(location_id, scene_id)

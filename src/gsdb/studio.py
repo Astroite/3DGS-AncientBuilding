@@ -1,4 +1,9 @@
-"""Offline Windows Gaussian training studio. Run with the gsplat environment."""
+"""Offline Windows Gaussian training studio. Run with the gsplat environment.
+
+Hygiene: GUI does not perform unencoded text I/O; project/dataset JSON is
+handled by studio_runtime/studio_data with explicit UTF-8. No product/UI roadmap
+work lives here — only the offline prototype surface.
+"""
 from __future__ import annotations
 
 import argparse

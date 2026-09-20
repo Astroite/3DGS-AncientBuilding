@@ -1,4 +1,8 @@
-"""One robust reconstruction followed by at most one targeted repair dataset."""
+"""Schema 5/6 reconstruct: one robust pass + at most one targeted repair.
+
+Schema 6 repair extraction/merge lives in pipeline_v6; this module owns the
+reconstruct stage orchestration and primary-vs-repair selection scoring.
+"""
 from __future__ import annotations
 
 import json
