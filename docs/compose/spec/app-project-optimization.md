@@ -3,7 +3,7 @@ feature: app-project-optimization
 status: delivered
 updated: 2026-09-21
 branch: main
-commits: uncommitted-on-main (working tree vs dd15cf2) # fill SHA range after commit
+commits: dd15cf2..e0c1b59
 ---
 
 # APP 工程综合体检与优化
@@ -12,7 +12,7 @@ commits: uncommitted-on-main (working tree vs dd15cf2) # fill SHA range after co
 
 **What was built**
 
-在 `D:\Project\3DGS\APP` 的 main 工作树上完成 compose-next 优化切片 A–F（F 限定为 APP Studio 代码卫生）：
+在 `D:\Project\3DGS\APP` 的 main 上完成 compose-next 优化切片 A–F（F 限定为 APP Studio 代码卫生），提交 `e0c1b59`（`dd15cf2..e0c1b59`）：
 
 - **A 结构**：新增 `src/gsdb/schema_route.py`（schema 谓词）与 `src/gsdb/training_schedule.py`（densification / TrainSettings / CullSettings）；`pipeline.py` 入口 `preprocess_run` / `reconstruct_run` / `training_image_count` 改用谓词，公共符号仍从 `pipeline` 再导出，行为与 schema 1–5 兼容不变。
 - **B 编码**：`session.ps1` 强制 `PYTHONUTF8`/`PYTHONIOENCODING` 与 Console UTF-8；`processes.py` GPU 采样子进程显式 UTF-8；`native_train` 的 `cmd.exe set` **优先 OEM/mbcs 解码**（避免中文 Windows 上把环境变量解成 U+FFFD）。
