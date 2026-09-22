@@ -62,7 +62,7 @@ Invoke-Gsdb media probe $LocationId $SceneId $CaptureId
 Invoke-Gsdb ingest $LocationId $SceneId $CaptureId
 ```
 
-示例创建前 45 秒候选窗口，结束时间必须在原片范围内。正式对照选择最早通过 QA 的连续 30 秒；窗口不足时另建更长 Capture，不降低门槛。全片 Capture 省略 `--end-seconds`，使用探测时长；这不等于应立即全片运行。
+示例创建前 45 秒候选窗口，结束时间必须在原片范围内。正式对照选择最早通过 QA 的连续 30 秒；窗口不足时另建更长 Capture，不降低门槛。全片 Capture 省略 `--end-seconds`，使用探测时长；这不等于应立即全片运行。室内/古建走位、快门与细节补拍见 [古建室内采集 SOP](CAPTURE-SOP.md)（表盘走位法）。
 
 标准 2:1 视频使用 `--source-type equirect_video`；2:1 图片序列使用 `equirect_sequence` 并提供 `--fps`。不要将 16:9 重构视频当全景。INSV 不必先手工导出 MP4，实际型号支持以 helper capabilities 和 probe 为准。
 
@@ -143,7 +143,7 @@ Invoke-Gsdb train $LocationId $SceneId $RunId --segment $SegmentId `
 # 有 Studio CLI 许可后，去掉 --dry-run 执行相同命令。
 ```
 
-默认启用光度补偿，关闭用 `--no-photo-comp`；不同配置用不同输出目录。默认预算 `max(30000, 30 × 训练图片数)`；Postshot 按千步向上取整，以保存的实际命令为准。较长有效段可加 `--duration-seconds 30`，选完全位于通过分段内、重新核验注册率的最早窗口；不足时拒绝。
+默认启用光度补偿，关闭用 `--no-photo-comp`；不同配置用不同输出目录。gsplat 默认 Bilateral Grid 匀光与 Sparse Depth 深度锚（`--no-use-bilateral-grid` / `--no-use-sparse-depth` 可关）；旧包无 `sparse_depth.npz` 时自动跳过深度锚。默认预算 `max(30000, 30 × 训练图片数)`；Postshot 按千步向上取整，以保存的实际命令为准。较长有效段可加 `--duration-seconds 30`，选完全位于通过分段内、重新核验注册率的最早窗口；不足时拒绝。
 
 两后端共享图片、遮罩、相机和初始化点。训练/验证按全景采样分组；初始化颜色只用未遮罩训练观测。gsplat 按需加载图像，遮罩排除 L1/SSIM 观测，评估处理遮罩边界，不把人物区域训练成黑色。曝光/白平衡按全景共享参数，固定参考并约束时间连续性，导出标准 SH 3。
 

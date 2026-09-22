@@ -68,7 +68,7 @@ def gpu_check(root):
             runtime.stop.set()
         return original(params,progress,save)
     runtime._observer=observer
-    settings=dict(steps=12,max_size=0,sh_degree=3,photo_comp=True,checkpoint_every=2)
+    settings=dict(steps=12,max_size=0,sh_degree=3,photo_comp=True,checkpoint_every=2,use_bilateral_grid=True,use_sparse_depth=True)
     runtime.submit(runtime.start,root/'projects',settings)
     states=[]
     preview_count=0

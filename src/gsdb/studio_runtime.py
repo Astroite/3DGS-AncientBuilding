@@ -219,7 +219,9 @@ class Runtime:
                 self.last_progress=0
                 result=train(package,self.experiment,steps=settings['steps'],photo_comp=settings['photo_comp'],
                     resume=resume,checkpoint_every=settings['checkpoint_every'],observer=self._observer,
-                    run_evaluation=False,sh_degree=settings['sh_degree'])
+                    run_evaluation=False,sh_degree=settings['sh_degree'],
+                    use_bilateral_grid=settings.get('use_bilateral_grid',True),
+                    use_sparse_depth=settings.get('use_sparse_depth',True))
             self.params=None
             import shutil
             snapshot=self.project/f'snapshot-{uuid.uuid4().hex}.ply'

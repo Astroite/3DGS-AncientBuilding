@@ -18,6 +18,7 @@ from .masking import validate_mask_filter
 from .mask_finalize import validate_mask_finalization
 from .models import SegmentQAConfig
 from .reconstruction import _write_colmap_binary_model
+from .sparse_depth import export_sparse_depth_anchors, write_sparse_depth
 from .segments import frame_id, image_name, validate_segments
 from .storage import link_or_copy
 
@@ -152,6 +153,7 @@ def _prepare_segment(dataset: Path, records: list[dict], attempt, settings: Segm
         raise RuntimeError('Segment image/COLMAP inventory mismatch')
     split = grouped_split(segment['frames'])
     rows, train_images, valid_observations = [], {}, {}
+    image_id_to_row_index = {}
     storage = []
     for image_id,im in sorted(selected.items()):
         name = image_name(im.name)
@@ -184,6 +186,7 @@ def _prepare_segment(dataset: Path, records: list[dict], attempt, settings: Segm
         rows.append(dict(image=f'images/{output_name}',mask=f'masks/{output_name}.png',source_image=name,
             frame=f,timestamp_seconds=records[f-1]['timestamp_seconds'],split=split[f],width=camera.width,height=camera.height,
             K=[[float(fx),0,float(cx)],[0,float(fy),float(cy)],[0,0,1]],world_to_camera=world_to_camera.tolist()))
+        image_id_to_row_index[image_id] = len(rows) - 1
         if split[f]=='train':
             train_images[image_id] = im._replace(name=output_name)
             xy = np.rint(im.xys).astype(np.int64)
@@ -243,6 +246,8 @@ def _prepare_segment(dataset: Path, records: list[dict], attempt, settings: Segm
     used_cameras = {im.camera_id for im in train_images.values()}
     _write_colmap_binary_model(output/'colmap',{i:cameras[i] for i in used_cameras},train_images,points)
     np.savez(output/'points.npz',xyz=np.array([p.xyz for p in reservoir],dtype=np.float32),rgb=np.array([p.rgb for p in reservoir],dtype=np.uint8))
+    sparse_anchors = export_sparse_depth_anchors(train_images, rows, points, image_id_to_row_index)
+    write_sparse_depth(output/'sparse_depth.npz', sparse_anchors)
     json_write(output/'segments.json',report)
     json_write(output/'selection.json',segment)
     if reuse_files:
@@ -252,6 +257,7 @@ def _prepare_segment(dataset: Path, records: list[dict], attempt, settings: Segm
                 selection=segment,
                 coordinates='COLMAP',images=rows,initial_points=len(points),eligible_initial_points=count,
                 initialization_colors='unmasked_training_observations_only',
+                sparse_depth_observations=int(len(sparse_anchors['depth'])),
                 files={p.relative_to(output).as_posix():sha256_file(p) for p in sorted(output.rglob('*')) if p.is_file()})
     json_write(output/'dataset.json',meta)
     return validate_package(output)

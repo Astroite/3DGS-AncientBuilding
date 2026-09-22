@@ -13,7 +13,8 @@ from .training_data import json_write, postshot_adapter, validate_package, valid
 
 
 def train_package(package: Path, output: Path, backend='postshot', steps=None,
-                  photo_comp=True, resume=False, dry_run=False):
+                  photo_comp=True, resume=False, dry_run=False,
+                  use_bilateral_grid=True, use_sparse_depth=True):
     from .postshot import build_postshot_train_command, postshot_executable
     if backend not in ('gsplat','postshot'):
         raise ValueError('backend must be gsplat or postshot')
@@ -41,6 +42,10 @@ def train_package(package: Path, output: Path, backend='postshot', steps=None,
         command = [str(python),'-m','gsdb.native_train','--dataset',str(package),'--output',str(output),'--steps',str(steps)]
         if not photo_comp:
             command.append('--no-photo-comp')
+        if not use_bilateral_grid:
+            command.append('--no-use-bilateral-grid')
+        if not use_sparse_depth:
+            command.append('--no-use-sparse-depth')
         if resume:
             command.append('--resume')
     else:
@@ -55,11 +60,24 @@ def train_package(package: Path, output: Path, backend='postshot', steps=None,
             profile='Splat ADC',ksteps=math.ceil(steps/1000),export_ply=output/'model.ply')
         command += ['--photo-comp','true' if photo_comp else 'false','--max-sh-degree','3','--anti-aliasing','false','--no-recenter-points']
     record = dict(backend=backend,package_sha256=sha256_file(package/'dataset.json'),
-                  command=command,requested_steps=steps,photo_comp=photo_comp,status='prepared')
+                  command=command,requested_steps=steps,photo_comp=photo_comp,status='prepared',
+                  use_bilateral_grid=bool(use_bilateral_grid) if backend=='gsplat' else None,
+                  use_sparse_depth=bool(use_sparse_depth) if backend=='gsplat' else None)
     if previous:
         for key in ('backend','package_sha256','requested_steps','photo_comp'):
             if previous[key] != record[key]:
                 raise RuntimeError(f'Experiment identity changed: {key}')
+        # Historical dispatch files predate bilateral-grid / sparse-depth flags
+        # and were trained with PanoramaExposure and no depth anchors. Coerce
+        # missing and null the same way on both sides (postshot stores null).
+        def _flag(value):
+            return False if value is None else bool(value)
+        previous_use_grid = _flag(previous.get('use_bilateral_grid', False))
+        previous_use_sparse = _flag(previous.get('use_sparse_depth', False))
+        record_use_grid = _flag(record['use_bilateral_grid'])
+        record_use_sparse = _flag(record['use_sparse_depth'])
+        if previous_use_grid != record_use_grid or previous_use_sparse != record_use_sparse:
+            raise RuntimeError('Experiment identity changed: use_bilateral_grid/use_sparse_depth')
     json_write(output/'dispatch.json',record)
     if dry_run:
         return record

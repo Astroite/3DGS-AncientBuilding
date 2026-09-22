@@ -284,7 +284,8 @@ class Studio:
 
     def settings(self):
         result=dict(steps=int(self.steps.get()),max_size=int(self.max_size.get()),sh_degree=int(self.degree.get()),
-                    photo_comp=self.photo.get(),checkpoint_every=int(self.checkpoint.get()))
+                    photo_comp=self.photo.get(),checkpoint_every=int(self.checkpoint.get()),
+                    use_bilateral_grid=True,use_sparse_depth=True)
         if result['steps']<1 or result['checkpoint_every']<1 or result['max_size']<0 or result['sh_degree'] not in range(4):
             raise ValueError('参数无效：步数与检查点间隔必须为正数，SH 为 0–3')
         return result

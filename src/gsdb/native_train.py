@@ -18,7 +18,9 @@ import torch.nn.functional as F
 
 from .manifests import canonical_hash
 from .media import sha256_file
+from .photometric import BilateralGrid
 from .ply import FLOAT_PROPERTIES, read_ply_header
+from .sparse_depth import load_sparse_depth
 from .training_data import json_write, validate_package
 
 
@@ -102,6 +104,39 @@ class PanoramaExposure(torch.nn.Module):
         return 1e-3*v.square().mean()+1e-3*smooth
 
 
+def select_photometric(photo_comp, use_bilateral_grid, num_groups, group_times):
+    """Three-way photometric routing: identity / BilateralGrid / PanoramaExposure."""
+    if not photo_comp:
+        return None
+    if use_bilateral_grid:
+        return BilateralGrid(num_groups)
+    return PanoramaExposure(group_times)
+
+
+def _historical_defaults(config: dict) -> dict:
+    """Absent or null bilateral/sparse fields mean the pre-flag trainer behavior."""
+    merged = dict(config)
+    for key, fallback in (
+        ('use_bilateral_grid', False),
+        ('use_sparse_depth', False),
+        ('sparse_depth_weight', 0.0),
+    ):
+        if merged.get(key) is None:
+            merged[key] = fallback
+    return merged
+
+
+def _configs_match(previous: dict, current: dict) -> bool:
+    keys = (
+        'package_sha256', 'steps', 'photo_comp', 'antialiased', 'sh_degree',
+        'seed', 'high_order_l2', 'checkpoint_every',
+        'use_bilateral_grid', 'use_sparse_depth', 'sparse_depth_weight',
+    )
+    left = _historical_defaults(previous)
+    right = _historical_defaults(current)
+    return all(left.get(key) == right.get(key) for key in keys)
+
+
 def export_ply(path: Path, params, sh_degree=3):
     count = len(params['means'])
     values = {k:v.detach().cpu().numpy() for k,v in params.items()}
@@ -136,14 +171,16 @@ def load_ply(path: Path, device='cuda'):
         shN=tensor([f'f_rest_{i}' for i in range(45)]).reshape(count,3,15).transpose(1,2).contiguous())
 
 
-def render(params, row, degree=3, antialiased=False):
+def render(params, row, degree=3, antialiased=False, with_depth=False):
     from gsplat import rasterization
     device = params['means'].device
+    render_mode = 'RGB+ED' if with_depth else 'RGB'
     return rasterization(means=params['means'],quats=params['quats'],scales=params['scales'].exp(),
         opacities=params['opacities'].sigmoid(),colors=torch.cat([params['sh0'],params['shN']],dim=1),
         viewmats=torch.tensor(row['world_to_camera'],dtype=torch.float32,device=device)[None],
         Ks=torch.tensor(row['K'],dtype=torch.float32,device=device)[None],width=row['width'],height=row['height'],
-        sh_degree=degree,packed=False,rasterize_mode='antialiased' if antialiased else 'classic')
+        sh_degree=degree,packed=False,rasterize_mode='antialiased' if antialiased else 'classic',
+        render_mode=render_mode)
 
 
 def load_observation(package, row, device='cuda'):
@@ -222,23 +259,45 @@ def evaluate(package, meta, params, output, antialiased=False):
     return result
 
 
+def sparse_depth_loss(rendered_depth, anchors, row_index):
+    """L1 on SfM depth anchors belonging to one training view."""
+    selected = anchors['row_index'] == row_index
+    if not np.any(selected):
+        return rendered_depth.sum() * 0.0, 0
+    width = rendered_depth.shape[1]
+    height = rendered_depth.shape[0]
+    u = np.clip(np.rint(anchors['u'][selected]).astype(np.int64), 0, width - 1)
+    v = np.clip(np.rint(anchors['v'][selected]).astype(np.int64), 0, height - 1)
+    target = torch.tensor(anchors['depth'][selected], device=rendered_depth.device, dtype=rendered_depth.dtype)
+    return (rendered_depth[v, u] - target).abs().mean(), int(selected.sum())
+
+
 def train(package, output, steps=None, photo_comp=True, resume=False, antialiased=False, checkpoint_every=1000,
-          observer=None, run_evaluation=True, sh_degree=3):
+          observer=None, run_evaluation=True, sh_degree=3, use_bilateral_grid=True, use_sparse_depth=True,
+          sparse_depth_weight=0.1):
     from gsplat import DefaultStrategy
     if not torch.cuda.is_available():
         raise RuntimeError('Native CUDA is unavailable')
     meta = validate_package(package)
     observations = [r for r in meta['images'] if r['split']=='train']
     steps = max(30000,30*len(observations)) if steps is None else steps
-    if steps<1 or checkpoint_every<1 or sh_degree not in (0,1,2,3):
+    if steps<1 or checkpoint_every<1 or sh_degree not in (0,1,2,3) or sparse_depth_weight<0:
         raise ValueError('Training and checkpoint budgets must be positive')
-    config = dict(schema_version=1,package_sha256=sha256_file(package/'dataset.json'),steps=steps,
-        photo_comp=photo_comp,antialiased=antialiased,sh_degree=sh_degree,seed=20260912,high_order_l2=1e-6,checkpoint_every=checkpoint_every)
+    anchors = load_sparse_depth(package) if use_sparse_depth else None
+    sparse_depth_status = 'enabled' if anchors is not None and len(anchors['depth']) else (
+        'unavailable' if use_sparse_depth else 'disabled')
+    if anchors is not None and not len(anchors['depth']):
+        sparse_depth_status = 'empty'
+    config = dict(schema_version=2,package_sha256=sha256_file(package/'dataset.json'),steps=steps,
+        photo_comp=photo_comp,antialiased=antialiased,sh_degree=sh_degree,seed=20260912,high_order_l2=1e-6,
+        checkpoint_every=checkpoint_every,use_bilateral_grid=bool(use_bilateral_grid),
+        use_sparse_depth=bool(use_sparse_depth),sparse_depth_weight=float(sparse_depth_weight),
+        sparse_depth_status=sparse_depth_status)
     output.mkdir(parents=True,exist_ok=True)
     checkpoint = output/'checkpoint.pt'
     if (output/'config.json').exists() and not resume:
         raise FileExistsError('Training output already exists; use --resume')
-    if (output/'config.json').exists() and json.loads((output/'config.json').read_text()) != config:
+    if (output/'config.json').exists() and not _configs_match(json.loads((output/'config.json').read_text()), config):
         raise RuntimeError('Checkpoint training configuration changed')
     if resume and not checkpoint.exists():
         raise RuntimeError('No recoverable checkpoint')
@@ -254,8 +313,14 @@ def train(package, output, steps=None, photo_comp=True, resume=False, antialiase
     groups = sorted({r['frame'] for r in observations})
     group_ids = {f:i for i,f in enumerate(groups)}
     group_times = [next(r['timestamp_seconds'] for r in observations if r['frame']==f) for f in groups]
-    exposure = PanoramaExposure(group_times).cuda()
-    exposure_optimizer = torch.optim.Adam(exposure.parameters(),lr=1e-3)
+    photometric = select_photometric(photo_comp, use_bilateral_grid, len(groups), group_times)
+    if photometric is not None:
+        photometric = photometric.cuda()
+    exposure_optimizer = (
+        torch.optim.Adam(photometric.parameters(), lr=1e-3) if photometric is not None else None
+    )
+    # Observation identity for sparse-depth rows recorded at package prepare time.
+    observation_row = {r['image']: index for index, r in enumerate(meta['images'])}
     scale = max(1.,len(observations)/1000)
     strategy = DefaultStrategy(refine_start_iter=500,refine_stop_iter=min(int(15000*scale),int(steps*0.75)),
         reset_every=max(3000,len(observations)+100),pause_refine_after_reset=len(observations))
@@ -271,8 +336,9 @@ def train(package, output, steps=None, photo_comp=True, resume=False, antialiase
             raise RuntimeError('Checkpoint identity mismatch')
         for k,opt in optimizers.items():
             opt.load_state_dict(saved['optimizers'][k])
-        exposure.load_state_dict(saved['exposure'])
-        exposure_optimizer.load_state_dict(saved['exposure_optimizer'])
+        if photometric is not None:
+            photometric.load_state_dict(saved.get('photometric', saved.get('exposure', {})))
+            exposure_optimizer.load_state_dict(saved.get('photometric_optimizer', saved.get('exposure_optimizer', {})))
         state,start = saved['strategy'],saved['step']
         torch.set_rng_state(saved['rng_cpu'].cpu())
         torch.cuda.set_rng_state_all([r.cpu() for r in saved['rng_cuda']])
@@ -282,7 +348,10 @@ def train(package, output, steps=None, photo_comp=True, resume=False, antialiase
         temp = checkpoint.with_suffix('.pt.tmp')
         torch.save(dict(config=config,step=step,params={k:v.detach() for k,v in params.items()},
             optimizers={k:o.state_dict() for k,o in optimizers.items()},strategy=state,
-            exposure=exposure.state_dict(),exposure_optimizer=exposure_optimizer.state_dict(),
+            photometric=photometric.state_dict() if photometric is not None else {},
+            photometric_optimizer=exposure_optimizer.state_dict() if exposure_optimizer is not None else {},
+            exposure=photometric.state_dict() if photometric is not None else {},
+            exposure_optimizer=exposure_optimizer.state_dict() if exposure_optimizer is not None else {},
             elapsed_seconds=elapsed_before+time.monotonic()-started,
             rng_cpu=torch.get_rng_state(),rng_cuda=torch.cuda.get_rng_state_all()),temp)
         temp.replace(checkpoint)
@@ -309,13 +378,24 @@ def train(package, output, steps=None, photo_comp=True, resume=False, antialiase
             row = observations[int(torch.randint(len(observations),(1,)))]
             target,keep = load_observation(package,row)
             degree = min(sh_degree,step//1000)
-            raw,alpha,info = render(params,row,degree,antialiased)
+            need_depth = anchors is not None and sparse_depth_status == 'enabled'
+            raw,alpha,info = render(params,row,degree,antialiased,with_depth=need_depth)
             strategy.step_pre_backward(params,optimizers,state,step,info)
-            pred = exposure(raw[0],group_ids[row['frame']]) if photo_comp else raw[0]
+            if need_depth:
+                rgb_raw, depth_raw = raw[0][..., :3], raw[0][..., 3]
+            else:
+                rgb_raw, depth_raw = raw[0], None
+            pred = photometric(rgb_raw,group_ids[row['frame']]) if photometric is not None else rgb_raw
             l1,ssim = masked_losses(pred,target,keep)
             loss = 0.8*l1+0.2*ssim+config['high_order_l2']*params['shN'].square().mean()
-            if photo_comp:
-                loss = loss+exposure.regularization()
+            if photometric is not None:
+                loss = loss+photometric.regularization()
+            depth_value = None
+            if need_depth and depth_raw is not None:
+                row_index = observation_row[row['image']]
+                depth_value, depth_count = sparse_depth_loss(depth_raw, anchors, row_index)
+                if depth_count:
+                    loss = loss + sparse_depth_weight * depth_value
             if not torch.isfinite(loss):
                 raise RuntimeError('Nonfinite training loss')
             loss.backward()
@@ -323,7 +403,7 @@ def train(package, output, steps=None, photo_comp=True, resume=False, antialiase
             for opt in optimizers.values():
                 opt.step()
                 opt.zero_grad(set_to_none=True)
-            if photo_comp:
+            if exposure_optimizer is not None:
                 exposure_optimizer.step()
                 exposure_optimizer.zero_grad(set_to_none=True)
             strategy.step_post_backward(params,optimizers,state,step,info)
@@ -381,16 +461,23 @@ def main():
     parser.add_argument('--output',required=True,type=Path)
     parser.add_argument('--steps',type=int)
     parser.add_argument('--no-photo-comp',action='store_true')
+    parser.add_argument('--use-bilateral-grid',action=argparse.BooleanOptionalAction,default=True)
+    parser.add_argument('--use-sparse-depth',action=argparse.BooleanOptionalAction,default=True)
+    parser.add_argument('--sparse-depth-weight',type=float,default=0.1)
     parser.add_argument('--resume',action='store_true')
     parser.add_argument('--evaluate-ply',type=Path)
     args = parser.parse_args()
     if args.steps is not None and args.steps<1:
         parser.error('steps must be positive')
+    if args.sparse_depth_weight < 0:
+        parser.error('sparse-depth-weight must be non-negative')
     if args.evaluate_ply:
         evaluate(args.dataset,validate_package(args.dataset),load_ply(args.evaluate_ply),args.output)
     else:
         try:
-            train(args.dataset,args.output,args.steps,not args.no_photo_comp,args.resume)
+            train(args.dataset,args.output,args.steps,not args.no_photo_comp,args.resume,
+                  use_bilateral_grid=args.use_bilateral_grid,use_sparse_depth=args.use_sparse_depth,
+                  sparse_depth_weight=args.sparse_depth_weight)
         except Exception as error:
             # Initialization can fail before the first checkpoint (notably OOM).
             # Preserve the immutable input/config as the explicit restart point.

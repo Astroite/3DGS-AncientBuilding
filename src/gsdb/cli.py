@@ -1218,6 +1218,8 @@ def train_segment(
     backend: Annotated[str, typer.Option(help="gsplat or postshot (ADC)")] = "postshot",
     steps: Annotated[int | None, typer.Option(min=1)] = None,
     photo_comp: Annotated[bool, typer.Option()] = True,
+    use_bilateral_grid: Annotated[bool, typer.Option(help="gsplat: Bilateral Grid photometric compensation")] = True,
+    use_sparse_depth: Annotated[bool, typer.Option(help="gsplat: COLMAP sparse-depth anchors")] = True,
     resume: Annotated[bool, typer.Option()] = False,
     dry_run: Annotated[bool, typer.Option(help="Prepare validated input and command without training")] = False,
     duration_seconds: Annotated[float | None, typer.Option(min=0.001,help="Earliest fully validated window within the segment")] = None,
@@ -1243,7 +1245,8 @@ def train_segment(
         run.metrics.setdefault('training_experiments',[]).append(experiment)
         save_run(scene,run)
         try:
-            result = train_package(package,output,backend,steps,photo_comp,resume,dry_run)
+            result = train_package(package,output,backend,steps,photo_comp,resume,dry_run,
+                use_bilateral_grid=use_bilateral_grid,use_sparse_depth=use_sparse_depth)
             experiment.update(result)
         except Exception as error:
             experiment.update(status='failed',error=str(error))
