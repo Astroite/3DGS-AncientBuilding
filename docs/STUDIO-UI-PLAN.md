@@ -1,4 +1,6 @@
-# GS Studio：UI 风格探索计划
+# GS-Studio：UI 风格探索计划（历史）
+
+> **历史探索计划。** 2026-09-13 用户已选 A，完整静态设计已通过评审，见 [设计交付](GS-Studio-Plan/design/specification-a/README.md)。现行全流程 GUI 规划见 [项目路线图](GS-STUDIO-PROJECT-ROADMAP.md)和[工程路线图](GS-STUDIO-ENGINEERING-ROADMAP.md)；本页后续的“尚未选定”仅指制定探索计划时的状态。
 
 ## 当前约束
 

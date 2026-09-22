@@ -1,6 +1,6 @@
 # Windows 360 重建工作手册
 
-本文件是 APP 唯一的日常操作手册。现行流程为 INSV / 标准全景 / 透视视频输入 → 候选抽帧 → RealityScan → 分段 QA → Postshot Splat ADC 或 Windows gsplat。脚本清单、环境偏离记录和不支持的历史形态见 [维护说明](MAINTENANCE.md)。
+本文件是 APP 唯一的日常操作手册。现行流程为 INSV / 标准全景 / 透视视频输入 → 候选抽帧 → RealityScan → 分段 QA → Postshot Splat ADC 或 Windows gsplat。脚本清单、环境偏离记录和不支持的历史形态见 [维护说明](MAINTENANCE.md)。产品方向是以 GUI 为日常入口的 GS-Studio，见[项目路线图](GS-STUDIO-PROJECT-ROADMAP.md)和[工程路线图](GS-STUDIO-ENGINEERING-ROADMAP.md)；路线图是规划，不取代本手册的实际命令。
 
 新 Run 使用下列默认，已有 Run 按原清单恢复。代码接入、短测试通过和最终画质验收分别记录，不互相替代。
 

@@ -45,3 +45,4 @@ tools/mediasdk-helper/**/*.exe
 sdks/
 # Compiled CUDA extension cache (gsplat csrc for sm_120), local build output.
 wheels/
+tests
