@@ -43,8 +43,9 @@ def _disposable(relative):
     if re.fullmatch(r'reconstruction-(?:primary|repair)/colmap/project\.rsproj\.data/.+', relative):
         return Path(relative).suffix.lower() not in {'.insv','.mp4','.mov','.mkv','.avi','.ply','.psht','.pt','.ckpt'}
     return bool(re.fullmatch(
-        r'(?:inputs/primary/[0-9a-f]{64}/frames|inputs/repair/frames|equirect-primary|equirect-repair)/frame_\d+\.jpg'
-        r'|(?:reconstruction-(?:primary|repair)|repair-new)/(?:images|masks)/view_\d+/frame_\d+\.jpg(?:\.png)?'
+        r'(?:inputs/primary/[0-9a-f]{64}/frames|inputs/repair/frames|frames-primary)/frame_\d+\.jpg'
+        # Panoramas stage as view_XX/; a perspective source is one frame per view.
+        r'|(?:reconstruction-(?:primary|repair)|repair-new)/(?:images|masks)/(?:view_\d+/)?frame_\d+\.jpg(?:\.png)?'
         r'|reconstruction-(?:primary|repair)/alignment-images/gsdb_\d+\.jpg(?:\.mask\.png)?'
         r'|reconstruction-(?:primary|repair)/colmap/project\.rsproj', relative))
 
@@ -65,8 +66,6 @@ def _validated_masks(dataset, run):
 def eligible_roots(work, run, checkpoint=False):
     """Only registered disposable directories; never glob arbitrary caches/projects."""
     roots, evidence, retained = [], {}, []
-    if run.config.schema_version != 6:
-        raise ValueError('Automatic retention/cleanup supports schema 6 only')
     if run.config.retention.mode == 'keep':
         return [], {}, ['retention.mode=keep']
     if run.active_stage and not (checkpoint and run.active_stage == 'reconstruct'):
@@ -81,7 +80,7 @@ def eligible_roots(work, run, checkpoint=False):
                 return [], {}, ['Awaiting primary mask finalization']
             _validated_masks(dataset, run)
         evidence['mask'] = 'validated final input inventory'
-        roots += [run.config.prepared_relative_path + '/frames', 'equirect-primary']
+        roots += [run.config.input_relative_path + '/frames', 'frames-primary']
     repair = work/'reconstruction-repair'
     repair_ready = (repair/'repair-input.json').is_file() and (
         (repair/'mask-final.json').is_file() or not json.loads((repair/'mask-filter.json').read_text(encoding='utf-8'))['accepted'])
@@ -90,7 +89,7 @@ def eligible_roots(work, run, checkpoint=False):
         retired_names = json.loads(retired.read_text(encoding='utf-8'))['attempts'] if retired.exists() else []
         if 'repair' not in retired_names:
             _validated_masks(repair, run)
-        roots += ['inputs/repair/frames', 'equirect-repair']
+        roots += ['inputs/repair/frames']
         evidence['repair'] = sha256_file(repair/'repair-input.json')
     if run.stages['reconstruct'].status.value == 'succeeded' and run.selected_dataset:
         from .segments import validate_segments
@@ -219,7 +218,7 @@ def _execute(work, destination, report, allowed):
 
 
 def auto_cleanup(scene, run, *, checkpoint=False):
-    if getattr(run.config, 'schema_version', 0) != 6 or run.config.retention.mode == 'keep':
+    if run.config.retention.mode == 'keep':
         return
     try:
         result = cleanup_run(scene, run, apply=True, checkpoint=checkpoint)

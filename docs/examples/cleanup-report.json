@@ -5,7 +5,7 @@
     "config_hash": "91ba1c438df68d7baa5b4533c8bdc3971923a91c2261d968b2c06fc2010af3a5",
     "roots": [
       "inputs/primary/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/frames",
-      "equirect-primary"
+      "frames-primary"
     ],
     "trigger": "verified downstream commit",
     "consumer_verification": {
@@ -13,7 +13,7 @@
     },
     "files": [
       {
-        "path": "equirect-primary/frame_000001.jpg",
+        "path": "frames-primary/frame_000001.jpg",
         "sha256": "dda18a0e21ae47c53b4309434cbc02ae8bf764fa83a6defbb719431242722aa7",
         "bytes": 9,
         "inode": [
@@ -49,7 +49,7 @@
     "config_hash": "91ba1c438df68d7baa5b4533c8bdc3971923a91c2261d968b2c06fc2010af3a5",
     "roots": [
       "inputs/primary/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/frames",
-      "equirect-primary"
+      "frames-primary"
     ],
     "trigger": "verified downstream commit",
     "consumer_verification": {
@@ -57,7 +57,7 @@
     },
     "files": [
       {
-        "path": "equirect-primary/frame_000001.jpg",
+        "path": "frames-primary/frame_000001.jpg",
         "sha256": "dda18a0e21ae47c53b4309434cbc02ae8bf764fa83a6defbb719431242722aa7",
         "bytes": 9,
         "inode": [

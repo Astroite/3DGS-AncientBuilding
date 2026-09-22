@@ -180,9 +180,9 @@ from importlib.metadata import version
 import torch
 import gsplat
 from gsplat import csrc
-assert torch.__version__.split('+')[0] == '2.1.2', 'Expected PyTorch 2.1.2'
-assert torch.version.cuda == '11.8', 'Expected CUDA 11.8 PyTorch build'
-assert version('gsplat').split('+')[0] == '1.4.0', 'Expected gsplat 1.4.0'
+assert torch.__version__.split('+')[0] == '2.9.1', 'Expected PyTorch 2.9.1'
+assert torch.version.cuda == '13.0', 'Expected CUDA 13.0 PyTorch build'
+assert version('gsplat').split('+')[0] == '1.5.3', 'Expected gsplat 1.5.3'
 assert torch.cuda.is_available(), 'CUDA unavailable in native training environment'
 means = torch.tensor([[0., 0., 3.]], device='cuda', requires_grad=True)
 quats = torch.tensor([[1., 0., 0., 0.]], device='cuda', requires_grad=True)

@@ -31,30 +31,22 @@ from pathlib import Path
 from typing import Any
 
 from .masking import image_files
-from .models import (
-    ReconstructionAttempt,
-    ReconstructionAttemptV4,
-    ReconstructionConfig,
-    ReconstructionConfigV3,
-    ReconstructionConfigV4,
-)
-from .paths import find_app_root, host_path, wsl_to_windows
+from .models import ReconstructionAttempt, ReconstructionConfig
+from .paths import find_app_root, host_path
 from .processes import run_logged
 from .reconstruction import (
     _recorded_cross_view_pairs,
     _selected_model_dir,
     _write_colmap_binary_model,
     attach_frame_masks,
-    excluded_images,
-    expected_planar_images,
     validate_frame_masks,
 )
 
 REALITYSCAN_CLI_ENV = "GSDB_REALITYSCAN_CLI"
 REALITYSCAN_EXPORT_PARAMS_ENV = "GSDB_REALITYSCAN_EXPORT_PARAMS"
 
-ReconstructionSettings = ReconstructionConfig | ReconstructionConfigV3 | ReconstructionConfigV4
-ReconstructionAttemptSettings = ReconstructionAttempt | ReconstructionAttemptV4
+ReconstructionSettings = ReconstructionConfig
+ReconstructionAttemptSettings = ReconstructionAttempt
 
 
 def realityscan_executable() -> Path:
@@ -101,7 +93,7 @@ def export_params_file() -> Path:
 
 def _windows_argument(path: Path) -> str:
     absolute = path.absolute().resolve(strict=False)
-    converted = wsl_to_windows(str(absolute))
+    converted = str(absolute)
     if os.name != "nt" and converted == str(absolute):
         raise RuntimeError(f"RealityScan paths must be Windows-accessible: {absolute}")
     if converted.startswith("\\\\"):
@@ -250,7 +242,7 @@ def realityscan_reconstruction_metrics(
     attempt: ReconstructionAttemptSettings,
     settings: ReconstructionSettings | None = None,
     *,
-    included_images: set[str] | None = None,
+    included_images: set[str],
     projected_image_count: int | None = None,
 ) -> dict[str, Any]:
     """Measure the single maximal component exported by RealityScan."""
@@ -273,26 +265,20 @@ def realityscan_reconstruction_metrics(
     registered_model = read_images_binary(model / "images.bin")
     registered_names = {image.name.replace("\\", "/") for image in registered_model.values()}
     registered = len(registered_names)
-    if included_images is None:
-        excluded = excluded_images(dataset)
-        expected = expected_planar_images(attempt) - len(excluded)
-        written = len(image_files(dataset / "images"))
-        excluded_count = len(excluded)
-    else:
-        normalized_included = {name.replace("\\", "/") for name in included_images}
-        unexpected = registered_names - normalized_included
-        if unexpected:
-            raise RuntimeError(
-                "RealityScan registered images outside the final inclusion manifest: "
-                + ", ".join(sorted(unexpected)[:5])
-            )
-        expected = len(normalized_included)
-        written = (
-            int(projected_image_count)
-            if projected_image_count is not None
-            else len(image_files(dataset / "images"))
+    normalized_included = {name.replace("\\", "/") for name in included_images}
+    unexpected = registered_names - normalized_included
+    if unexpected:
+        raise RuntimeError(
+            "RealityScan registered images outside the final inclusion manifest: "
+            + ", ".join(sorted(unexpected)[:5])
         )
-        excluded_count = max(0, written - expected)
+    expected = len(normalized_included)
+    written = (
+        int(projected_image_count)
+        if projected_image_count is not None
+        else len(image_files(dataset / "images"))
+    )
+    excluded_count = max(0, written - expected)
     registration_ratio = registered / expected if expected else 0.0
     return {
         "expected_planar_images": expected,
@@ -317,25 +303,19 @@ def run_realityscan_alignment(
     log_dir: Path,
     settings: ReconstructionSettings | None = None,
     *,
-    included_images: set[str] | None = None,
+    included_images: set[str],
     projected_image_count: int | None = None,
 ) -> dict[str, Any]:
-    """RealityScan-backed equivalent of reconstruction.run_masked_colmap().
+    """Align the masked views with RealityScan and export a binary COLMAP model.
 
-    Same contract, so pipeline.py's reconstruct_run() primary/fallback logic and
-    every downstream consumer (trajectory QA, postshot.py, mask-finalize) needs
-    only a one-line import swap, not a rewrite:
-      - same return dict shape (registration_ratio, largest_component_coverage, ...)
-      - writes dataset/colmap/selected-attempt.json in the same shape
-        _selected_model_dir() already parses
-      - lands a valid binary COLMAP model at that path
-      - produces dataset/transforms.json via the same nerfstudio colmap_to_json()
-        call run_masked_colmap() already makes
+    Returns the usual registration metrics, lands a valid model under
+    ``dataset/colmap`` (recorded via ``selected-attempt.json``, which
+    ``_selected_model_dir()`` parses) and produces ``dataset/transforms.json``
+    through nerfstudio's ``colmap_to_json``. ``included_images`` is the frozen
+    input inventory the alignment must not exceed.
     """
     transforms = dataset / "transforms.json"
     alignment_masks = bool(getattr(settings, "alignment_masks", False))
-    if alignment_masks and included_images is None:
-        raise RuntimeError("Masked alignment requires an explicit input inventory")
     if transforms.is_file():
         try:
             existing_metrics = realityscan_reconstruction_metrics(

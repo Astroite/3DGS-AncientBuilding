@@ -71,9 +71,9 @@ $RunId = [regex]::Match($RunLines[0], '^RUN_ID=(.+)$').Groups[1].Value
 $SceneRoot = Join-Path $DataRoot "$LocationId\$SceneId"
 $RunManifestPath = Join-Path $SceneRoot "$RunId\manifest.yaml"
 $PreparedMatch = Select-String -LiteralPath $RunManifestPath `
-    -Pattern '^\s*prepared_relative_path:\s*(.+?)\s*$'
+    -Pattern '^\s*input_relative_path:\s*(.+?)\s*$'
 if ($PreparedMatch.Count -ne 1) {
-    throw "Run manifest does not contain one prepared_relative_path: $RunManifestPath"
+    throw "Run manifest does not contain one input_relative_path: $RunManifestPath"
 }
 $PreparedRelative = $PreparedMatch.Matches[0].Groups[1].Value.Trim()
 $PreparedRelative = $PreparedRelative.Trim([char[]]@([char]39, [char]34))
@@ -95,7 +95,7 @@ if (
     $Manifest.integrity -ne 'complete' -or
     $Manifest.lineage.capture_id -ne $CaptureId -or
     [int]$Manifest.schema_version -ne 2 -or
-    [string]$Manifest.lineage.sampling.mode -ne 'fixed_rate_v1' -or
+    [string]$Manifest.lineage.sampling.mode -ne 'anchored_rate_v1' -or
     [double]$Manifest.lineage.sampling.candidate_fps -ne 5 -or
     $Manifest.lineage.source_kind -ne 'insta360_insv'
 ) {

@@ -11,6 +11,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 SLUG_PATTERN = r"^[a-z0-9]+(?:-[a-z0-9]+)*$"
 
+# One capture shape and one run shape. Historical run schemas are not read.
+CAPTURE_SCHEMA_VERSION = 2
+RUN_SCHEMA_VERSION = 6
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -77,51 +81,10 @@ class SceneManifest(StrictModel):
     notes: str | None = None
 
 
-class RawSource(StrictModel):
-    windows_path: str
-    immutable: bool = True
-    byte_size: int | None = None
-    sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-
-
-class StitchedVideo(StrictModel):
-    relative_path: str
-    sha256: str | None = None
-    byte_size: int | None = None
-    width: int | None = None
-    height: int | None = None
-    fps: float | None = None
-    duration_seconds: float | None = None
-    codec: str | None = None
-
-
 class Camera(StrictModel):
     make: str
     model: str
     firmware: str | None = None
-
-
-class SourceCharacteristics(StrictModel):
-    lens_streams: int | None = None
-    lens_resolution: str | None = None
-    stitched_resolution: str | None = None
-    fps: float | None = None
-    duration_seconds: float | None = None
-    codec: str | None = None
-    approximate_bitrate_mbps: float | None = None
-
-
-class ExportSettings(StrictModel):
-    projection: Literal["equirectangular"] = "equirectangular"
-    aspect_ratio: Literal["2:1"] = "2:1"
-    resolution: str
-    codec: str
-    color_space: str
-    bitrate: str
-    reframing: bool = False
-    ai_denoise: bool = False
-    sharpening: bool = False
-    stabilization: str = "standard"
 
 
 class TimeSelection(StrictModel):
@@ -133,28 +96,6 @@ class TimeSelection(StrictModel):
         if self.end_seconds <= self.start_seconds:
             raise ValueError("end_seconds must be greater than start_seconds")
         return self
-
-
-class CaptureManifest(StrictModel):
-    schema_version: Literal[1] = 1
-    id: str = Field(pattern=SLUG_PATTERN)
-    location_id: str = Field(pattern=SLUG_PATTERN)
-    scene_id: str = Field(pattern=SLUG_PATTERN)
-    status: RunStatus = RunStatus.DRAFT
-    raw_source: RawSource
-    stitched_video: StitchedVideo
-    camera: Camera
-    source_characteristics: SourceCharacteristics = Field(default_factory=SourceCharacteristics)
-    selection: TimeSelection
-    export_settings: ExportSettings
-    notes: str | None = None
-
-    @field_validator("stitched_video")
-    @classmethod
-    def validate_relative_video(cls, value: StitchedVideo) -> StitchedVideo:
-        if value.relative_path.startswith(("/", "\\")) or ":" in value.relative_path:
-            raise ValueError("stitched_video.relative_path must be relative to the scene directory")
-        return value
 
 
 class SourceFile(StrictModel):
@@ -177,45 +118,66 @@ class SourceProbe(StrictModel):
     sdk_version: str | None = None
 
 
-class PanoramaSource(StrictModel):
-    kind: Literal["equirect_video", "equirect_sequence", "insta360_insv"]
+VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+
+SOURCE_PROJECTIONS = {
+    "insta360_insv": "dual_fisheye",
+    "perspective_video": "perspective",
+}
+
+
+class CaptureSource(StrictModel):
+    """The registered raw media. Panorama kinds are projected into views; a
+    perspective_video source is used frame for frame."""
+
+    kind: Literal["equirect_video", "equirect_sequence", "insta360_insv", "perspective_video"]
     files: list[SourceFile] = Field(min_length=1)
-    projection: Literal["equirectangular", "dual_fisheye"]
+    projection: Literal["equirectangular", "dual_fisheye", "perspective"]
     probe: SourceProbe = Field(default_factory=SourceProbe)
 
+    @property
+    def is_perspective(self) -> bool:
+        return self.kind == "perspective_video"
+
     @model_validator(mode="after")
-    def validate_source_shape(self) -> "PanoramaSource":
+    def validate_source_shape(self) -> "CaptureSource":
         paths = [
             ntpath.normcase(ntpath.normpath(item.windows_path.replace("/", "\\")))
             for item in self.files
         ]
         if len(set(paths)) != len(paths):
             raise ValueError("source.files must list distinct paths explicitly")
-        if self.kind == "equirect_video" and len(self.files) != 1:
-            raise ValueError("equirect_video requires exactly one source file")
-        if self.kind == "insta360_insv" and len(self.files) not in (1, 2):
-            raise ValueError("insta360_insv requires one or two explicitly listed files")
         suffixes = {
             PureWindowsPath(item.windows_path.replace("/", "\\")).suffix.casefold()
             for item in self.files
         }
-        if self.kind == "equirect_video" and not suffixes.issubset(
-            {".mp4", ".mov", ".mkv", ".avi", ".webm"}
-        ):
-            raise ValueError("equirect_video source must use a supported video extension")
-        if self.kind == "equirect_sequence" and not suffixes.issubset(
-            {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
-        ):
-            raise ValueError("equirect_sequence source files must all be supported images")
-        if self.kind == "insta360_insv" and suffixes != {".insv"}:
-            raise ValueError("insta360_insv source files must all use the .insv extension")
-        expected = "dual_fisheye" if self.kind == "insta360_insv" else "equirectangular"
+        expected_suffixes = IMAGE_SUFFIXES if self.kind == "equirect_sequence" else (
+            {".insv"} if self.kind == "insta360_insv" else VIDEO_SUFFIXES
+        )
+        if not suffixes.issubset(expected_suffixes):
+            raise ValueError(f"{self.kind} source must use supported {sorted(expected_suffixes)} files")
+        limits = {
+            "equirect_video": (1, 1),
+            "perspective_video": (1, 1),
+            "equirect_sequence": (1, 100000),
+            "insta360_insv": (1, 2),
+        }[self.kind]
+        if not limits[0] <= len(self.files) <= limits[1]:
+            raise ValueError(f"{self.kind} requires between {limits[0]} and {limits[1]} source files")
+        expected = SOURCE_PROJECTIONS.get(self.kind, "equirectangular")
         if self.projection != expected:
             raise ValueError(f"{self.kind} source projection must be {expected}")
         return self
 
 
 class NormalizationSettings(StrictModel):
+    """Output size and stitching for prepared frames.
+
+    Panorama sources normalise to a 2:1 equirectangular frame; a perspective_video
+    source keeps its native dimensions and leaves width/height unset.
+    """
+
     projection: Literal["equirectangular"] = "equirectangular"
     aspect_ratio: Literal["2:1"] = "2:1"
     width: int | None = Field(default=None, gt=0)
@@ -238,42 +200,50 @@ class NormalizationSettings(StrictModel):
         return self
 
 
-class CaptureManifestV2(StrictModel):
-    schema_version: Literal[2] = 2
+class CaptureManifest(StrictModel):
+    schema_version: Literal[2] = CAPTURE_SCHEMA_VERSION
     id: str = Field(pattern=SLUG_PATTERN)
     location_id: str = Field(pattern=SLUG_PATTERN)
     scene_id: str = Field(pattern=SLUG_PATTERN)
     status: RunStatus = RunStatus.DRAFT
-    source: PanoramaSource
+    source: CaptureSource
     camera: Camera
     selection: TimeSelection
     normalization: NormalizationSettings = Field(default_factory=NormalizationSettings)
-    prepared_relative_path: str | None = None
+    # Focal prior for RealityScan only; the training intrinsics come from the
+    # exported COLMAP model.
+    horizontal_fov_degrees: float | None = Field(default=None, gt=0, lt=180)
     notes: str | None = None
 
-    @field_validator("prepared_relative_path")
-    @classmethod
-    def validate_prepared_path(cls, value: str | None) -> str | None:
-        if value is not None and (value.startswith(("/", "\\")) or ":" in value):
-            raise ValueError("prepared_relative_path must be relative to the scene directory")
-        return value
+    @model_validator(mode="after")
+    def validate_source_settings(self) -> "CaptureManifest":
+        if self.source.is_perspective:
+            if self.horizontal_fov_degrees is None:
+                raise ValueError("perspective_video requires horizontal_fov_degrees")
+            if self.normalization.width is not None:
+                raise ValueError(
+                    "perspective_video keeps the source frame size; normalization dimensions must be unset"
+                )
+        else:
+            if self.horizontal_fov_degrees is not None:
+                raise ValueError("horizontal_fov_degrees applies only to perspective_video")
+        return self
 
 
-class LegacyPreprocessConfigV1(StrictModel):
-    target_frames: int = Field(default=270, ge=2, le=5000)
-    jpeg_quality: int = Field(default=2, ge=1, le=31)
+class PreprocessConfig(StrictModel):
+    candidate_fps: float = Field(default=1.0, ge=1, le=120)
+    selected_per_second: int = Field(default=1, ge=1, le=120)
     minimum_free_gib: float = Field(default=20.0, ge=1)
 
 
-class PreprocessConfig(LegacyPreprocessConfigV1):
-    """Candidate-frame extraction settings for schema v2 runs."""
-
-
-class PreprocessConfigV3(StrictModel):
-    """Prepared-input controls; JPEG encoding lives in normalization."""
-
-    target_frames: int = Field(default=270, ge=2, le=5000)
-    minimum_free_gib: float = Field(default=20.0, ge=1)
+COCO_DYNAMIC_CLASS_IDS = {
+    "person": 1,
+    "bicycle": 2,
+    "car": 3,
+    "motorcycle": 4,
+    "bus": 6,
+    "truck": 8,
+}
 
 
 class MaskingConfig(StrictModel):
@@ -287,8 +257,12 @@ class MaskingConfig(StrictModel):
     inference_gamma: float = Field(default=0.75, gt=0, le=2)
     dilation_pixels: int = Field(default=24, ge=0, le=256)
     closing_pixels: int = Field(default=7, ge=0, le=255)
-    max_masked_fraction: float = Field(default=0.45, gt=0, lt=1)
-    qa_sample_count: int = Field(default=32, ge=1, le=256)
+    mask_discard_threshold: float = Field(default=0.005, gt=0, lt=1)
+    qa_sample_count: int = Field(default=16, ge=1, le=256)
+    classes: list[Literal["person", "car", "bus", "truck", "bicycle", "motorcycle"]] = Field(
+        default_factory=lambda: ["person"], min_length=1
+    )
+    mask_review_required: bool = False
 
     @field_validator("closing_pixels")
     @classmethod
@@ -296,22 +270,6 @@ class MaskingConfig(StrictModel):
         if value not in (0, 1) and value % 2 == 0:
             raise ValueError("closing_pixels must be odd (or 0/1 to disable closing)")
         return value
-
-
-COCO_DYNAMIC_CLASS_IDS = {
-    "person": 1,
-    "bicycle": 2,
-    "car": 3,
-    "motorcycle": 4,
-    "bus": 6,
-    "truck": 8,
-}
-
-
-class MaskingConfigV3(MaskingConfig):
-    classes: list[Literal["person", "car", "bus", "truck", "bicycle", "motorcycle"]] = Field(
-        default_factory=lambda: ["person"], min_length=1
-    )
 
     @field_validator("classes")
     @classmethod
@@ -334,353 +292,56 @@ class VisionQAConfig(StrictModel):
     minimum_confidence: float = Field(default=0.80, ge=0, le=1)
 
 
-class LegacyReconstructionAttemptV1(StrictModel):
-    frame_count: int
-    images_per_equirect: Literal[8, 14]
-    crop_bottom: float = Field(ge=0, lt=0.5)
-    matching_method: Literal["sequential"] = "sequential"
-    # No longer read by the pipeline (the downscale pyramid it configured was
-    # removed as dead weight under RealityScan+Postshot). Kept only so existing
-    # runs' persisted manifests -- which already serialized this field -- still
-    # deserialize under StrictModel's extra="forbid".
-    num_downscales: int = Field(default=2, ge=0, le=4)
-
-
-class LegacyReconstructionConfigV1(StrictModel):
-    registration_threshold: float = Field(default=0.70, gt=0, le=1)
-    primary: LegacyReconstructionAttemptV1 = Field(
-        default_factory=lambda: LegacyReconstructionAttemptV1(
-            frame_count=270, images_per_equirect=8, crop_bottom=0.20
-        )
-    )
-    fallback: LegacyReconstructionAttemptV1 = Field(
-        default_factory=lambda: LegacyReconstructionAttemptV1(
-            frame_count=180, images_per_equirect=14, crop_bottom=0.15
-        )
-    )
-
-
-class LegacyTrainConfigV1(StrictModel):
-    method: Literal["splatfacto"] = "splatfacto"
-    max_iterations: int = Field(default=30_000, ge=1000)
-    oom_retry_downscale: int = Field(default=2, ge=2, le=8)
-
-
-class LegacyRunConfigV1(StrictModel):
-    """Exact schema used by existing runs; intentionally has no version field.
-
-    Keeping this shape separate prevents v2 defaults from entering a historical
-    run's canonical serialization and changing its immutable config hash.
-    """
-
-    capture_id: str = Field(pattern=SLUG_PATTERN)
-    input_sha256: str
-    preprocess: LegacyPreprocessConfigV1 = Field(default_factory=LegacyPreprocessConfigV1)
-    masking: MaskingConfig = Field(default_factory=MaskingConfig)
-    vision_qa: VisionQAConfig = Field(default_factory=VisionQAConfig)
-    reconstruction: LegacyReconstructionConfigV1 = Field(
-        default_factory=LegacyReconstructionConfigV1
-    )
-    train: LegacyTrainConfigV1 = Field(default_factory=LegacyTrainConfigV1)
-
-
-class ReconstructionAttempt(StrictModel):
-    frame_count: int = Field(ge=2, le=5000)
-    images_per_equirect: Literal[8, 14]
-    projection_fov_degrees: float = Field(gt=0, lt=180)
-    projection_size: int = Field(ge=256, le=8192)
-    crop_bottom: float = Field(ge=0, lt=0.5)
-    use_rig: bool = True
-    matching_method: Literal["sequential"] = "sequential"
-    # No longer read by the pipeline (the downscale pyramid it configured was
-    # removed as dead weight under RealityScan+Postshot). Kept only so existing
-    # runs' persisted manifests -- which already serialized this field -- still
-    # deserialize under StrictModel's extra="forbid".
-    num_downscales: int = Field(default=2, ge=0, le=4)
-
-
-class ReconstructionConfig(StrictModel):
-    use_gpu_sift: bool = True
-    gpu_index: int = Field(default=0, ge=0)
-    fix_intrinsics: bool = True
-    registration_threshold: float = Field(default=0.70, gt=0, le=1)
-    rig_center_spread_ratio_limit: float = Field(default=0.001, gt=0, le=0.1)
-    primary: ReconstructionAttempt = Field(
-        default_factory=lambda: ReconstructionAttempt(
-            frame_count=135,
-            images_per_equirect=8,
-            projection_fov_degrees=120.0,
-            projection_size=2048,
-            crop_bottom=0.20,
-        )
-    )
-    fallback: ReconstructionAttempt = Field(
-        default_factory=lambda: ReconstructionAttempt(
-            frame_count=180,
-            images_per_equirect=14,
-            projection_fov_degrees=110.0,
-            projection_size=1746,
-            crop_bottom=0.15,
-        )
-    )
-
-
 class LoopClosureConfig(StrictModel):
     enabled: bool = False
     period: int = Field(default=20, ge=1)
     num_images: int = Field(default=5, ge=1)
     vocabulary_tree_path: str | None = None
-    vocabulary_tree_sha256: str | None = Field(
-        default=None, pattern=r"^[0-9a-f]{64}$"
-    )
+    vocabulary_tree_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def require_vocabulary_tree(self) -> "LoopClosureConfig":
         if self.enabled and not self.vocabulary_tree_path:
-            raise ValueError(
-                "loop closure requires an explicit vocabulary_tree_path"
-            )
+            raise ValueError("loop closure requires an explicit vocabulary_tree_path")
         return self
 
 
-class ReconstructionConfigV3(ReconstructionConfig):
-    loop_closure: LoopClosureConfig = Field(default_factory=LoopClosureConfig)
+class PanoramaProjection(StrictModel):
+    """How one prepared panorama becomes training views."""
 
-
-class TrainConfig(StrictModel):
-    method: Literal["splatfacto-big"] = "splatfacto-big"
-    max_iterations: int = Field(default=100_000, ge=1000)
-    downscale_factor: int = Field(default=1, ge=1, le=8)
-    oom_retry_downscale: int = Field(default=2, ge=2, le=8)
-    cache_images: Literal["cpu"] = "cpu"
-    cache_images_type: Literal["uint8"] = "uint8"
-    use_scale_regularization: bool = True
-    rasterize_mode: Literal["classic"] = "classic"
-    camera_optimizer_mode: Literal["SO3xR3"] = "SO3xR3"
-    use_bilateral_grid: bool = True
-
-
-class RunExportConfig(StrictModel):
-    ply_axis: Literal["y_up"] = "y_up"
-
-
-class RunConfig(StrictModel):
-    schema_version: Literal[2] = 2
-    capture_id: str = Field(pattern=SLUG_PATTERN)
-    input_sha256: str
-    preprocess: PreprocessConfig = Field(default_factory=PreprocessConfig)
-    masking: MaskingConfig = Field(
-        default_factory=lambda: MaskingConfig(qa_sample_count=16)
-    )
-    vision_qa: VisionQAConfig = Field(default_factory=VisionQAConfig)
-    reconstruction: ReconstructionConfig = Field(default_factory=ReconstructionConfig)
-    train: TrainConfig = Field(default_factory=TrainConfig)
-    export: RunExportConfig = Field(default_factory=RunExportConfig)
-
-    @model_validator(mode="after")
-    def validate_reconstruction_subsets(self) -> "RunConfig":
-        for label, attempt in (
-            ("primary", self.reconstruction.primary),
-            ("fallback", self.reconstruction.fallback),
-        ):
-            if attempt.frame_count > self.preprocess.target_frames:
-                raise ValueError(
-                    f"reconstruction.{label}.frame_count cannot exceed "
-                    "preprocess.target_frames"
-                )
-        return self
-
-
-class PreparedInputConfig(StrictModel):
-    source_kind: Literal["equirect_video", "equirect_sequence", "insta360_insv"]
-    source_sha256: list[str] = Field(min_length=1)
-    source_probe: SourceProbe
-    normalization: NormalizationSettings
-    selection: TimeSelection
-    candidate_frame_indices: list[int] = Field(min_length=2)
-    helper_version: str | None = None
-    sdk_version: str | None = None
-
-
-class FrameSelectionConfig(StrictModel):
-    algorithm: Literal["time_bucket_composite_v1"] = "time_bucket_composite_v1"
-    gaussian_kernel: Literal[3] = 3
-    sharpness_metric: Literal["tenengrad"] = "tenengrad"
-    sharpness_weight: Literal[0.70] = 0.70
-    black_fraction_inverse_weight: Literal[0.15] = 0.15
-    highlight_fraction_inverse_weight: Literal[0.15] = 0.15
-    tie_break: Literal["earlier_frame"] = "earlier_frame"
-
-
-class RunConfigV3(StrictModel):
-    schema_version: Literal[3] = 3
-    capture_id: str = Field(pattern=SLUG_PATTERN)
-    input_dataset_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    prepared_relative_path: str
-    input: PreparedInputConfig
-    frame_selection: FrameSelectionConfig = Field(default_factory=FrameSelectionConfig)
-    preprocess: PreprocessConfigV3 = Field(default_factory=PreprocessConfigV3)
-    masking: MaskingConfigV3 = Field(
-        default_factory=lambda: MaskingConfigV3(qa_sample_count=16)
-    )
-    vision_qa: VisionQAConfig = Field(default_factory=VisionQAConfig)
-    reconstruction: ReconstructionConfigV3 = Field(default_factory=ReconstructionConfigV3)
-    train: TrainConfig = Field(default_factory=TrainConfig)
-    export: RunExportConfig = Field(default_factory=RunExportConfig)
-
-    @field_validator("prepared_relative_path")
-    @classmethod
-    def validate_prepared_relative_path(cls, value: str) -> str:
-        if value.startswith(("/", "\\")) or ":" in value:
-            raise ValueError("prepared_relative_path must be relative to the scene directory")
-        return value
-
-    @model_validator(mode="after")
-    def validate_reconstruction_subsets(self) -> "RunConfigV3":
-        if len(self.input.candidate_frame_indices) != self.preprocess.target_frames:
-            raise ValueError(
-                "input candidate_frame_indices must match preprocess.target_frames"
-            )
-        for label, attempt in (
-            ("primary", self.reconstruction.primary),
-            ("fallback", self.reconstruction.fallback),
-        ):
-            if attempt.frame_count > self.preprocess.target_frames:
-                raise ValueError(
-                    f"reconstruction.{label}.frame_count cannot exceed "
-                    "preprocess.target_frames"
-                )
-        return self
-
-
-class PreparedInputConfigV2(StrictModel):
-    """Rate-sampled prepared input used by schema-v4 runs."""
-
-    source_kind: Literal["equirect_video", "equirect_sequence", "insta360_insv"]
-    source_sha256: list[str] = Field(min_length=1)
-    source_probe: SourceProbe
-    normalization: NormalizationSettings
-    selection: TimeSelection
-    candidate_frame_indices: list[int] = Field(min_length=2)
-    candidate_fps: float = Field(default=5.0, gt=0, le=120)
-    helper_version: str | None = None
-    sdk_version: str | None = None
-
-
-class PreprocessConfigV4(StrictModel):
-    candidate_fps: float = Field(default=5.0, gt=0, le=120)
-    selected_per_second: int = Field(default=2, ge=1, le=120)
-    minimum_free_gib: float = Field(default=20.0, ge=1)
-
-
-class MaskingConfigV4(StrictModel):
-    enabled: bool = True
-    model: Literal["maskrcnn_resnet50_fpn_v2"] = "maskrcnn_resnet50_fpn_v2"
-    weights: Literal["DEFAULT"] = "DEFAULT"
-    device: Literal["cuda", "cpu"] = "cuda"
-    person_class_id: int = 1
-    score_threshold: float = Field(default=0.25, ge=0, le=1)
-    probability_threshold: float = Field(default=0.50, ge=0, le=1)
-    inference_gamma: float = Field(default=0.75, gt=0, le=2)
-    dilation_pixels: int = Field(default=24, ge=0, le=256)
-    closing_pixels: int = Field(default=7, ge=0, le=255)
-    mask_discard_threshold: float = Field(default=0.05, gt=0, lt=1)
-    qa_sample_count: int = Field(default=16, ge=1, le=256)
-    classes: list[Literal["person", "car", "bus", "truck", "bicycle", "motorcycle"]] = Field(
-        default_factory=lambda: ["person"], min_length=1
-    )
-    mask_review_required: bool = False
-
-    @field_validator("closing_pixels")
-    @classmethod
-    def validate_closing_kernel(cls, value: int) -> int:
-        if value not in (0, 1) and value % 2 == 0:
-            raise ValueError("closing_pixels must be odd (or 0/1 to disable closing)")
-        return value
-
-    @field_validator("classes")
-    @classmethod
-    def validate_unique_classes(cls, value: list[str]) -> list[str]:
-        if len(set(value)) != len(value):
-            raise ValueError("masking classes must be unique")
-        return value
-
-
-class ReconstructionAttemptV4(StrictModel):
-    temporal_rank_limit: int = Field(ge=1, le=120)
-    images_per_equirect: Literal[8, 14]
-    projection_fov_degrees: float = Field(gt=0, lt=180)
-    projection_size: int = Field(ge=256, le=8192)
+    views: Literal[8, 14]
+    size: int = Field(ge=256, le=8192)
     crop_bottom: float = Field(ge=0, lt=0.5)
-    use_rig: bool = True
-    matching_method: Literal["sequential"] = "sequential"
 
 
-class ReconstructionConfigV4(StrictModel):
+class ReconstructionAttempt(StrictModel):
+    temporal_rank_limit: int = Field(ge=1, le=120)
+    # Equirect sources: horizontal FOV of each projected view. Perspective
+    # sources: the capture's horizontal FOV, used as the RealityScan prior.
+    projection_fov_degrees: float = Field(gt=0, lt=180)
+    # None means the prepared frames are already the training views
+    # (perspective_video): one frame is one view.
+    panorama: PanoramaProjection | None = None
+
+
+class ReconstructionConfig(StrictModel):
     use_gpu_sift: bool = True
-    gpu_index: int = Field(default=0, ge=0)
     fix_intrinsics: bool = True
     registration_threshold: float = Field(default=0.70, gt=0, le=1)
     rig_center_spread_ratio_limit: float = Field(default=0.001, gt=0, le=0.1)
-    primary: ReconstructionAttemptV4 = Field(
-        default_factory=lambda: ReconstructionAttemptV4(
+    alignment_masks: bool = True
+    primary: ReconstructionAttempt = Field(
+        default_factory=lambda: ReconstructionAttempt(
             temporal_rank_limit=1,
-            images_per_equirect=8,
-            projection_fov_degrees=120.0,
-            projection_size=2048,
-            crop_bottom=0.20,
-        )
-    )
-    fallback: ReconstructionAttemptV4 = Field(
-        default_factory=lambda: ReconstructionAttemptV4(
-            temporal_rank_limit=2,
-            images_per_equirect=14,
             projection_fov_degrees=110.0,
-            projection_size=1746,
-            crop_bottom=0.15,
+            panorama=PanoramaProjection(views=14, size=1746, crop_bottom=0.15),
         )
     )
+    # One bounded local repair round after the primary alignment.
+    repair_padding_seconds: float = Field(default=2.0, ge=0)
+    repair_attempts: Literal[1] = 1
+    repair_candidate_fps: float = Field(default=2.0, ge=1, le=120)
     loop_closure: LoopClosureConfig = Field(default_factory=LoopClosureConfig)
-
-
-class RunConfigV4(StrictModel):
-    schema_version: Literal[4] = 4
-    capture_id: str = Field(pattern=SLUG_PATTERN)
-    input_dataset_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    prepared_relative_path: str
-    input: PreparedInputConfigV2
-    frame_selection: FrameSelectionConfig = Field(default_factory=FrameSelectionConfig)
-    preprocess: PreprocessConfigV4 = Field(default_factory=PreprocessConfigV4)
-    masking: MaskingConfigV4 = Field(default_factory=MaskingConfigV4)
-    vision_qa: VisionQAConfig = Field(default_factory=VisionQAConfig)
-    reconstruction: ReconstructionConfigV4 = Field(default_factory=ReconstructionConfigV4)
-    train: TrainConfig = Field(default_factory=TrainConfig)
-    export: RunExportConfig = Field(default_factory=RunExportConfig)
-
-    @field_validator("prepared_relative_path")
-    @classmethod
-    def validate_prepared_relative_path(cls, value: str) -> str:
-        if value.startswith(("/", "\\")) or ":" in value:
-            raise ValueError("prepared_relative_path must be relative to the scene directory")
-        return value
-
-    @model_validator(mode="after")
-    def validate_temporal_sampling(self) -> "RunConfigV4":
-        selected = self.preprocess.selected_per_second
-        primary = self.reconstruction.primary.temporal_rank_limit
-        fallback = self.reconstruction.fallback.temporal_rank_limit
-        if not 1 <= primary <= fallback <= selected <= self.preprocess.candidate_fps:
-            raise ValueError(
-                "temporal sampling requires 1 <= primary <= fallback <= "
-                "selected_per_second <= candidate_fps"
-            )
-        if abs(self.input.candidate_fps - self.preprocess.candidate_fps) > 1e-9:
-            raise ValueError("prepared input candidate_fps must match preprocess.candidate_fps")
-        if self.reconstruction.primary.images_per_equirect != 8:
-            raise ValueError("RunConfigV4 Primary must use 8 views per panorama")
-        if self.reconstruction.fallback.images_per_equirect != 14:
-            raise ValueError("RunConfigV4 Fallback must use 14 views per panorama")
-        return self
 
 
 class SegmentQAConfig(StrictModel):
@@ -693,82 +354,60 @@ class SegmentQAConfig(StrictModel):
     center_spread_step_ratio: float = Field(default=3.0, gt=0)
 
 
-class ReconstructionConfigV5(ReconstructionConfigV4):
-    primary: ReconstructionAttemptV4 = Field(default_factory=lambda: ReconstructionAttemptV4(
-        temporal_rank_limit=2, images_per_equirect=14, projection_fov_degrees=110,
-        projection_size=1746, crop_bottom=0.15, use_rig=False,
-    ))
-    fallback: ReconstructionAttemptV4 = Field(default_factory=lambda: ReconstructionAttemptV4(
-        temporal_rank_limit=2, images_per_equirect=14, projection_fov_degrees=110,
-        projection_size=1746, crop_bottom=0.15, use_rig=False,
-    ))
-    alignment_masks: bool = True
-    repair_padding_seconds: float = Field(default=2.0, ge=0)
-    repair_attempts: Literal[1] = 1
-
-
-class RunConfigV5(RunConfigV4):
-    schema_version: Literal[5] = 5
-    reconstruction: ReconstructionConfigV5 = Field(default_factory=ReconstructionConfigV5)
-    masking: MaskingConfigV4 = Field(default_factory=lambda: MaskingConfigV4(mask_discard_threshold=0.005))
-    segment_qa: SegmentQAConfig = Field(default_factory=SegmentQAConfig)
-
-    @model_validator(mode="after")
-    def validate_temporal_sampling(self) -> "RunConfigV5":
-        if not 1 <= self.reconstruction.primary.temporal_rank_limit <= self.preprocess.selected_per_second <= self.preprocess.candidate_fps:
-            raise ValueError("primary ranks <= selected_per_second <= candidate_fps required")
-        if abs(self.input.candidate_fps - self.preprocess.candidate_fps) > 1e-9:
-            raise ValueError("prepared input candidate_fps must match preprocess.candidate_fps")
-        if self.reconstruction.primary.use_rig or self.reconstruction.fallback.use_rig:
-            raise ValueError("RealityScan rig constraints are not implemented")
-        return self
-
-
 class RetentionConfig(StrictModel):
     mode: Literal["minimal", "keep"] = "minimal"
 
 
-class PreprocessConfigV6(PreprocessConfigV4):
-    candidate_fps: float = Field(default=1.0, ge=1, le=120)
-    selected_per_second: int = Field(default=1, ge=1, le=120)
+class PreparedInputConfig(StrictModel):
+    """Rate-sampled candidate frames prepared from the capture sources."""
+
+    source_kind: Literal["equirect_video", "equirect_sequence", "insta360_insv", "perspective_video"]
+    source_sha256: list[str] = Field(min_length=1)
+    source_probe: SourceProbe
+    normalization: NormalizationSettings
+    selection: TimeSelection
+    candidate_frame_indices: list[int] = Field(min_length=2)
+    candidate_fps: float = Field(default=1.0, gt=0, le=120)
+    helper_version: str | None = None
+    sdk_version: str | None = None
 
 
-class ReconstructionConfigV6(ReconstructionConfigV5):
-    primary: ReconstructionAttemptV4 = Field(default_factory=lambda: ReconstructionAttemptV4(
-        temporal_rank_limit=1, images_per_equirect=14, projection_fov_degrees=110,
-        projection_size=1746, crop_bottom=0.15, use_rig=False,
-    ))
-    fallback: ReconstructionAttemptV4 = Field(default_factory=lambda: ReconstructionAttemptV4(
-        temporal_rank_limit=1, images_per_equirect=14, projection_fov_degrees=110,
-        projection_size=1746, crop_bottom=0.15, use_rig=False,
-    ))
-    repair_candidate_fps: float = Field(default=2.0, ge=1, le=120)
-
-
-class RunConfigV6(RunConfigV5):
-    schema_version: Literal[6] = 6
-    # Unlike schemas 3-5, this path is relative to this Run, never shared.
-    preprocess: PreprocessConfigV6 = Field(default_factory=PreprocessConfigV6)
-    reconstruction: ReconstructionConfigV6 = Field(default_factory=ReconstructionConfigV6)
+class RunConfig(StrictModel):
+    schema_version: Literal[6] = RUN_SCHEMA_VERSION
+    capture_id: str = Field(pattern=SLUG_PATTERN)
+    input_dataset_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    # Run-owned candidates, never Capture-shared: inputs/primary/<preparation hash>.
+    input_relative_path: str
+    input: PreparedInputConfig
+    preprocess: PreprocessConfig = Field(default_factory=PreprocessConfig)
+    masking: MaskingConfig = Field(default_factory=MaskingConfig)
+    vision_qa: VisionQAConfig = Field(default_factory=VisionQAConfig)
+    reconstruction: ReconstructionConfig = Field(default_factory=ReconstructionConfig)
+    segment_qa: SegmentQAConfig = Field(default_factory=SegmentQAConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
 
-    @model_validator(mode="before")
-    @classmethod
-    def default_input_rate(cls, value):
-        if isinstance(value, dict) and isinstance(value.get('input'), dict):
-            value = {**value, 'input': {'candidate_fps': 1.0, **value['input']}}
-        return value
-
-    @field_validator("prepared_relative_path")
+    @field_validator("input_relative_path")
     @classmethod
     def validate_owned_input(cls, value: str) -> str:
         from pathlib import PurePosixPath
+
         parts = PurePosixPath(value.replace("\\", "/")).parts
         if len(parts) != 3 or parts[:2] != ("inputs", "primary") or len(parts[2]) != 64:
-            raise ValueError("Schema 6 prepared input must be inputs/primary/<preparation hash>")
-        if any(c not in '0123456789abcdef' for c in parts[2]):
+            raise ValueError("Run input must live at inputs/primary/<preparation hash>")
+        if any(character not in "0123456789abcdef" for character in parts[2]):
             raise ValueError("Invalid preparation hash")
-        return '/'.join(parts)
+        return "/".join(parts)
+
+    @model_validator(mode="after")
+    def validate_temporal_sampling(self) -> "RunConfig":
+        primary = self.reconstruction.primary.temporal_rank_limit
+        if not 1 <= primary <= self.preprocess.selected_per_second <= self.preprocess.candidate_fps:
+            raise ValueError(
+                "temporal sampling requires 1 <= primary <= selected_per_second <= candidate_fps"
+            )
+        if abs(self.input.candidate_fps - self.preprocess.candidate_fps) > 1e-9:
+            raise ValueError("prepared input candidate_fps must match preprocess.candidate_fps")
+        return self
 
 
 class StageRecord(StrictModel):
@@ -780,27 +419,11 @@ class StageRecord(StrictModel):
     log_path: str | None = None
 
 
-class ArtifactRecord(StrictModel):
-    kind: str
-    relative_path: str
-    sha256: str
-    byte_size: int
-    version: str
+STAGES = ("preprocess", "mask", "reconstruct", "qa")
 
 
 def default_stages() -> dict[str, StageRecord]:
-    return {
-        name: StageRecord()
-        for name in (
-            "preprocess",
-            "mask",
-            "reconstruct",
-            "postshot_prepare",
-            "train",
-            "export",
-            "qa",
-        )
-    }
+    return {name: StageRecord() for name in STAGES}
 
 
 class RunManifest(StrictModel):
@@ -810,30 +433,16 @@ class RunManifest(StrictModel):
     scene_id: str = Field(pattern=SLUG_PATTERN)
     status: RunStatus = RunStatus.DRAFT
     config_hash: str
-    config: LegacyRunConfigV1 | RunConfig | RunConfigV3 | RunConfigV4 | RunConfigV5 | RunConfigV6
+    config: RunConfig
     created_at: datetime
     updated_at: datetime
     active_stage: str | None = None
     stages: dict[str, StageRecord] = Field(default_factory=default_stages)
     tool_versions: dict[str, str] = Field(default_factory=dict)
     metrics: dict[str, Any] = Field(default_factory=dict)
+    # Reconstruction dataset this run trains from: reconstruction-primary|repair.
     selected_dataset: str | None = None
-    fallback_attempted: bool = False
-    artifacts: list[ArtifactRecord] = Field(default_factory=list)
     review_notes: str | None = None
-
-
-class ArtifactManifest(StrictModel):
-    schema_version: Literal[1] = 1
-    location_id: str
-    scene_id: str
-    run_id: str
-    version: str
-    status: RunStatus
-    metric_scale: bool = False
-    generated_at: datetime
-    artifacts: list[ArtifactRecord]
-    qa_metrics: dict[str, Any] = Field(default_factory=dict)
 
 
 def utc_now() -> datetime:

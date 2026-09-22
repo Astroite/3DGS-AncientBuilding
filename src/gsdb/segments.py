@@ -54,10 +54,16 @@ def analyze_segments(frames: list[dict], records: list[dict], included: set[str]
         if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-4) or np.linalg.det(rotation) < 0.99:
             raise ValueError(f'Invalid pose rotation: {name}')
         view = re.search(r'view_(\d+)', name)
-        if not view or int(view[1]) >= len(view_rotations):
+        if view:
+            if int(view[1]) >= len(view_rotations):
+                raise ValueError(f'Unknown projection view: {name}')
+            # transforms.json uses OpenGL camera axes; remove the virtual lens rotation.
+            rig_rotation = rotation @ np.diag([1.,-1.,-1.]) @ view_rotations[int(view[1])].T
+        elif view_rotations:
             raise ValueError(f'Unknown projection view: {name}')
-        # transforms.json uses OpenGL camera axes; remove the virtual lens rotation.
-        rig_rotation = rotation @ np.diag([1.,-1.,-1.]) @ view_rotations[int(view[1])].T
+        else:
+            # A perspective source registers each frame under its own name.
+            rig_rotation = rotation
         groups[f].append((name, matrix[:3,3], rig_rotation))
     samples = []
     for f, poses in sorted(groups.items()):
@@ -167,7 +173,8 @@ def segment_report(dataset: Path, records: list[dict], included: set[str], attem
                    settings: SegmentQAConfig | None = None) -> dict:
     transforms = dataset / 'transforms.json'
     payload = json.loads(transforms.read_text(encoding='utf-8'))
-    rotations = [projection_world_from_camera(yaw,pitch) for yaw,pitch in projection_view_specs(attempt)]
+    rotations = ([projection_world_from_camera(yaw, pitch)
+                  for yaw, pitch in projection_view_specs(attempt)] if attempt.panorama else [])
     report = analyze_segments(payload['frames'], records, included, settings or SegmentQAConfig(), rotations)
     report['lineage'] = dict(transforms_sha256=sha256_file(transforms),
         records_sha256=canonical_hash(records), included_sha256=canonical_hash(sorted(included)),
@@ -199,32 +206,8 @@ def validate_segments(dataset: Path, records: list[dict], included: set[str], at
     return saved
 
 
-def repair_records(candidates: list[dict], selected: list[dict], report: dict, padding: float = 2.) -> list[dict]:
-    """Select bounded local additions, preserving every existing sample's source identity."""
-    windows = []
-    times = {i:float(r['timestamp_seconds']) for i,r in enumerate(selected,1)}
-    for f in set(report.get('weak_input_frames',[])) | set(report.get('missing_frames',[])):
-        windows.append((times[f]-padding,times[f]+padding))
-    for issue in report.get('issues',[]):
-        start = times[issue.get('from_frame',issue.get('frame'))]
-        end = times[issue.get('to_frame',issue.get('frame'))]
-        windows.append((start-padding,end+padding))
-    seen = {r.get('source_file',r['file']) for r in selected}
-    extra = []
-    for r in sorted(candidates,key=lambda r:float(r['timestamp_seconds'])):
-        source = r.get('source_file',r['file'])
-        if source not in seen and any(a <= float(r['timestamp_seconds']) <= b for a,b in windows):
-            extra.append({**r,'source_file':source})
-            seen.add(source)
-    return extra
-
-
-from .run_lock import run_locked
-
-
-@run_locked
-def write_v5_qa_report(scene: Path, run, resume=False) -> Path:
-    """Schema 5 report does not reuse legacy whole-route fallback metrics."""
+def write_qa_report(scene: Path, run, resume=False) -> Path:
+    """Report the three independent QA results and the training experiments."""
     from .masking import validate_mask_filter
     from .mask_finalize import validate_mask_finalization
     from .runs import begin_stage,complete_stage,fail_stage,save_run
@@ -244,7 +227,7 @@ def write_v5_qa_report(scene: Path, run, resume=False) -> Path:
         report=validate_segments(dataset,records,included,run.config.reconstruction.primary,run.config.segment_qa)
         result={k:report[k] for k in ('integrity','training_status','coverage_status')}
         run.metrics.setdefault('qa',{})['segments']=result
-        lines=[f'# Schema {run.config.schema_version} QA: {run.id}','',f'配置哈希：`{run.config_hash}`',
+        lines=[f'# QA: {run.id}','',f'配置哈希：`{run.config_hash}`',
             f'选中尝试：`{label}`；刚性 rig：未启用。',
             f'遮罩剔除：严格大于 {run.config.masking.mask_discard_threshold:.2%}，等于时保留。','',
             '| 检查 | 结果 |','| --- | --- |',

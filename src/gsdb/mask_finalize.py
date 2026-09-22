@@ -19,14 +19,6 @@ class MaskFinalizationMissingError(RuntimeError):
     pass
 
 
-def expected_reconstruction_images(frame_count: int, views: int) -> set[str]:
-    return {
-        f"view_{view:02d}/frame_{frame:06d}.jpg"
-        for frame in range(1, frame_count + 1)
-        for view in range(views)
-    }
-
-
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:

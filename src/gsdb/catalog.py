@@ -6,13 +6,7 @@ import sqlite3
 from pathlib import Path
 
 from .manifests import load_capture_manifest, load_model
-from .models import (
-    ArtifactManifest,
-    CaptureManifest,
-    CaptureManifestV2,
-    LocationManifest,
-    SceneManifest,
-)
+from .models import CaptureManifest, LocationManifest, SceneManifest
 from .runs import load_run
 
 
@@ -46,7 +40,6 @@ CREATE TABLE captures (
     status TEXT NOT NULL,
     source_kind TEXT NOT NULL,
     primary_source_path TEXT NOT NULL,
-    prepared_relative_path TEXT,
     media_json TEXT NOT NULL,
     manifest_path TEXT NOT NULL,
     PRIMARY KEY (location_id, scene_id, id),
@@ -65,15 +58,6 @@ CREATE TABLE runs (
     manifest_path TEXT NOT NULL,
     FOREIGN KEY (location_id, scene_id) REFERENCES scenes(location_id, id)
 );
-CREATE TABLE artifacts (
-    run_id TEXT NOT NULL REFERENCES runs(id),
-    kind TEXT NOT NULL,
-    version TEXT NOT NULL,
-    relative_path TEXT NOT NULL,
-    sha256 TEXT NOT NULL,
-    byte_size INTEGER NOT NULL,
-    PRIMARY KEY (run_id, kind, version, relative_path)
-);
 CREATE TABLE tags (
     location_id TEXT NOT NULL REFERENCES locations(id),
     tag TEXT NOT NULL,
@@ -81,7 +65,6 @@ CREATE TABLE tags (
 );
 CREATE INDEX idx_scenes_status ON scenes(status);
 CREATE INDEX idx_runs_status ON runs(status);
-CREATE INDEX idx_artifacts_kind ON artifacts(kind);
 CREATE VIRTUAL TABLE search USING fts5(entity_type, entity_id, display_name, tags, notes);
 """
 
@@ -97,7 +80,7 @@ def build_catalog(root: Path, output_path: Path | None = None) -> dict[str, int]
     if temporary.exists():
         temporary.unlink()
 
-    counts = {"locations": 0, "scenes": 0, "captures": 0, "runs": 0, "artifacts": 0}
+    counts = {"locations": 0, "scenes": 0, "captures": 0, "runs": 0}
     connection = sqlite3.connect(temporary)
     try:
         connection.executescript(SCHEMA)
@@ -149,24 +132,15 @@ def build_catalog(root: Path, output_path: Path | None = None) -> dict[str, int]
 
                 for capture_path in sorted((scene_root / "captures").glob("*.yaml")):
                     capture = load_capture_manifest(capture_path)
-                    if isinstance(capture, CaptureManifestV2):
-                        source_kind = capture.source.kind
-                        primary_source_path = capture.source.files[0].windows_path
-                        prepared_relative_path = capture.prepared_relative_path
-                    else:
-                        source_kind = "equirect_video"
-                        primary_source_path = capture.raw_source.windows_path
-                        prepared_relative_path = capture.stitched_video.relative_path
                     connection.execute(
-                        "INSERT INTO captures VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO captures VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (
                             capture.id,
                             capture.location_id,
                             capture.scene_id,
                             capture.status.value,
-                            source_kind,
-                            primary_source_path,
-                            prepared_relative_path,
+                            capture.source.kind,
+                            capture.source.files[0].windows_path,
                             json.dumps(capture.model_dump(mode="json"), ensure_ascii=False),
                             _relative(capture_path, root),
                         ),
@@ -194,21 +168,6 @@ def build_catalog(root: Path, output_path: Path | None = None) -> dict[str, int]
                     )
                     counts["runs"] += 1
 
-                for artifact_path in sorted((scene_root / "exports").glob("*/artifact.yaml")):
-                    artifact = load_model(artifact_path, ArtifactManifest)
-                    for item in artifact.artifacts:
-                        connection.execute(
-                            "INSERT INTO artifacts VALUES (?, ?, ?, ?, ?, ?)",
-                            (
-                                artifact.run_id,
-                                item.kind,
-                                item.version,
-                                item.relative_path,
-                                item.sha256,
-                                item.byte_size,
-                            ),
-                        )
-                        counts["artifacts"] += 1
         connection.commit()
         integrity = connection.execute("PRAGMA integrity_check").fetchone()
         if integrity != ("ok",):

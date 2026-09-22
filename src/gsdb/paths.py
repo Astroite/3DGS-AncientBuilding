@@ -1,11 +1,7 @@
 from __future__ import annotations
 
 import os
-import re
-from pathlib import Path, PurePosixPath, PureWindowsPath
-
-
-WINDOWS_DRIVE = re.compile(r"^(?P<drive>[A-Za-z]):[\\/](?P<rest>.*)$")
+from pathlib import Path
 
 
 def find_app_root(start: Path | None = None) -> Path:
@@ -35,28 +31,8 @@ def find_data_root(start: Path | None = None) -> Path:
     return candidate
 
 
-def windows_to_wsl(value: str) -> str:
-    match = WINDOWS_DRIVE.match(value)
-    if not match:
-        return value.replace("\\", "/")
-    drive = match.group("drive").lower()
-    rest = match.group("rest").replace("\\", "/")
-    return str(PurePosixPath("/mnt", drive, rest))
-
-
-def wsl_to_windows(value: str) -> str:
-    path = PurePosixPath(value)
-    parts = path.parts
-    if len(parts) >= 4 and parts[0] == "/" and parts[1] == "mnt" and len(parts[2]) == 1:
-        return str(PureWindowsPath(parts[2].upper() + ":\\", *parts[3:]))
-    return value
-
-
 def host_path(value: str | Path) -> Path:
-    text = str(value)
-    if os.name != "nt" and WINDOWS_DRIVE.match(text):
-        text = windows_to_wsl(text)
-    return Path(text).expanduser()
+    return Path(value).expanduser()
 
 
 def _normalized(path: Path) -> Path:

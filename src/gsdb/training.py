@@ -64,20 +64,10 @@ def train_package(package: Path, output: Path, backend='postshot', steps=None,
                   use_bilateral_grid=bool(use_bilateral_grid) if backend=='gsplat' else None,
                   use_sparse_depth=bool(use_sparse_depth) if backend=='gsplat' else None)
     if previous:
-        for key in ('backend','package_sha256','requested_steps','photo_comp'):
-            if previous[key] != record[key]:
+        for key in ('backend','package_sha256','requested_steps','photo_comp',
+                    'use_bilateral_grid','use_sparse_depth'):
+            if previous.get(key) != record[key]:
                 raise RuntimeError(f'Experiment identity changed: {key}')
-        # Historical dispatch files predate bilateral-grid / sparse-depth flags
-        # and were trained with PanoramaExposure and no depth anchors. Coerce
-        # missing and null the same way on both sides (postshot stores null).
-        def _flag(value):
-            return False if value is None else bool(value)
-        previous_use_grid = _flag(previous.get('use_bilateral_grid', False))
-        previous_use_sparse = _flag(previous.get('use_sparse_depth', False))
-        record_use_grid = _flag(record['use_bilateral_grid'])
-        record_use_sparse = _flag(record['use_sparse_depth'])
-        if previous_use_grid != record_use_grid or previous_use_sparse != record_use_sparse:
-            raise RuntimeError('Experiment identity changed: use_bilateral_grid/use_sparse_depth')
     json_write(output/'dispatch.json',record)
     if dry_run:
         return record

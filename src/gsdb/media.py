@@ -14,6 +14,14 @@ import numpy as np
 
 from .processes import run_logged
 
+# FFmpeg parses a select chain into a fixed-size expression stack and rejects the
+# 101st eq() term. The failure surfaces only as "Cannot allocate memory" while
+# opening the output, so a single oversized chain looks like a disk problem. The
+# boundary is exactly 100 terms on ffmpeg 9.0.1. Requests are split into chunks of
+# at most this many terms; -frames:v ends each pass at its own last selected frame,
+# which keeps the repeated decoding bounded by the chunk's own position in the clip.
+MAX_SELECT_TERMS = 100
+
 
 def sha256_file(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
     digest = hashlib.sha256()
@@ -51,10 +59,19 @@ def probe_video(path: Path) -> dict[str, Any]:
         errors="replace",
     )
     payload = json.loads(result.stdout)
-    video_streams = [item for item in payload.get("streams", []) if item.get("codec_type") == "video"]
-    if len(video_streams) != 1:
-        raise ValueError(f"Expected exactly one stitched video stream, found {len(video_streams)}")
-    stream = video_streams[0]
+    video_streams = [
+        item
+        for item in payload.get("streams", [])
+        if item.get("codec_type") == "video"
+    ]
+    if not video_streams:
+        raise ValueError("Source contains no video stream")
+    # Camera files may carry extra low-resolution video tracks (previews or
+    # thumbnails); the primary stream is the largest one.
+    stream = max(
+        video_streams,
+        key=lambda item: (int(item.get("width") or 0), int(item.get("height") or 0)),
+    )
     duration = stream.get("duration") or payload.get("format", {}).get("duration")
     frame_count = stream.get("nb_frames")
     return {
@@ -78,6 +95,15 @@ def validate_equirectangular(probe: dict[str, Any], tolerance: float = 0.01) -> 
         raise ValueError("Video duration must be positive")
 
 
+def validate_perspective_video(probe: dict[str, Any]) -> None:
+    width = int(probe["width"])
+    height = int(probe["height"])
+    if width <= height:
+        raise ValueError(f"Expected a landscape perspective video, got {width}x{height}")
+    if float(probe["duration_seconds"]) <= 0 or not float(probe.get("fps") or 0) > 0:
+        raise ValueError("Video duration and frame rate must be positive")
+
+
 def required_free_bytes(video_size: int, reserve_gib: float) -> int:
     reserve = int(reserve_gib * 1024**3)
     estimated_work = max(video_size * 6, 20 * 1024**3)
@@ -95,54 +121,6 @@ def check_disk_budget(path: Path, video_size: int, reserve_gib: float) -> dict[s
     return {"free_bytes": usage.free, "required_bytes": required}
 
 
-def extract_uniform_frames(
-    video_path: Path,
-    output_dir: Path,
-    target_frames: int,
-    duration_seconds: float,
-    jpeg_quality: int,
-    log_path: Path,
-    start_seconds: float = 0.0,
-) -> list[Path]:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    existing = sorted(output_dir.glob("frame_*.jpg"))
-    if existing:
-        if len(existing) != target_frames:
-            raise RuntimeError(
-                f"Found {len(existing)} existing frames but expected {target_frames}; create a new run"
-            )
-        return existing
-    rate = target_frames / duration_seconds
-    run_logged(
-        [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "warning",
-            "-i",
-            str(video_path),
-            "-ss",
-            f"{start_seconds:.6f}",
-            "-t",
-            f"{duration_seconds:.6f}",
-            "-vf",
-            f"fps={rate:.12f}",
-            "-frames:v",
-            str(target_frames),
-            "-q:v",
-            str(jpeg_quality),
-            "-pix_fmt",
-            "yuvj420p",
-            str(output_dir / "frame_%06d.jpg"),
-        ],
-        log_path,
-    )
-    frames = sorted(output_dir.glob("frame_*.jpg"))
-    if len(frames) != target_frames:
-        raise RuntimeError(f"FFmpeg produced {len(frames)} frames; expected {target_frames}")
-    return frames
-
-
 def extract_indexed_frames(
     video_path: Path,
     output_dir: Path,
@@ -150,7 +128,7 @@ def extract_indexed_frames(
     jpeg_quality: int,
     log_path: Path,
 ) -> list[Path]:
-    """Decode the exact zero-based source frames requested by a v0.2 adapter."""
+    """Decode the exact zero-based source frames, in chunks FFmpeg can parse."""
 
     if not frame_indices or frame_indices != sorted(set(frame_indices)):
         raise ValueError("Frame indices must be a non-empty, strictly increasing list")
@@ -164,29 +142,37 @@ def extract_indexed_frames(
                 f"Found {len(existing)} existing frames but expected {len(frame_indices)}"
             )
         return existing
-    selection = "+".join(f"eq(n\\,{index})" for index in frame_indices)
-    run_logged(
-        [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "warning",
-            "-i",
-            str(video_path),
-            "-vf",
-            f"select={selection}",
-            "-vsync",
-            "vfr",
-            "-frames:v",
-            str(len(frame_indices)),
-            "-q:v",
-            str(max(1, min(31, round((101 - jpeg_quality) * 31 / 100)))),
-            "-pix_fmt",
-            "yuvj420p",
-            str(output_dir / "frame_%06d.jpg"),
-        ],
-        log_path,
-    )
+    for offset in range(0, len(frame_indices), MAX_SELECT_TERMS):
+        chunk = frame_indices[offset : offset + MAX_SELECT_TERMS]
+        selection = "+".join(f"eq(n\\,{index})" for index in chunk)
+        # A chunk that fails aborts the loop, so the shared log always ends up
+        # holding the run that failed even though run_logged truncates it.
+        run_logged(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "warning",
+                "-i",
+                str(video_path),
+                "-map",
+                "0:v:0",
+                "-vf",
+                f"select={selection}",
+                "-fps_mode",
+                "vfr",
+                "-frames:v",
+                str(len(chunk)),
+                "-start_number",
+                str(offset + 1),
+                "-q:v",
+                str(max(1, min(31, round((101 - jpeg_quality) * 31 / 100)))),
+                "-pix_fmt",
+                "yuvj420p",
+                str(output_dir / "frame_%06d.jpg"),
+            ],
+            log_path,
+        )
     frames = sorted(output_dir.glob("frame_*.jpg"))
     if len(frames) != len(frame_indices):
         raise RuntimeError(
@@ -263,7 +249,7 @@ def analyze_frames(
     timestamps_seconds: Sequence[float] | None = None,
     selection_algorithm: str = "composite_v1",
 ) -> list[dict[str, Any]]:
-    if selection_algorithm not in {"legacy_laplacian", "composite_v1"}:
+    if selection_algorithm != "composite_v1":
         raise ValueError(f"Unknown frame selection algorithm: {selection_algorithm}")
     if timestamps_seconds is not None and len(timestamps_seconds) != len(frames):
         raise ValueError("Explicit timestamps must match the candidate-frame count")
@@ -277,11 +263,7 @@ def analyze_frames(
     )
     if output_jsonl.is_file():
         records = [json.loads(line) for line in output_jsonl.read_text(encoding="utf-8").splitlines() if line]
-        required = (
-            ("blur_laplacian_variance",)
-            if selection_algorithm == "legacy_laplacian"
-            else ("tenengrad", "selection_score")
-        )
+        required = ("tenengrad", "selection_score")
         if len(records) == len(frames) and all(
             all(field in item for field in required) for item in records
         ) and all(
@@ -293,11 +275,7 @@ def analyze_frames(
         _frame_statistics(frame, expected_timestamps[index])
         for index, frame in enumerate(frames)
     ]
-    records = (
-        add_selection_scores(raw_records)
-        if selection_algorithm == "composite_v1"
-        else raw_records
-    )
+    records = add_selection_scores(raw_records)
     output_jsonl.parent.mkdir(parents=True, exist_ok=True)
     output_jsonl.write_text(
         "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in records),
@@ -322,62 +300,6 @@ def summarize_frame_metrics(records: list[dict[str, Any]]) -> dict[str, float]:
     if all("selection_score" in item for item in records):
         summary["selection_score_median"] = median("selection_score")
     return summary
-
-
-def select_blur_aware_records(
-    metrics: list[dict[str, Any]],
-    target_frames: int,
-    selection_metric: str = "selection_score",
-) -> list[dict[str, Any]]:
-    """Pick the highest composite-quality frame in each temporal bucket."""
-    if target_frames > len(metrics):
-        raise ValueError("Subset target cannot exceed the candidate frame count")
-    if target_frames < 2:
-        raise ValueError("Subset target must contain at least two frames")
-    selected: list[dict[str, Any]] = []
-    total = len(metrics)
-    for index in range(target_frames):
-        start = math.floor(index * total / target_frames)
-        end = max(start + 1, math.floor((index + 1) * total / target_frames))
-        bucket = metrics[start:end]
-        selected.append(
-            max(
-                bucket,
-                key=lambda item: (
-                    float(item[selection_metric]),
-                    -float(item.get("timestamp_seconds", 0.0)),
-                ),
-            )
-        )
-    return selected
-
-
-def create_blur_aware_subset(
-    source_dir: Path,
-    metrics: list[dict[str, Any]],
-    output_dir: Path,
-    target_frames: int,
-    selection_metric: str = "selection_score",
-) -> list[Path]:
-    selected = select_blur_aware_records(
-        metrics, target_frames, selection_metric=selection_metric
-    )
-    output_dir.mkdir(parents=True, exist_ok=True)
-    existing = sorted(output_dir.glob("frame_*.jpg"))
-    if len(existing) == target_frames:
-        return existing
-    if existing:
-        raise RuntimeError("Partial fallback frame directory exists; create a new run")
-    outputs: list[Path] = []
-    for index, item in enumerate(selected, start=1):
-        source = source_dir / item["file"]
-        destination = output_dir / f"frame_{index:06d}.jpg"
-        try:
-            os.link(source, destination)
-        except OSError:
-            shutil.copy2(source, destination)
-        outputs.append(destination)
-    return outputs
 
 
 def select_temporal_records(

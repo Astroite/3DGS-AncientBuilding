@@ -5,9 +5,8 @@ from pathlib import Path
 
 from .manifests import canonical_hash, load_model, save_yaml
 from .models import (
+    STAGES,
     RunConfig,
-    RunConfigV3,
-    RunConfigV4,
     RunManifest,
     RunStatus,
     StageRecord,
@@ -17,15 +16,7 @@ from .models import (
 from .paths import ensure_run_dir
 
 
-STAGE_ORDER = (
-    "preprocess",
-    "mask",
-    "reconstruct",
-    "postshot_prepare",
-    "train",
-    "export",
-    "qa",
-)
+STAGE_ORDER = STAGES
 
 
 def run_manifest_path(scene_path: Path, run_id: str) -> Path:
@@ -51,18 +42,17 @@ def create_run(
     scene_path: Path,
     location_id: str,
     scene_id: str,
-    config: RunConfig | RunConfigV3 | RunConfigV4,
+    config: RunConfig,
     now: datetime | None = None,
+    run_id: str | None = None,
 ) -> RunManifest:
     created_at = now or utc_now()
     digest = canonical_hash(config)
-    run_id = f"{created_at.strftime('%Y%m%dT%H%M%SZ')}-{digest[:8]}"
-    if (scene_path / run_id).exists():
-        raise FileExistsError(
-            f"Run already exists: {run_id}. Wait one second or use --run-id with --resume."
-        )
+    identifier = run_id or f"{created_at.strftime('%Y%m%dT%H%M%SZ')}-{digest[:8]}"
+    if (scene_path / identifier).exists():
+        raise FileExistsError(f"Run already exists: {identifier}")
     run = RunManifest(
-        id=run_id,
+        id=identifier,
         location_id=location_id,
         scene_id=scene_id,
         config_hash=digest,
@@ -70,7 +60,7 @@ def create_run(
         created_at=created_at,
         updated_at=created_at,
     )
-    ensure_run_dir(scene_path, run_id, exist_ok=False)
+    ensure_run_dir(scene_path, identifier, exist_ok=True)
     save_run(scene_path, run)
     return run
 
@@ -90,12 +80,7 @@ def require_previous_stages(run: RunManifest, stage: str) -> None:
 def begin_stage(
     run: RunManifest, stage: str, resume: bool = False, force: bool = False
 ) -> bool:
-    """Open a stage for work, or report that a completed one can be reused.
-
-    ``force`` re-opens a stage that already succeeded. It exists for publishing an
-    additional export version from a finished run, which produces new artifacts
-    without invalidating the ones already published.
-    """
+    """Open a stage for work, or report that a completed one can be reused."""
     if stage not in STAGE_ORDER:
         raise ValueError(f"Unknown stage: {stage}")
     if stage not in ("preprocess", "qa"):

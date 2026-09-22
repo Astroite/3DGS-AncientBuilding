@@ -10,7 +10,7 @@ from typing import Any, TypeVar
 import yaml
 from pydantic import BaseModel
 
-from .models import CaptureManifest, CaptureManifestV2
+from .models import CaptureManifest
 
 
 ModelT = TypeVar("ModelT", bound=BaseModel)
@@ -30,16 +30,11 @@ def load_model(path: Path, model_type: type[ModelT]) -> ModelT:
     return model_type.model_validate(load_yaml(path))
 
 
-def load_capture_manifest(path: Path) -> CaptureManifest | CaptureManifestV2:
-    """Load either capture schema without coercing or rewriting legacy YAML."""
-
+def load_capture_manifest(path: Path) -> CaptureManifest:
     payload = load_yaml(path)
-    version = payload.get("schema_version", 1)
-    if version == 1:
-        return CaptureManifest.model_validate(payload)
-    if version == 2:
-        return CaptureManifestV2.model_validate(payload)
-    raise ValueError(f"Unsupported capture schema version: {version}")
+    if payload.get("schema_version") != 2:
+        raise ValueError(f"Unsupported capture schema version: {payload.get('schema_version')}")
+    return CaptureManifest.model_validate(payload)
 
 
 def _yaml_data(model: BaseModel | dict[str, Any]) -> dict[str, Any]:

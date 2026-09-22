@@ -24,16 +24,16 @@ from .media import (
     probe_video,
     sha256_file,
     validate_equirectangular,
+    validate_perspective_video,
 )
-from .models import CaptureManifestV2, SourceProbe
-from .paths import host_path, wsl_to_windows
+from .models import IMAGE_SUFFIXES, CaptureManifest, SourceProbe
+from .paths import host_path
 
 
 MEDIA_PROTOCOL_VERSION = 1
 MEDIA_HELPER_ENV = "GSDB_MEDIA_HELPER"
 MEDIA_SDK_ROOT_ENV = "INSTA360_MEDIA_SDK_ROOT"
 ALLOW_FAKE_HELPER_ENV = "GSDB_ALLOW_FAKE_MEDIA_HELPER"
-IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 PUBLIC_SUPPORTED_CAMERAS = {
     "insta360 one x",
     "insta360 one r",
@@ -71,8 +71,7 @@ class CandidateFrameSet:
     timestamps_seconds: tuple[float, ...]
     helper_version: str | None = None
     sdk_version: str | None = None
-    source_probe: dict[str, Any] | None = None
-    schema_version: int = 1
+    source_probe: SourceProbe | None = None
     candidate_fps: float | None = None
 
 
@@ -98,12 +97,7 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _windows_visible(path: Path) -> str:
-    absolute = path.absolute()
-    value = wsl_to_windows(str(absolute))
-    if os.name != "nt" and value == str(absolute):
-        raise RuntimeError(
-            f"MediaSDK request/output must be on a Windows-mounted project path: {path}"
-        )
+    value = str(path.absolute())
     if value.startswith("\\\\"):
         raise RuntimeError("MediaSDK request/output may not use a UNC path")
     return value
@@ -253,7 +247,7 @@ def probe_image_sequence(paths: Iterable[Path], fps: float | None = None) -> dic
     return probe
 
 
-def source_paths(capture: CaptureManifestV2) -> list[Path]:
+def source_paths(capture: CaptureManifest) -> list[Path]:
     paths = [host_path(item.windows_path) for item in capture.source.files]
     missing = [str(path) for path in paths if not path.is_file()]
     if missing:
@@ -261,7 +255,7 @@ def source_paths(capture: CaptureManifestV2) -> list[Path]:
     return paths
 
 
-def validate_source_fingerprints(capture: CaptureManifestV2) -> list[Path]:
+def validate_source_fingerprints(capture: CaptureManifest) -> list[Path]:
     paths = source_paths(capture)
     for record, path in zip(capture.source.files, paths):
         if path.stat().st_size != record.byte_size or sha256_file(path) != record.sha256:
@@ -275,13 +269,13 @@ class SourceAdapter:
     kind: str
 
     def probe(
-        self, capture: CaptureManifestV2, paths: list[Path], protocol_dir: Path
+        self, capture: CaptureManifest, paths: list[Path], protocol_dir: Path
     ) -> dict[str, Any]:
         raise NotImplementedError
 
     def export(
         self,
-        capture: CaptureManifestV2,
+        capture: CaptureManifest,
         paths: list[Path],
         probe: dict[str, Any],
         indices: list[int],
@@ -299,7 +293,7 @@ class EquirectVideoAdapter(SourceAdapter):
     kind = "equirect_video"
 
     def probe(
-        self, capture: CaptureManifestV2, paths: list[Path], protocol_dir: Path
+        self, capture: CaptureManifest, paths: list[Path], protocol_dir: Path
     ) -> dict[str, Any]:
         probe = probe_video(paths[0])
         validate_equirectangular(probe)
@@ -311,7 +305,7 @@ class EquirectVideoAdapter(SourceAdapter):
 
     def export(
         self,
-        capture: CaptureManifestV2,
+        capture: CaptureManifest,
         paths: list[Path],
         probe: dict[str, Any],
         indices: list[int],
@@ -366,17 +360,34 @@ class EquirectVideoAdapter(SourceAdapter):
                 os.replace(normalized, destination)
 
 
+class PerspectiveVideoAdapter(EquirectVideoAdapter):
+    """Landscape perspective video: frames are training views, nothing is projected."""
+
+    kind = "perspective_video"
+
+    def probe(
+        self, capture: CaptureManifest, paths: list[Path], protocol_dir: Path
+    ) -> dict[str, Any]:
+        probe = probe_video(paths[0])
+        validate_perspective_video(probe)
+        frame_count = int(
+            probe.get("frame_count")
+            or round(float(probe["duration_seconds"]) * float(probe["fps"] or 0))
+        )
+        return {**probe, "frame_count": max(1, frame_count)}
+
+
 class EquirectSequenceAdapter(SourceAdapter):
     kind = "equirect_sequence"
 
     def probe(
-        self, capture: CaptureManifestV2, paths: list[Path], protocol_dir: Path
+        self, capture: CaptureManifest, paths: list[Path], protocol_dir: Path
     ) -> dict[str, Any]:
         return probe_image_sequence(paths, fps=capture.source.probe.fps)
 
     def export(
         self,
-        capture: CaptureManifestV2,
+        capture: CaptureManifest,
         paths: list[Path],
         probe: dict[str, Any],
         indices: list[int],
@@ -408,7 +419,7 @@ class Insta360InsvAdapter(SourceAdapter):
     kind = "insta360_insv"
 
     def probe(
-        self, capture: CaptureManifestV2, paths: list[Path], protocol_dir: Path
+        self, capture: CaptureManifest, paths: list[Path], protocol_dir: Path
     ) -> dict[str, Any]:
         response = invoke_media_helper(
             "probe",
@@ -444,7 +455,7 @@ class Insta360InsvAdapter(SourceAdapter):
 
     def export(
         self,
-        capture: CaptureManifestV2,
+        capture: CaptureManifest,
         paths: list[Path],
         probe: dict[str, Any],
         indices: list[int],
@@ -515,43 +526,22 @@ SOURCE_ADAPTERS: dict[str, SourceAdapter] = {
     adapter.kind: adapter
     for adapter in (
         EquirectVideoAdapter(),
+        PerspectiveVideoAdapter(),
         EquirectSequenceAdapter(),
         Insta360InsvAdapter(),
     )
 }
 
 
-def source_adapter(capture: CaptureManifestV2) -> SourceAdapter:
+def source_adapter(capture: CaptureManifest) -> SourceAdapter:
     return SOURCE_ADAPTERS[capture.source.kind]
 
 
-def probe_capture_source(capture: CaptureManifestV2, protocol_dir: Path) -> dict[str, Any]:
+def probe_capture_source(capture: CaptureManifest, protocol_dir: Path) -> dict[str, Any]:
     paths = validate_source_fingerprints(capture)
     result = source_adapter(capture).probe(capture, paths, protocol_dir)
     validate_source_fingerprints(capture)
     return result
-
-
-def uniform_frame_indices(
-    frame_count: int,
-    fps: float,
-    start_seconds: float,
-    end_seconds: float,
-    target_frames: int,
-) -> list[int]:
-    if target_frames < 2:
-        raise ValueError("At least two candidate frames are required")
-    start = max(0, math.ceil(start_seconds * fps))
-    stop = min(frame_count, math.ceil(end_seconds * fps))
-    available = stop - start
-    if available < target_frames:
-        raise ValueError(
-            f"Selection contains {available} source frames, fewer than target {target_frames}"
-        )
-    return [
-        min(stop - 1, start + math.floor((index + 0.5) * available / target_frames))
-        for index in range(target_frames)
-    ]
 
 
 def fixed_rate_frame_indices(
@@ -645,22 +635,16 @@ def _normalize_image(source: Path, destination: Path, width: int, height: int, q
         raise RuntimeError(f"Cannot write normalized image: {destination}")
 
 
-def _dataset_from_manifest(path: Path) -> CandidateFrameSet:
+def load_prepared_input(path: Path) -> CandidateFrameSet:
     manifest_path = path / "dataset.json"
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    schema_version = int(payload.get("schema_version", 0))
-    if schema_version not in {1, 2} or payload.get("integrity") != "complete":
+    if payload.get("schema_version") != 2 or payload.get("integrity") != "complete":
         raise RuntimeError(f"Prepared input is incomplete: {manifest_path}")
     records = payload.get("frames") or []
     lineage = payload["lineage"]
     if records != lineage.get("frames"):
         raise RuntimeError(f"Prepared input frame lineage is inconsistent: {manifest_path}")
-    expected_count = (
-        lineage.get("target_frames")
-        if schema_version == 1
-        else lineage.get("candidate_frame_count")
-    )
-    if len(records) != int(expected_count or -1):
+    if len(records) != int(lineage.get("candidate_frame_count") or -1):
         raise RuntimeError(f"Prepared input frame count is invalid: {manifest_path}")
     preparation = {key: value for key, value in lineage.items() if key != "frames"}
     preparation_hash = canonical_hash(preparation)
@@ -698,13 +682,8 @@ def _dataset_from_manifest(path: Path) -> CandidateFrameSet:
         timestamps_seconds=tuple(float(item["timestamp_seconds"]) for item in payload["frames"]),
         helper_version=lineage.get("helper_version"),
         sdk_version=lineage.get("sdk_version"),
-        source_probe=dict(lineage["source_probe"]),
-        schema_version=schema_version,
-        candidate_fps=(
-            float(lineage["sampling"]["candidate_fps"])
-            if schema_version == 2
-            else None
-        ),
+        source_probe=SourceProbe.model_validate(lineage["source_probe"]),
+        candidate_fps=float(lineage["sampling"]["candidate_fps"]),
     )
 
 
@@ -719,7 +698,7 @@ def _trusted_cached_frame_hashes(path: Path, preparation_hash: str) -> dict[str,
         lineage = payload["lineage"]
         records = payload["frames"]
         if (
-            payload.get("schema_version") not in {1, 2}
+            payload.get("schema_version") != 2
             or payload.get("integrity") != "complete"
             or payload.get("preparation_hash") != preparation_hash
             or payload.get("dataset_sha256") != canonical_hash(lineage)
@@ -743,15 +722,19 @@ def _trusted_cached_frame_hashes(path: Path, preparation_hash: str) -> dict[str,
 @gpu_locked
 def prepare_capture_input(
     scene_path: Path,
-    capture: CaptureManifestV2,
-    target_frames: int | None = None,
-    candidate_fps: float | None = None,
+    capture: CaptureManifest,
+    target_root: Path,
+    candidate_fps: float,
     selection_end_seconds: float | None = None,
     resume: bool = False,
-    cache_root: Path | None = None,
-    anchored: bool = False,
 ) -> CandidateFrameSet:
-    protocol_dir = (cache_root / ".protocol") if cache_root is not None else scene_path / "prepared" / ".protocol"
+    """Extract rate-sampled candidate frames from the registered sources.
+
+    Sampling is anchored to the capture start so a given second always yields the
+    same source frame. The verified set lands at ``target_root/<preparation hash>``,
+    which the Run owns.
+    """
+    protocol_dir = target_root / ".protocol"
     probe = probe_capture_source(capture, protocol_dir)
     paths = source_paths(capture)
     effective_end = min(
@@ -765,37 +748,24 @@ def prepare_capture_input(
             f"Selected range ends at {effective_end:.3f}s but source is "
             f"{float(probe['duration_seconds']):.3f}s"
         )
-    if (target_frames is None) == (candidate_fps is None):
-        raise ValueError("Provide exactly one of target_frames or candidate_fps")
-    if candidate_fps is not None:
-        sampler = anchored_frame_indices if anchored else fixed_rate_frame_indices
-        indices, timestamps = sampler(
-            int(probe["frame_count"]),
-            float(probe["fps"]),
-            capture.selection.start_seconds,
-            effective_end,
-            candidate_fps,
-        )
-        if len(indices) < 2:
-            raise ValueError('At least two candidate frames are required')
-        manifest_schema_version = 2
+    indices, timestamps = anchored_frame_indices(
+        int(probe["frame_count"]),
+        float(probe["fps"]),
+        capture.selection.start_seconds,
+        effective_end,
+        candidate_fps,
+    )
+    if len(indices) < 2:
+        raise ValueError("At least two candidate frames are required")
+    if capture.source.is_perspective:
+        width, height = int(probe["width"]), int(probe["height"])
     else:
-        assert target_frames is not None
-        indices = uniform_frame_indices(
-            int(probe["frame_count"]),
-            float(probe["fps"]),
-            capture.selection.start_seconds,
-            effective_end,
-            target_frames,
-        )
-        timestamps = [index / float(probe["fps"]) for index in indices]
-        manifest_schema_version = 1
-    width = int(capture.normalization.width or probe["width"])
-    height = int(capture.normalization.height or probe["height"])
-    if width != height * 2:
-        raise ValueError(f"Prepared panorama must be 2:1, got {width}x{height}")
-    if width > int(probe["width"]) or height > int(probe["height"]):
-        raise ValueError("Normalization dimensions may not exceed source panorama dimensions")
+        width = int(capture.normalization.width or probe["width"])
+        height = int(capture.normalization.height or probe["height"])
+        if width != height * 2:
+            raise ValueError(f"Prepared panorama must be 2:1, got {width}x{height}")
+        if width > int(probe["width"]) or height > int(probe["height"]):
+            raise ValueError("Normalization dimensions may not exceed source panorama dimensions")
     preparation = {
         "capture_id": capture.id,
         "source_kind": capture.source.kind,
@@ -815,20 +785,17 @@ def prepare_capture_input(
         "source_frame_indices": indices,
         "helper_version": probe.get("helper_version"),
         "sdk_version": probe.get("sdk_version"),
-    }
-    if manifest_schema_version == 1:
-        preparation["target_frames"] = len(indices)
-    else:
-        preparation["sampling"] = {
-            "mode": "anchored_rate_v1" if anchored else "fixed_rate_v1",
+        "sampling": {
+            "mode": "anchored_rate_v1",
             "candidate_fps": candidate_fps,
-        }
-        preparation["candidate_frame_count"] = len(indices)
+        },
+        "candidate_frame_count": len(indices),
+    }
     preparation_hash = canonical_hash(preparation)
-    target = (cache_root if cache_root is not None else scene_path / "prepared" / capture.id) / preparation_hash
+    target = target_root / preparation_hash
     if (target / "dataset.json").is_file():
         try:
-            return _dataset_from_manifest(target)
+            return load_prepared_input(target)
         except (KeyError, TypeError, ValueError, RuntimeError) as error:
             if not resume:
                 raise RuntimeError(
@@ -913,7 +880,7 @@ def prepare_capture_input(
     lineage = {**preparation, "frames": frame_records}
     dataset_sha256 = canonical_hash(lineage)
     manifest = {
-        "schema_version": manifest_schema_version,
+        "schema_version": 2,
         "generated_at": _utc_now(),
         "preparation_hash": preparation_hash,
         "dataset_sha256": dataset_sha256,
@@ -922,33 +889,7 @@ def prepare_capture_input(
         "integrity": "complete",
     }
     _atomic_json(building / "dataset.json", manifest)
-    _dataset_from_manifest(building)
+    load_prepared_input(building)
     target.parent.mkdir(parents=True, exist_ok=True)
     building.replace(target)
-    return _dataset_from_manifest(target)
-
-
-def copy_candidate_frames(
-    candidate_set: CandidateFrameSet, output_dir: Path, resume: bool = False
-) -> list[Path]:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    outputs = [output_dir / f"frame_{index + 1:06d}.jpg" for index in range(len(candidate_set.frame_paths))]
-    invalid: list[tuple[Path, Path, str]] = []
-    for source, destination, expected_sha256 in zip(
-        candidate_set.frame_paths, outputs, candidate_set.frame_sha256s
-    ):
-        if sha256_file(source) != expected_sha256:
-            raise RuntimeError(f"Prepared candidate changed after verification: {source}")
-        if destination.is_file() and sha256_file(destination) == expected_sha256:
-            continue
-        invalid.append((source, destination, expected_sha256))
-    if invalid and any(path.is_file() for path in outputs) and not resume:
-        raise RuntimeError("Partial or corrupt candidate-frame directory exists; use --resume")
-    for source, destination, expected_sha256 in invalid:
-        temporary = destination.with_suffix(f".copying-{uuid.uuid4().hex}.jpg")
-        shutil.copy2(source, temporary)
-        if sha256_file(temporary) != expected_sha256:
-            temporary.unlink(missing_ok=True)
-            raise RuntimeError(f"Candidate copy verification failed: {destination}")
-        os.replace(temporary, destination)
-    return outputs
+    return load_prepared_input(target)

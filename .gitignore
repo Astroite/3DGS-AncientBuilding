@@ -43,4 +43,5 @@ tools/mediasdk-helper/**/*.exe
 
 # The Insta360 MediaSDK payload is an external licensed dependency; never commit it.
 sdks/
-tests
+# Compiled CUDA extension cache (gsplat csrc for sm_120), local build output.
+wheels/

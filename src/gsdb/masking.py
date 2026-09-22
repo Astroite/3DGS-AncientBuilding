@@ -198,6 +198,23 @@ class TorchvisionPersonSegmenter:
 
     def __call__(self, image_bgr: np.ndarray) -> PersonPrediction:
         torch = self._torch
+        try:
+            return self._predict(image_bgr)
+        finally:
+            # torchvision pastes every detection's mask at the source resolution,
+            # so one 8K equirect frame allocates a handful of ~118 MB blocks whose
+            # count varies with the number of people found. The caching allocator
+            # keeps those blocks for reuse and cannot defragment them, so
+            # memory_reserved climbs past physical VRAM within about twenty frames;
+            # WDDM then starts paging and per-frame time goes from ~1.5 s to
+            # 100-250 s. Live allocations stay flat throughout, so releasing the
+            # cached blocks is the whole fix. Measured over 20 native 8K frames:
+            # 498 s and 41 GiB reserved without this, 37 s and 0.19 GiB with it.
+            if self._device.type == "cuda":
+                torch.cuda.empty_cache()
+
+    def _predict(self, image_bgr: np.ndarray) -> PersonPrediction:
+        torch = self._torch
         rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         if self._config.inference_gamma != 1.0:
             rgb = np.power(rgb, self._config.inference_gamma)

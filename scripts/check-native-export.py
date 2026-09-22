@@ -2,6 +2,7 @@
 from pathlib import Path
 import argparse
 import json
+import numpy as np
 import torch
 import torch.nn.functional as F
 from gsdb.native_train import configure_windows_cuda,load_ply,render
@@ -20,8 +21,17 @@ with torch.no_grad():
     a,_,_=render(saved,row)
     b,_,_=render(loaded,row)
     diff=(a-b).abs()
+    flat=diff.flatten()
+    # torch.quantile rejects tensors above 2^24 elements and a 4K render is 24.9M.
+    # NumPy interpolates identically and has no such limit; a strided sample would
+    # alias against the three channels.
+    p999_error=float(np.quantile(diff.detach().cpu().numpy(),0.999))
     result=dict(max_error=float(diff.max()),mean_error=float(diff.mean()),rms_error=float(diff.square().mean().sqrt()),
-        p999_error=float(torch.quantile(diff.flatten(),0.999)),fraction_over_quarter_8bit_level=float((diff>1/(4*255)).float().mean()),
+        p999_error=p999_error,fraction_over_quarter_8bit_level=float((diff>1/(4*255)).float().mean()),
+        pixels_over_quarter_8bit_level=int((diff.amax(dim=2)>1/(4*255)).sum()),
+        pixels_over_half_8bit_level=int((diff.amax(dim=2)>0.5/255).sum()),
+        pixels_over_one_8bit_level=int((diff.amax(dim=2)>1/255).sum()),
+        channels_over_one_8bit_level=int((flat>1/255).sum()),
         normalized_quaternion_max_error=float((F.normalize(saved['quats'],dim=1)-F.normalize(loaded['quats'],dim=1)).abs().max()),
         exact_parameter_equality={k:torch.equal(saved[k],loaded[k]) for k in saved if k!='quats'})
 json_write(args.experiment/'export-diagnostic.json',result)
