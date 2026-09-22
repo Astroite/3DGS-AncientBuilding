@@ -1,13 +1,12 @@
-# GSDB：360 视频到 Gaussian Splatting
+# GS-Studio（建设中）
 
-Windows 原生流水线，按地点、场景、Capture 和 Run 管理全景输入、人物遮罩、RealityScan 重建、分段 QA 与训练成果。
+APP 保留现有仓库和目录，正在升级为以 GUI 为日常入口的 GS-Studio。目标覆盖地点、场景、Capture、Run、RealityScan 重建、分段 QA、本地训练、模型编辑与导出。现行 Windows 流水线仍主要通过 `gsdb` CLI 操作；正式全流程 GUI 尚未实现或验收。
 
-**唯一操作入口：[Windows 360 重建工作手册](docs/CURRENT-WORKFLOW.md)**
-开发、脚本用途和历史归档见 [维护说明](docs/MAINTENANCE.md)。
+**当前操作依据：[Windows 360 重建工作手册](docs/CURRENT-WORKFLOW.md)。** 项目阶段与需求追踪见 [GS-Studio 项目路线图](docs/GS-STUDIO-PROJECT-ROADMAP.md)，入口整合、兼容和决策关口见 [工程路线图](docs/GS-STUDIO-ENGINEERING-ROADMAP.md)。开发、脚本用途和历史归档见 [维护说明](docs/MAINTENANCE.md)；已通过评审的设计和早期技术评估保留在 [GS-Studio-Plan 历史资料](docs/GS-Studio-Plan/README.md)。
 
-本地可视化训练与基础编辑入口：`scripts/studio.ps1`。支持外部 COLMAP / 已通过 QA 的共享包、训练预览和快照编辑，使用现有 `.venv-gsplat` 环境。操作与验证边界见 [GS Studio 使用说明](docs/STUDIO.md)。
+当前本地可视化训练与基础编辑原型入口为 `scripts/studio.ps1`。支持外部 COLMAP / 已通过 QA 的共享包、训练预览和快照编辑，使用现有 `.venv-gsplat` 环境。原型能力和验证边界见 [GS-Studio 原型使用说明](docs/STUDIO.md)。
 
-新 Run 使用 schema 6：1 fps 候选、每秒一张全景、14 视图、110°、1746²、底裁 15%、严格大于 0.5% 遮罩占比剔除，以及一次按需 2 fps 局部补抽。阶段验证成功后自动清理可丢弃中间文件，保留一份有效数据。正式外观保留 SH 3；Postshot Splat ADC 仍为默认后端，gsplat 使用独立 Windows 环境。有效分段不代表路线覆盖完整。
+新 Run 使用 schema 6：1 fps 候选、每秒一张全景、14 视图、110°、1746²、底裁 15%、严格大于 0.5% 遮罩占比剔除，以及一次按需 2 fps 局部补抽。阶段验证成功后自动清理可丢弃中间文件，保留一份有效数据。正式外观保留 SH 3；**当前 CLI** 的默认训练后端仍为 Postshot Splat ADC，gsplat 使用独立 Windows 环境。**未来新 GUI 实验**预选 gsplat，并可选择 Postshot；此规划不改变当前命令默认值或历史 Run。有效分段不代表路线覆盖完整。
 
 ## 快速入口
 
