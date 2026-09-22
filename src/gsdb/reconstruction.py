@@ -141,6 +141,75 @@ def projection_view_specs(attempt: AttemptConfig) -> list[tuple[float, float]]:
     return pairs
 
 
+def _angular_separation_degrees(a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Great-circle angle between two (yaw, pitch) optical axes, in degrees."""
+    import math
+
+    def unit(yaw: float, pitch: float) -> tuple[float, float, float]:
+        cy, sy = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
+        cp, sp = math.cos(math.radians(pitch)), math.sin(math.radians(pitch))
+        return (sy * cp, sp, cy * cp)
+
+    ax, ay, az = unit(*a)
+    bx, by, bz = unit(*b)
+    dot = max(-1.0, min(1.0, ax * bx + ay * by + az * bz))
+    return math.degrees(math.acos(dot))
+
+
+def projection_overlap_summary(attempt: AttemptConfig) -> dict:
+    """Report adjacent-view angular overlap for the 360→pinhole split.
+
+    Overlap uses great-circle axis separation (not raw yaw delta): at pitch
+    ``φ`` a yaw step ``Δλ`` separates axes by ``arccos(sin²φ + cos²φ·cosΔλ)``.
+    Two views share ``fov − separation`` degrees of solid coverage along the
+    arc between them. Only *adjacent* pairs matter for cross-positioning;
+    antipodal views on a ring are not required to overlap.
+    """
+    specs = projection_view_specs(attempt)
+    fov = projection_fov_degrees(attempt)
+    by_pitch: dict[float, list[tuple[float, float]]] = {}
+    for view in specs:
+        by_pitch.setdefault(round(view[1], 6), []).append(view)
+    adjacent: list[tuple[float, float, tuple[float, float], tuple[float, float], str]] = []
+    for pitch, group in sorted(by_pitch.items()):
+        group = sorted(group, key=lambda item: item[0])
+        for index in range(len(group)):
+            a = group[index]
+            b = group[(index + 1) % len(group)] if len(group) > 1 else group[index]
+            if a is b:
+                continue
+            sep = _angular_separation_degrees(a, b)
+            adjacent.append((fov - sep, sep, a, b, f'yaw@pitch={pitch:g}'))
+    # Nearest different-pitch neighbor for each view (undirected edges).
+    pitch_edges: dict[tuple[tuple[float, float], tuple[float, float]], tuple[float, float, str]] = {}
+    for a in specs:
+        candidates = [b for b in specs if abs(a[1] - b[1]) > 1e-6]
+        if not candidates:
+            continue
+        b = min(candidates, key=lambda other: (_angular_separation_degrees(a, other), other))
+        key = tuple(sorted([a, b]))
+        sep = _angular_separation_degrees(a, b)
+        pitch_edges[key] = (fov - sep, sep, 'pitch')
+    for (a, b), (overlap, sep, kind) in pitch_edges.items():
+        adjacent.append((overlap, sep, a, b, kind))
+    adjacent.sort(key=lambda item: item[0])
+    min_overlap, min_sep, min_a, min_b, min_kind = adjacent[0]
+    yaw_only = [item[0] for item in adjacent if item[4].startswith('yaw@')]
+    min_yaw = min(yaw_only) if yaw_only else None
+    return dict(
+        images_per_equirect=int(attempt.images_per_equirect),
+        fov_degrees=fov,
+        view_count=len(specs),
+        adjacent_pairs=len(adjacent),
+        min_adjacent_overlap_degrees=float(min_overlap),
+        min_adjacent_separation_degrees=float(min_sep),
+        min_adjacent_yaw_overlap_degrees=float(min_yaw) if min_yaw is not None else None,
+        worst_pair=dict(overlap_kind=min_kind, a=list(min_a), b=list(min_b)),
+        meets_cross_view_rule=bool(min_overlap >= 15.0),
+        rule='相邻视图光轴角距 < FOV 且 FOV − 角距 ≥ 15°（球面角距，只计环内相邻与最近跨环）',
+    )
+
+
 def validate_existing_projection_set(
     target: Path,
     frame_count: int,
