@@ -45,4 +45,11 @@ tools/mediasdk-helper/**/*.exe
 sdks/
 # Compiled CUDA extension cache (gsplat csrc for sm_120), local build output.
 wheels/
-tests
+
+# Test scripts live in tests/ and are versioned; test byproducts never are.
+tests/output/
+tests/.tmp/
+
+# Data belongs to the separate Data repository; a stray Data-shaped tree in APP
+# (e.g. a relative export path) must never be committed.
+locations/

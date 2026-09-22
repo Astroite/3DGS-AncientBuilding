@@ -12,9 +12,10 @@
 | `scripts/bootstrap-gsplat-windows.ps1` | 安装独立训练/评估环境并编译 CUDA 扩展，支持 `-SkipPackages` | 写 .venv-gsplat 与 wheels/，下载依赖、跑 nvcc |
 | `scripts/build_gsplat_csrc.py` | 把已安装 gsplat 的 CUDA 源编译成 `gsplat/csrc.pyd` | 写环境内包与 wheels/ 缓存；幂等 |
 | `scripts/apply_nerfstudio_patch.py` | 安装时核验并应用投影 clamp 和嵌套路径补丁 | 修改环境内依赖代码，不处理素材 |
-| `scripts/test-mediasdk-helper.ps1` | 指定 LocationId、SceneId、CaptureId，独立 helper 按 5 fps 验收（不代表新 Run 默认）；可用 RunId 恢复 | GPU、解码和 Run 候选缓存；不是轻量单测 |
-| `scripts/smoke-native-gsplat.py` | 独立环境，`--output` 指定新的合成测试目录 | GPU、少量合成训练与检查点；不访问 Capture |
-| `scripts/check-native-export.py` | 独立环境，`--experiment` 与 `--dataset` 核验 PLY 回读 | GPU，写 export-diagnostic.json；不重训 |
+| `tests/manual/test-mediasdk-helper.ps1` | 指定 LocationId、SceneId、CaptureId，独立 helper 按 5 fps 验收（不代表新 Run 默认）；可用 RunId 恢复 | GPU、解码和 Run 候选缓存；不是轻量单测 |
+| `tests/manual/smoke-native-gsplat.py` | 独立环境，`--output` 指定新的合成测试目录 | GPU、少量合成训练与检查点；不访问 Capture |
+| `tests/manual/check-native-export.py` | 独立环境，`--experiment` 与 `--dataset` 核验 PLY 回读 | GPU，写 export-diagnostic.json；不重训 |
+| `tests/manual/check-studio.py` | 独立环境，`--output` 指定新目录；`--gpu` 走 CUDA 集成，缺省只做 GUI 检查 | GPU/GUI；只写 `--output`，不访问 Capture |
 | `scripts/compare-backends-v5.py` | 主环境，`--run-dir --segment --output` 对照通过的分段 | 默认实际训练；`--dry-run` 仍会准备包及记录 |
 | `tools/mediasdk-helper/build.ps1` | 构建连接本机 SDK 的 helper | 写 build，不运行采集 |
 | `cleanup` | LocationId、SceneId、RunId；默认预览，`--apply` 执行 | 不使用 GPU；持有 Run 锁，仅删除验证后的白名单文件 |
@@ -22,6 +23,8 @@
 | `select-sharp` | 显式 `--source` / `--out` 的独立选帧工作台 | GPU（遮罩/投影）；只写 `--out`，不进 Data 目录 |
 
 独立 GPU 诊断脚本应在流水线空闲时执行；不要从独立脚本绕过正在使用的生产 GPU 锁。环境、SDK、helper 构建产物和 `env` 配置不是历史垃圾，不在文档清理范围内。
+
+测试脚本单独存放在 `tests/`：`tests/*.py` 是 pytest 单元测试，`tests/manual/` 是需要真机或独立环境的检查脚本，两者都入库。测试中间产物一律不入库：运行输出写到 `tests/output/<名称>/` 或仓库外，`.gitignore` 忽略 `tests/output/`、`tests/.tmp/`、`__pycache__/`、`.pytest_cache/`、`.coverage` 与 `htmlcov/`。
 
 后端对照直接输入 Run 目录。保持两后端、补偿开关、步数、时长及恢复选项；失败/阻断返回非零。复用成功结果时核验包身份、预算和 PLY 哈希。`--dry-run` 是准备动作，不是只读检查。
 
@@ -85,4 +88,4 @@ try {
 
 单测使用隔离锁、临时目录和模拟外部组件，覆盖 FFmpeg 分块序号映射、全景投影重叠规则、perspective 源校验、遮罩白名单与训练身份比对。文档维护不启动真实 Capture 重建、模型训练或 SDK 硬件验收。新增文档命令需核验 CLI 帮助、PowerShell 语法及模拟调用。
 
-真实素材验收另行执行：helper 对真实 INSV 的 probe/export_frames、`scripts\test-mediasdk-helper.ps1` 硬件验收、`gsdb reconstruct` 的 RealityScan 全流程，以及 gsplat 1.4.0 → 1.5.3 后的训练数值与画质，都需要在装好 SDK/RealityScan 的机器上用真实素材重新确认，不能以短训练或退出码代替。
+真实素材验收另行执行：helper 对真实 INSV 的 probe/export_frames、`tests\manual\test-mediasdk-helper.ps1` 硬件验收、`gsdb reconstruct` 的 RealityScan 全流程，以及 gsplat 1.4.0 → 1.5.3 后的训练数值与画质，都需要在装好 SDK/RealityScan 的机器上用真实素材重新确认，不能以短训练或退出码代替。

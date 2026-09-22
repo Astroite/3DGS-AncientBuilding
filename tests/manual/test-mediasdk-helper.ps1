@@ -8,8 +8,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
-. (Join-Path $PSScriptRoot 'session.ps1')
+$ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
+. (Join-Path $ProjectRoot 'scripts\session.ps1')
 $DataRoot = $env:GSDB_DATA_ROOT
 if (-not $env:GSDB_MEDIA_HELPER) {
     throw 'Set GSDB_MEDIA_HELPER to the approved Windows x64 helper first.'

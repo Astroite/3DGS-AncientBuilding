@@ -10,9 +10,11 @@ export against MediaSDK and InsMetaDataSDK. It must be built against the locally
 installed SDK with `build.ps1`; the native workflow has exercised X6 decoding.
 Support for a particular source is determined by the helper capabilities and
 probe response, not by a model name in this document. Validate a new SDK/camera
-combination with `scripts/test-mediasdk-helper.ps1` before production use.
-`fake-helper.py` is only the CI seam; it never parses INSV. Python helpers are
-rejected by default; tests deliberately set `GSDB_ALLOW_FAKE_MEDIA_HELPER=1`.
+combination with `tests/manual/test-mediasdk-helper.ps1` before production use.
+`tests/manual/fake-helper.py` is only the CI seam; it never parses INSV. Python
+helpers are rejected by default; tests deliberately set
+`GSDB_ALLOW_FAKE_MEDIA_HELPER=1`. Test scripts live under `tests/`; test
+byproducts never enter this repository.
 
 The user workflow is documented in [the current manual](../../docs/CURRENT-WORKFLOW.md).
 The JSON examples below illustrate the protocol and are not a complete camera

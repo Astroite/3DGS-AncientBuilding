@@ -63,8 +63,8 @@ GUI 不自动运行 LPIPS 或下载评估权重；记录 `evaluation_status=not_
 Set-Location 'D:\Project\3DGS\APP'
 & .venv\Scripts\python.exe -m pytest -ra
 # 每次指定一个尚不存在的目录：
-& .venv-gsplat\Scripts\python.exe scripts/check-studio.py --output ..\studio-validation\gui-new
-& .venv-gsplat\Scripts\python.exe scripts/check-studio.py --output ..\studio-validation\gpu-new --gpu
+& .venv-gsplat\Scripts\python.exe tests/manual/check-studio.py --output ..\studio-validation\gui-new
+& .venv-gsplat\Scripts\python.exe tests/manual/check-studio.py --output ..\studio-validation\gpu-new --gpu
 ```
 
 GUI 检查只截图测试窗口本身。GPU 检查用合成数据验证第 2 步暂停、第 8 步提前结束、恢复至第 12 步、实时预览、PLY 导出与项目重开；它遵守工作区 GPU 锁，30 秒仍占用即退出。
