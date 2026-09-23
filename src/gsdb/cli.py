@@ -9,7 +9,9 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
+from rich.text import Text
 
 from .catalog import build_catalog
 from .doctor import run_doctor
@@ -18,6 +20,8 @@ from .mask_finalize import finalize_mask_dataset
 from .masking import validate_mask_filter
 from .mask_review import create_mask_review_server
 from .run_lock import run_cli_locked
+from .services import classify, format_checks
+from .services import browse, run_status
 from .models import (
     IMAGE_SUFFIXES,
     Camera,
@@ -91,7 +95,10 @@ def _scene(location_id: str, scene_id: str) -> Path:
 
 
 def _fatal(error: Exception) -> None:
-    console.print(f"[red]Error:[/red] {error}")
+    classified = classify(error)
+    line = Text(f"Error[{classified.code}]: ", style="red")
+    line.append(classified.message)
+    console.print(line)
     raise typer.Exit(1)
 
 
@@ -112,23 +119,208 @@ def doctor(
     except Exception as error:
         _fatal(error)
     table = Table("Check", "Result", "Detail")
-    for name, result in checks.items():
-        if name == "ok":
-            continue
-        ok, detail = result
-        optional = name in {"mediasdk", "postshot"} and name not in set(require or [])
-        if name == "postshot" and backend in {"postshot", "all"}:
-            optional = False
-        label = "PASS" if ok else ("UNAVAILABLE" if optional else "FAIL")
+    for view in format_checks(checks, require=set(require or []), backend=backend):
         table.add_row(
-            name,
-            label,
-            str(detail),
-            style=None if ok or optional else "red",
+            view.name,
+            view.label,
+            view.detail,
+            style=None if view.ok or not view.required else "red",
         )
     console.print(table)
     if not checks["ok"]:
         raise typer.Exit(1)
+
+
+def _emit(payload: dict, as_json: bool, render) -> None:
+    if as_json:
+        # Plain stdout: scripts must get clean JSON regardless of console width.
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        render()
+
+
+def _print_problem(subject: str, problem) -> None:
+    where = f" ({escape(problem.path)})" if problem.path else ""
+    console.print(
+        f"[yellow]{escape(problem.code)}[/yellow] {escape(subject)}: "
+        f"{escape(problem.message)}{where}"
+    )
+
+
+def _print_problems(entries) -> None:
+    for entry in entries:
+        for problem in entry.problems:
+            _print_problem(entry.id, problem)
+
+
+def _print_locations(entries) -> None:
+    table = Table("Location", "Name", "Status", "Scenes", "Capture date")
+    for item in entries:
+        table.add_row(
+            item.id,
+            item.display_name or "-",
+            browse.status_label(item),
+            str(item.scene_count),
+            item.capture_date or "-",
+        )
+    console.print(table)
+    _print_problems(entries)
+
+
+def _print_scenes(entries) -> None:
+    table = Table("Scene", "Name", "Status", "Quality target", "Metric scale")
+    for item in entries:
+        table.add_row(
+            item.id,
+            item.display_name or "-",
+            browse.status_label(item),
+            item.quality_target or "-",
+            "yes" if item.metric_scale else "no",
+        )
+    console.print(table)
+    _print_problems(entries)
+
+
+def _print_scene(captures, runs) -> None:
+    table = Table("Capture", "Source", "Files", "Media", "Status", "Selection")
+    for item in captures:
+        media = item.media or {}
+        size = (
+            f"{media.get('width')}x{media.get('height')}"
+            if media.get("width")
+            else "-"
+        )
+        selection = (
+            f"{item.selection['start_seconds']:.2f}-{item.selection['end_seconds']:.2f}s"
+            if item.selection
+            else "-"
+        )
+        table.add_row(
+            item.id,
+            item.source_kind or "-",
+            f"{item.files_present}/{item.files_total}",
+            size,
+            browse.status_label(item),
+            selection,
+        )
+    console.print(table)
+    _print_problems(captures)
+    run_table = Table("Run", "Status", "Stages", "Selected", "Updated")
+    for item in runs:
+        stages = ", ".join(f"{name}={value}" for name, value in item.stages.items()) or "-"
+        run_table.add_row(
+            item.id,
+            browse.status_label(item),
+            stages,
+            item.selected_dataset or "-",
+            item.updated_at or "-",
+        )
+    console.print(run_table)
+    _print_problems(runs)
+
+
+def _print_run_detail(detail) -> None:
+    entry = detail.entry
+    console.print(
+        f"Run [green]{escape(entry.id)}[/green] in {escape(entry.location_id)}/{escape(entry.scene_id)}: "
+        f"status={escape(detail.status_label)}"
+    )
+    if detail.config_summary:
+        console.print("[bold]Configuration[/bold]")
+        for key, value in detail.config_summary.items():
+            if isinstance(value, (dict, list)):
+                shown = json.dumps(value, ensure_ascii=False)
+            else:
+                shown = str(value)
+            console.print(f"  {escape(key)}: {escape(shown)}")
+    stages = Table("Stage", "Status", "Elapsed", "Message", "Log")
+    for stage in detail.stages:
+        elapsed = "-" if stage.elapsed_seconds is None else f"{stage.elapsed_seconds:.1f}s"
+        stages.add_row(
+            stage.name,
+            stage.status,
+            elapsed,
+            stage.message or "-",
+            stage.log_path if stage.log_path and stage.log_present else "-",
+        )
+    console.print(stages)
+    evidence = Table("Evidence", "Present", "Path")
+    for item in detail.evidence:
+        evidence.add_row(item.name, "yes" if item.present else "no", escape(item.path))
+    console.print(evidence)
+    if detail.logs:
+        logs = Table("Log", "Bytes", "Path")
+        for item in detail.logs:
+            logs.add_row(escape(item.name), str(item.size_bytes), escape(item.path))
+        console.print(logs)
+    if detail.experiments:
+        experiments = Table("Segment", "Backend", "Status", "Output", "Error")
+        for item in detail.experiments:
+            experiments.add_row(
+                item.segment or "-",
+                item.backend or "-",
+                item.status or "-",
+                escape(item.output or "-"),
+                escape(item.error or "-"),
+            )
+        console.print(experiments)
+    if detail.review_notes:
+        console.print(f"Review notes: {escape(detail.review_notes)}")
+    _print_problems(detail.entry.problems + detail.problems)
+
+
+@app.command()
+def status(
+    location_id: Annotated[str | None, typer.Argument(help="Location to expand")] = None,
+    scene_id: Annotated[str | None, typer.Argument(help="Scene to expand")] = None,
+    run_id: Annotated[str | None, typer.Argument(help="Run to inspect")] = None,
+    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output for scripts")] = False,
+) -> None:
+    """Read-only project, stage, evidence and log status.
+
+    Status comes from the manifests and the evidence they name: a directory, a
+    PLY or a report file never reports a stage as succeeded. Writes nothing.
+    """
+    try:
+        root = _data_root()
+        if run_id is not None:
+            if not location_id or not scene_id:
+                raise ValueError("Inspecting a run needs a location and a scene")
+            detail = run_status.read_run_detail(root, location_id, scene_id, run_id)
+            _emit(detail.to_dict(), as_json, lambda: _print_run_detail(detail))
+            return
+        if scene_id is not None:
+            if not location_id:
+                raise ValueError("Listing a scene needs a location")
+            captures = browse.list_captures(root, location_id, scene_id)
+            runs = browse.list_runs(root, location_id, scene_id)
+            _emit(
+                {
+                    "location_id": location_id,
+                    "scene_id": scene_id,
+                    "captures": [item.to_dict() for item in captures],
+                    "runs": [item.to_dict() for item in runs],
+                },
+                as_json,
+                lambda: _print_scene(captures, runs),
+            )
+            return
+        if location_id is not None:
+            scenes = browse.list_scenes(root, location_id)
+            _emit(
+                {"location_id": location_id, "scenes": [item.to_dict() for item in scenes]},
+                as_json,
+                lambda: _print_scenes(scenes),
+            )
+            return
+        locations = browse.list_locations(root)
+        _emit(
+            {"locations": [item.to_dict() for item in locations]},
+            as_json,
+            lambda: _print_locations(locations),
+        )
+    except Exception as error:
+        _fatal(error)
 
 
 def _source_files(source_type: str, sources: list[Path]) -> list[Path]:

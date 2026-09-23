@@ -2,7 +2,7 @@
 
 APP 保留现有仓库和目录，正在升级为以 GUI 为日常入口的 GS-Studio。目标覆盖地点、场景、Capture、Run、RealityScan 重建、分段 QA、本地训练、模型编辑与导出。现行 Windows 流水线（360 / 透视视频 → Gaussian Splatting）仍主要通过 `gsdb` CLI 操作；正式全流程 GUI 尚未实现或验收。
 
-**当前操作依据：[Windows 360 重建工作手册](docs/CURRENT-WORKFLOW.md)。** 项目阶段与需求追踪见 [GS-Studio 项目路线图](docs/GS-STUDIO-PROJECT-ROADMAP.md)，入口整合、兼容和决策关口见 [工程路线图](docs/GS-STUDIO-ENGINEERING-ROADMAP.md)。开发、脚本用途、环境版本和不支持的历史形态见 [维护说明](docs/MAINTENANCE.md)；已通过评审的设计和早期技术评估保留在 [GS-Studio-Plan 历史资料](docs/GS-Studio-Plan/README.md)。
+**当前操作依据：[Windows 360 重建工作手册](docs/CURRENT-WORKFLOW.md)。** 项目阶段与需求追踪见 [GS-Studio 项目路线图](docs/GS-STUDIO-PROJECT-ROADMAP.md)，入口整合、兼容和决策关口见 [工程路线图](docs/GS-STUDIO-ENGINEERING-ROADMAP.md)，实施前技术决策见 [架构决策记录](docs/GS-STUDIO-DECISIONS.md)。开发、脚本用途、环境版本和不支持的历史形态见 [维护说明](docs/MAINTENANCE.md)；已通过评审的设计和早期技术评估保留在 [GS-Studio-Plan 历史资料](docs/GS-Studio-Plan/README.md)。
 
 当前本地可视化训练与基础编辑原型入口为 `scripts/studio.ps1`。支持外部 COLMAP / 已通过 QA 的共享包、训练预览和快照编辑，使用现有 `.venv-gsplat` 环境。原型能力和验证边界见 [GS-Studio 原型使用说明](docs/STUDIO.md)。
 

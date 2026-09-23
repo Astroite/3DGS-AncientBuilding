@@ -20,9 +20,12 @@
 | `tools/mediasdk-helper/build.ps1` | 构建连接本机 SDK 的 helper | 写 build，不运行采集 |
 | `cleanup` | LocationId、SceneId、RunId；默认预览，`--apply` 执行 | 不使用 GPU；持有 Run 锁，仅删除验证后的白名单文件 |
 | `doctor` | 检查当前 Windows 重建与所选后端 | 使用 GPU 锁，产生并清理诊断临时文件；不训练 |
+| `status` | 只读项目/阶段/证据/日志状态，可逐级下钻；`--json` 供脚本 | 不使用 GPU，不写任何文件；状态只来自清单与证据 |
 | `select-sharp` | 显式 `--source` / `--out` 的独立选帧工作台 | GPU（遮罩/投影）；只写 `--out`，不进 Data 目录 |
 
 独立 GPU 诊断脚本应在流水线空闲时执行；不要从独立脚本绕过正在使用的生产 GPU 锁。环境、SDK、helper 构建产物和 `env` 配置不是历史垃圾，不在文档清理范围内。
+
+GUI 与 CLI 共用 `src/gsdb/services/` 的只读状态读取、依赖检查标注和错误分类，边界见 [D-13](GS-STUDIO-DECISIONS.md)：状态只来自清单与证据，错误分类只做标注、不改失败与恢复语义和退出码。写入动作仍走上表的流水线入口。
 
 测试脚本单独存放在 `tests/`：`tests/*.py` 是 pytest 单元测试，`tests/manual/` 是需要真机或独立环境的检查脚本，两者都入库。测试中间产物一律不入库：运行输出写到 `tests/output/<名称>/` 或仓库外，`.gitignore` 忽略 `tests/output/`、`tests/.tmp/`、`__pycache__/`、`.pytest_cache/`、`.coverage` 与 `htmlcov/`。
 
