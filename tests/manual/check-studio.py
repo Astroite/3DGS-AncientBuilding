@@ -7,9 +7,9 @@ from pathlib import Path
 
 import numpy as np
 
-from gsdb.studio_data import write_image
-from gsdb.training_data import json_write
-from gsdb.media import sha256_file
+from gsstudio.pipeline.editor.data import write_image
+from gsstudio.pipeline.training.data import json_write
+from gsstudio.infrastructure.adapters.media import sha256_file
 
 
 def make_package(root, gpu=False):
@@ -20,7 +20,7 @@ def make_package(root, gpu=False):
     np.savez(package/'points.npz',xyz=xyz,rgb=rng.integers(30,220,(100,3),dtype=np.uint8))
     params=None
     if gpu:
-        from gsdb import native_train as native
+        from gsstudio.pipeline.training import native
         native.configure_windows_cuda()
         params=native.initialize(package)
     rows=[]
@@ -49,8 +49,8 @@ def make_package(root, gpu=False):
 def gpu_check(root):
     import queue
     import torch
-    from gsdb.gpu_lock import gpu_session
-    from gsdb.studio_runtime import Runtime
+    from gsstudio.infrastructure.runtime.gpu_lock import gpu_session
+    from gsstudio.pipeline.editor.runtime import Runtime
     with gpu_session(timeout=30):
         package,rows=make_package(root,True)
     runtime=Runtime()
@@ -127,8 +127,8 @@ def gpu_check(root):
 def gui_check(root):
     import tkinter as tk
     from PIL import Image
-    from gsdb.studio import Studio
-    from gsdb.studio_data import Dataset
+    from prototypes.tk_studio.studio import Studio
+    from gsstudio.pipeline.editor.data import Dataset
     package,rows=make_package(root)
     window=tk.Tk()
     app=Studio(window)

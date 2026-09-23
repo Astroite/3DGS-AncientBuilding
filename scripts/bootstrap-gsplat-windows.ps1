@@ -3,8 +3,8 @@ $ErrorActionPreference = 'Stop'
 $AppRoot = Split-Path $PSScriptRoot -Parent
 $Python = Join-Path $AppRoot '.venv-gsplat\Scripts\python.exe'
 
-function Get-GsdbCudaHome {
-    foreach ($Candidate in @($env:GSDB_CUDA_HOME, $env:CUDA_HOME)) {
+function Get-GsstudioCudaHome {
+    foreach ($Candidate in @($env:GSSTUDIO_CUDA_HOME, $env:CUDA_HOME)) {
         if ($Candidate -and (Test-Path -LiteralPath (Join-Path $Candidate 'bin\nvcc.exe'))) { return $Candidate }
     }
     $ToolkitRoot = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA'
@@ -18,7 +18,7 @@ function Get-GsdbCudaHome {
     return $null
 }
 
-function Get-GsdbVcvars {
+function Get-GsstudioVcvars {
     $Locator = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
     if (-not (Test-Path -LiteralPath $Locator)) { return $null }
     $Install = & $Locator -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
@@ -46,11 +46,11 @@ if (-not $SkipPackages) {
     & $Python -m pip install gsplat==1.5.3 --no-deps
     if ($LASTEXITCODE -ne 0) { throw 'Cannot install the pinned gsplat sources' }
 
-    $CudaHome = Get-GsdbCudaHome
-    if (-not $CudaHome) { throw 'CUDA 13 toolkit not found. Set GSDB_CUDA_HOME to its root.' }
-    $Vcvars = Get-GsdbVcvars
+    $CudaHome = Get-GsstudioCudaHome
+    if (-not $CudaHome) { throw 'CUDA 13 toolkit not found. Set GSSTUDIO_CUDA_HOME to its root.' }
+    $Vcvars = Get-GsstudioVcvars
     if (-not $Vcvars) { throw 'MSVC build environment was not found.' }
-    $EnvBat = Join-Path ([System.IO.Path]::GetTempPath()) ('gsdb-vcvars-' + [guid]::NewGuid().ToString('N') + '.bat')
+    $EnvBat = Join-Path ([System.IO.Path]::GetTempPath()) ('gsstudio-vcvars-' + [guid]::NewGuid().ToString('N') + '.bat')
     Set-Content -LiteralPath $EnvBat -Encoding ascii -Value ("@echo off`r`ncall `"$Vcvars`" >nul`r`nset`r`n")
     $BuildEnv = & cmd.exe /c $EnvBat
     Remove-Item -LiteralPath $EnvBat -Force
@@ -67,6 +67,6 @@ if (-not $SkipPackages) {
     if ($LASTEXITCODE -ne 0) { throw 'Cannot build the pinned CUDA extension for sm_120' }
 
     & $Python -m pip install -e $AppRoot
-    if ($LASTEXITCODE -ne 0) { throw 'Cannot install gsdb training entrypoint' }
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot install gsstudio training entrypoint' }
 }
 Write-Output "Native trainer: $Python"

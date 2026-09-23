@@ -10,11 +10,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
 . (Join-Path $ProjectRoot 'scripts\session.ps1')
-$DataRoot = $env:GSDB_DATA_ROOT
-if (-not $env:GSDB_MEDIA_HELPER) {
-    throw 'Set GSDB_MEDIA_HELPER to the approved Windows x64 helper first.'
+$DataRoot = $env:GSSTUDIO_DATA_ROOT
+if (-not $env:GSSTUDIO_MEDIA_HELPER) {
+    throw 'Set GSSTUDIO_MEDIA_HELPER to the approved Windows x64 helper first.'
 }
-$ConfiguredHelper = Get-Item -LiteralPath $env:GSDB_MEDIA_HELPER
+$ConfiguredHelper = Get-Item -LiteralPath $env:GSSTUDIO_MEDIA_HELPER
 if ($ConfiguredHelper.Extension -ne '.exe') {
     throw 'Hardware acceptance requires the approved Windows x64 .exe, not the CI fake helper.'
 }
@@ -38,12 +38,12 @@ finally {
 if (-not $env:INSTA360_MEDIA_SDK_ROOT) {
     throw 'Set INSTA360_MEDIA_SDK_ROOT to the approved SDK installation first.'
 }
-$Gsdb = Join-Path $ProjectRoot 'gsdb.ps1'
+$Gsstudio = Join-Path $ProjectRoot 'gsstudio.ps1'
 # Probe and exported-frame checks validate the SDK without requiring a trainer.
 # Use doctor separately for the complete pipeline.
 
 Write-Host 'Probing the real INSV source...'
-& $Gsdb media probe $LocationId $SceneId $CaptureId
+& $Gsstudio media probe $LocationId $SceneId $CaptureId
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $PreprocessArguments = @(
@@ -58,7 +58,7 @@ if ($ResumePreparedCache -or $RunId) {
 }
 
 Write-Host 'Exporting and validating the capture at 5 fps candidate sampling...'
-$PreprocessOutput = @(& $Gsdb @PreprocessArguments 2>&1)
+$PreprocessOutput = @(& $Gsstudio @PreprocessArguments 2>&1)
 $PreprocessOutput | ForEach-Object { Write-Host $_ }
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

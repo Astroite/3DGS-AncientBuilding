@@ -1,9 +1,9 @@
 #pragma once
 
-// A minimal JSON value, parser and writer scoped to the gsdb-media-helper
+// A minimal JSON value, parser and writer scoped to the gsstudio-media-helper
 // request/response protocol (see README.md). Not a general-purpose JSON
 // library: no comments, no trailing commas, doubles only for numbers. The
-// protocol is produced by gsdb itself, not untrusted external input, so this
+// protocol is produced by gsstudio itself, not untrusted external input, so this
 // narrower implementation is preferred over vendoring a full JSON library.
 
 #include <cctype>
@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-namespace gsdb::json {
+namespace gsstudio::json {
 
 class Value;
 using Array = std::vector<Value>;
@@ -383,4 +383,4 @@ class ObjectWriter {
   bool started_ = false;
 };
 
-}  // namespace gsdb::json
+}  // namespace gsstudio::json

@@ -5,8 +5,8 @@ import json
 import numpy as np
 import torch
 import torch.nn.functional as F
-from gsdb.native_train import configure_windows_cuda,load_ply,render
-from gsdb.training_data import json_write
+from gsstudio.pipeline.training.native import configure_windows_cuda,load_ply,render
+from gsstudio.pipeline.training.data import json_write
 
 parser=argparse.ArgumentParser()
 parser.add_argument('--experiment',type=Path,required=True)

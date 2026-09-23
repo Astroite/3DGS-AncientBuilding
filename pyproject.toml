@@ -3,7 +3,7 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gsdb"
+name = "gsstudio"
 version = "0.2.0"
 description = "Location-oriented 360 video to Gaussian Splatting workflow and catalog"
 readme = "README.md"
@@ -26,9 +26,8 @@ dev = [
 ]
 
 [project.scripts]
-gsdb = "gsdb.cli:app"
-gsdb-studio = "gsdb.studio:main"
-gs-studio = "gsdb.gui.app:main"
+gsstudio = "gsstudio.interfaces.cli.app:app"
+gs-studio = "gsstudio.interfaces.desktop.app:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -37,7 +36,7 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-gsdb = ["static/*.html"]
+gsstudio = ["resources/*.html"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

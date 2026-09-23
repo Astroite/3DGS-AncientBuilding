@@ -7,11 +7,11 @@
 
 int wmain(int argc, wchar_t** argv) {
   if (argc != 3) {
-    std::wcerr << L"usage: gsdb-media-helper.exe REQUEST.json RESPONSE.json\n";
+    std::wcerr << L"usage: gsstudio-media-helper.exe REQUEST.json RESPONSE.json\n";
     return 64;
   }
   try {
-    return gsdb::RunMediaRequest(std::filesystem::path(argv[1]),
+    return gsstudio::RunMediaRequest(std::filesystem::path(argv[1]),
                                  std::filesystem::path(argv[2]));
   } catch (const std::exception& error) {
     std::cerr << "MediaSDK helper failure: " << error.what() << "\n";

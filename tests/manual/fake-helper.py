@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CI-only implementation of the GSDB MediaSDK JSON protocol.
+"""CI-only implementation of the GS Studio MediaSDK JSON protocol.
 
 Each fake .insv needs a sibling ``.insv.probe.json``. This script never parses
 INSV and must not be used as a production fallback.
@@ -51,7 +51,7 @@ def main() -> int:
         "sdk_version": "fake-1.0",
         "supported_camera_models": SUPPORTED,
     }
-    mode = os.environ.get("GSDB_FAKE_HELPER_MODE", "").strip()
+    mode = os.environ.get("GSSTUDIO_FAKE_HELPER_MODE", "").strip()
     if mode == "no_response":
         return 7
     if mode == "wrong_schema":
@@ -96,12 +96,12 @@ def main() -> int:
         export_base = {
             **base,
             "helper_version": os.environ.get(
-                "GSDB_FAKE_HELPER_EXPORT_VERSION", base["helper_version"]
+                "GSSTUDIO_FAKE_HELPER_EXPORT_VERSION", base["helper_version"]
             ),
         }
         output = request["output"]
         width, height = int(output["width"]), int(output["height"])
-        fail_after_value = os.environ.get("GSDB_FAKE_HELPER_FAIL_AFTER", "").strip()
+        fail_after_value = os.environ.get("GSSTUDIO_FAKE_HELPER_FAIL_AFTER", "").strip()
         fail_after = int(fail_after_value) if fail_after_value else None
         for position, item in enumerate(request["frames"]):
             if fail_after is not None and position >= fail_after:
@@ -120,7 +120,7 @@ def main() -> int:
             target.parent.mkdir(parents=True, exist_ok=True)
             value = int(item["source_frame_index"]) % 255
             image = np.full((height, width, 3), value, dtype=np.uint8)
-            if os.environ.get("GSDB_FAKE_HELPER_PNG_AS_JPEG"):
+            if os.environ.get("GSSTUDIO_FAKE_HELPER_PNG_AS_JPEG"):
                 encoded_ok, encoded = cv2.imencode(".png", image)
                 if not encoded_ok:
                     raise RuntimeError(f"cannot encode {target}")
@@ -131,7 +131,7 @@ def main() -> int:
                 [cv2.IMWRITE_JPEG_QUALITY, int(output["jpeg_quality"])],
             ):
                 raise RuntimeError(f"cannot write {target}")
-            if os.environ.get("GSDB_FAKE_HELPER_MUTATE_SOURCE"):
+            if os.environ.get("GSSTUDIO_FAKE_HELPER_MUTATE_SOURCE"):
                 sources[0].write_bytes(b"mutated by fake helper")
         return respond(
             response_path,

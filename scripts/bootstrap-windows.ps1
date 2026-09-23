@@ -27,7 +27,7 @@ if ($LASTEXITCODE -ne 0) { throw 'pip upgrade failed' }
 if ($LASTEXITCODE -ne 0) { throw 'torch/torchvision install failed' }
 
 # nerfstudio stays on the pinned commit, but --no-deps keeps pip from building the
-# CUDA 11.8-only extensions it pins (gsplat 1.4.0, nerfacc 0.5.2). GSDB only imports
+# CUDA 11.8-only extensions it pins (gsplat 1.4.0, nerfacc 0.5.2). GSSTUDIO only imports
 # nerfstudio's COLMAP/equirect helpers; the subset below is their complete
 # third-party import surface.
 & $VenvPython -m pip install --no-deps `
@@ -42,6 +42,6 @@ if ($LASTEXITCODE -ne 0) { throw 'nerfstudio runtime dependency install failed' 
 if ($LASTEXITCODE -ne 0) { throw 'nerfstudio patch failed' }
 
 & $VenvPython -m pip install --editable "$ProjectRoot[dev]"
-if ($LASTEXITCODE -ne 0) { throw 'gsdb editable install failed' }
+if ($LASTEXITCODE -ne 0) { throw 'gsstudio editable install failed' }
 
-Write-Output 'Main environment installed. Install the shared trainer/evaluator with scripts\bootstrap-gsplat-windows.ps1, then run gsdb.ps1 doctor --backend gsplat.'
+Write-Output 'Main environment installed. Install the shared trainer/evaluator with scripts\bootstrap-gsplat-windows.ps1, then run gsstudio.ps1 doctor --backend gsplat.'

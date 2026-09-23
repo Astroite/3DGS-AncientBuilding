@@ -20,7 +20,7 @@
 #include "metaData.h"
 #include "stitcher/ins_stitcher.h"
 
-namespace gsdb {
+namespace gsstudio {
 namespace {
 
 constexpr const char* kHelperVersion = "0.2.0";
@@ -105,7 +105,7 @@ std::string FileExtensionLower(const std::string& utf8_path) {
   return ext;
 }
 
-// Camera models this build declares support for. This is gsdb's own
+// Camera models this build declares support for. This is GS Studio's own
 // declaration, not something the SDK reports (GetMediaFileInfo/GetVersion
 // carry no model list) -- mirrors sources.py's PUBLIC_SUPPORTED_CAMERAS
 // exactly, since Python's gate requires a detected camera to appear in both
@@ -428,4 +428,4 @@ int RunMediaRequest(const std::filesystem::path& request_path,
   return 0;
 }
 
-}  // namespace gsdb
+}  // namespace gsstudio

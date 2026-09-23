@@ -1,8 +1,8 @@
 # APP 工作入口
 
-操作 Capture、Run、重建或训练前，先读 [当前工作手册](docs/CURRENT-WORKFLOW.md)。开发和脚本清单见 [维护说明](docs/MAINTENANCE.md)。GS-Studio 的未来方向见[项目路线图](docs/GS-STUDIO-PROJECT-ROADMAP.md)和[工程路线图](docs/GS-STUDIO-ENGINEERING-ROADMAP.md)；路线图不取代当前操作手册，不从工作区历史归档提取默认运行命令。
+操作 Capture、Run、重建或训练前，先读 [当前工作手册](docs/user/CURRENT-WORKFLOW.md)。开发和脚本清单见 [维护说明](docs/development/MAINTENANCE.md)。GS-Studio 的未来方向见[项目路线图](docs/architecture/GS-STUDIO-PROJECT-ROADMAP.md)和[工程路线图](docs/architecture/GS-STUDIO-ENGINEERING-ROADMAP.md)；路线图不取代当前操作手册，不从工作区历史归档提取默认运行命令。
 
-- 使用原生 Windows 环境和 scripts/session.ps1；gsdb.ps1 复用同一初始化。
+- 使用原生 Windows 环境和 scripts/session.ps1；gsstudio.ps1 复用同一初始化。
 - 保留用户未提交改动、运行环境、SDK、密钥和原始数据。
 - 只有一条流水线和一套 Run 配置；旧 schema Run 不再可读、不可恢复。不要为历史文档补兼容分支。
 - Run 清单、输入哈希、分段 QA 和训练结果共同决定状态。不得将失败 Run 手改为成功或绕过完整性校验。

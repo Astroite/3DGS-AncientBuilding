@@ -2,7 +2,7 @@
 from pathlib import Path
 import argparse
 
-from gsdb.comparison import compare_backends
+from gsstudio.pipeline.training.comparison import compare_backends
 
 
 def main():

@@ -103,7 +103,7 @@ def main() -> None:
         raise SystemExit(f"No CUDA sources found under {csrc}")
     build_dir = Path(
         os.environ.get(
-            "GSDB_GSPLAT_BUILD_DIR", str(Path(tempfile.gettempdir()) / "gsdb-gsplat-csrc")
+            "GSSTUDIO_GSPLAT_BUILD_DIR", str(Path(tempfile.gettempdir()) / "gsstudio-gsplat-csrc")
         )
     ).resolve()
     build_dir.mkdir(parents=True, exist_ok=True)

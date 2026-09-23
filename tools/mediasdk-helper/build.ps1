@@ -12,7 +12,7 @@ if (-not $env:INSTA360_MEDIA_SDK_ROOT) {
 $BuildRoot = Join-Path $HelperRoot 'build'
 cmake -S $HelperRoot -B $BuildRoot -A x64
 cmake --build $BuildRoot --config $Configuration
-if ($LASTEXITCODE -ne 0) { throw 'gsdb-media-helper build failed' }
+if ($LASTEXITCODE -ne 0) { throw 'gsstudio-media-helper build failed' }
 
 $OutputDir = Join-Path $BuildRoot $Configuration
 $SdkBin = Join-Path $env:INSTA360_MEDIA_SDK_ROOT 'bin'
@@ -24,4 +24,4 @@ Get-ChildItem -LiteralPath $SdkBin -Filter '*.dll' | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination $OutputDir -Force
 }
 
-Write-Host "Helper build complete. Set GSDB_MEDIA_HELPER to $OutputDir\gsdb-media-helper.exe."
+Write-Host "Helper build complete. Set GSSTUDIO_MEDIA_HELPER to $OutputDir\gsstudio-media-helper.exe."

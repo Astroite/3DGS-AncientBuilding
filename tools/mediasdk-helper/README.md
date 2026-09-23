@@ -1,4 +1,4 @@
-# GSDB MediaSDK helper
+# GSSTUDIO MediaSDK helper
 
 The Insta360 SDK remains an external, licensed installation. Do not copy its
 headers, DLLs, import libraries, models, license files, or built helper binaries
@@ -13,10 +13,10 @@ probe response, not by a model name in this document. Validate a new SDK/camera
 combination with `tests/manual/test-mediasdk-helper.ps1` before production use.
 `tests/manual/fake-helper.py` is only the CI seam; it never parses INSV. Python
 helpers are rejected by default; tests deliberately set
-`GSDB_ALLOW_FAKE_MEDIA_HELPER=1`. Test scripts live under `tests/`; test
+`GSSTUDIO_ALLOW_FAKE_MEDIA_HELPER=1`. Test scripts live under `tests/`; test
 byproducts never enter this repository.
 
-The user workflow is documented in [the current manual](../../docs/CURRENT-WORKFLOW.md).
+The user workflow is documented in [the current manual](../../docs/user/CURRENT-WORKFLOW.md).
 The JSON examples below illustrate the protocol and are not a complete camera
 support list. Build outputs and locally copied runtime DLLs remain ignored by Git.
 
@@ -25,7 +25,7 @@ support list. Build outputs and locally copied runtime DLLs remain ignored by Gi
 The Windows x64 executable is invoked once per request:
 
 ```text
-gsdb-media-helper.exe <request-json> <response-json>
+gsstudio-media-helper.exe <request-json> <response-json>
 ```
 
 Both files are UTF-8 JSON. Protocol version 1 has exactly three operations:
@@ -110,7 +110,7 @@ are required; `codec` is optional.
 ## `export_frames`
 
 Only export the listed candidates. `output_file` is the final filename within
-GSDB's `.building` directory, not a filename template.
+GSSTUDIO's `.building` directory, not a filename template.
 
 ```json
 {
@@ -158,6 +158,6 @@ JPEG. Return only after files are closed and durable, with
 }
 ```
 
-GSDB owns directory-level resume, per-frame decode/hash checks, `dataset.json`,
+GSSTUDIO owns directory-level resume, per-frame decode/hash checks, `dataset.json`,
 and the atomic `.building` rename. The helper must not modify source files or
 emit unrequested frames.

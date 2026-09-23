@@ -6,9 +6,9 @@ import cv2
 import numpy as np
 import torch
 
-from gsdb import native_train as native
-from gsdb.media import sha256_file
-from gsdb.training_data import json_write
+from gsstudio.pipeline.training import native
+from gsstudio.infrastructure.adapters.media import sha256_file
+from gsstudio.pipeline.training.data import json_write
 
 parser=argparse.ArgumentParser()
 parser.add_argument('--output',required=True,type=Path)
