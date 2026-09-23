@@ -1,6 +1,6 @@
 # GS-Studio：当前训练与编辑原型
 
-本文说明 APP 现有 Tk 原型的实际入口和限制。全流程 GUI 的产品目标与阶段见[项目路线图](GS-STUDIO-PROJECT-ROADMAP.md)，工程整合见[工程路线图](GS-STUDIO-ENGINEERING-ROADMAP.md)；原型不代表正式界面或产品验收。
+本文说明 APP 现有 Tk 原型的实际入口和限制。全流程 GUI 的产品目标与阶段见[项目路线图](GS-STUDIO-PROJECT-ROADMAP.md)，工程整合见[工程路线图](GS-STUDIO-ENGINEERING-ROADMAP.md)；原型不代表正式界面或产品验收。正式 GUI 壳（只读项目浏览、状态、证据、日志与依赖检查）已用 PySide6 交付，入口 `scripts/gs-studio.ps1`，见[架构决策记录 D-12](GS-STUDIO-DECISIONS.md)；训练与编辑界面仍在本页所述原型中。
 
 首版实现 RealityScan 输出 → 可视化导入 → 原生 gsplat 训练/预览 → 快照编辑 → PLY 导出。不调用 Postshot，不重新对齐相机，也不处理视频。现有 GSDB CLI 和默认后端不变。
 

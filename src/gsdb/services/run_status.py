@@ -117,7 +117,7 @@ def read_run_detail(root: Path, location_id: str, scene_id: str, run_id: str) ->
     base = absolute_root(root) / location_id / scene_id
     work = base / run.id
     stages = _stage_views(run, base)
-    evidence, problems = _evidence_views(run, base, work)
+    evidence = _evidence_views(run, base, work)
     return RunDetail(
         entry=entry,
         status_label=status_label(entry),
@@ -128,7 +128,9 @@ def read_run_detail(root: Path, location_id: str, scene_id: str, run_id: str) ->
         evidence=evidence,
         logs=_log_views(work / "logs"),
         experiments=_experiment_views(run),
-        problems=problems,
+        # The entry already reports manifest-level defects such as a missing
+        # prepared input; the detail adds none of its own.
+        problems=list(entry.problems),
     )
 
 
@@ -156,23 +158,14 @@ def _stage_views(run, scene_path: Path) -> list[StageView]:
     return views
 
 
-def _evidence_views(run, scene_path: Path, work: Path) -> tuple[list[EvidenceView], list[Problem]]:
+def _evidence_views(run, scene_path: Path, work: Path) -> list[EvidenceView]:
     views: list[EvidenceView] = []
-    problems: list[Problem] = []
 
     def add(name: str, path: Path) -> None:
         views.append(EvidenceView(name=name, path=str(path), present=path.is_file()))
 
     prepared = work / run.config.input_relative_path / "dataset.json"
     add("prepared-input", prepared)
-    if not prepared.is_file():
-        problems.append(
-            Problem(
-                "missing_input",
-                f"Prepared input manifest is missing: {run.config.input_relative_path}/dataset.json",
-                str(prepared),
-            )
-        )
     for label in ("primary", "repair"):
         dataset = work / f"reconstruction-{label}"
         if not dataset.is_dir():
@@ -181,7 +174,7 @@ def _evidence_views(run, scene_path: Path, work: Path) -> tuple[list[EvidenceVie
             add(f"{label}-{name}", dataset / name)
         add(f"selected-{label}-metrics", work / f"selected-{label}-metrics.jsonl")
     add("qa-report", scene_path / "qa" / f"{run.id}.md")
-    return views, problems
+    return views
 
 
 def _log_views(directory: Path) -> list[LogView]:

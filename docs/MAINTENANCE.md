@@ -21,6 +21,7 @@
 | `cleanup` | LocationId、SceneId、RunId；默认预览，`--apply` 执行 | 不使用 GPU；持有 Run 锁，仅删除验证后的白名单文件 |
 | `doctor` | 检查当前 Windows 重建与所选后端 | 使用 GPU 锁，产生并清理诊断临时文件；不训练 |
 | `status` | 只读项目/阶段/证据/日志状态，可逐级下钻；`--json` 供脚本 | 不使用 GPU，不写任何文件；状态只来自清单与证据 |
+| `scripts/gs-studio.ps1` | 启动 GS-Studio GUI 壳（只读项目浏览、状态、证据、日志），可选 `-DataRoot` | 界面只读；点击「依赖检查」才占用 GPU 锁并产生诊断临时文件 |
 | `select-sharp` | 显式 `--source` / `--out` 的独立选帧工作台 | GPU（遮罩/投影）；只写 `--out`，不进 Data 目录 |
 
 独立 GPU 诊断脚本应在流水线空闲时执行；不要从独立脚本绕过正在使用的生产 GPU 锁。环境、SDK、helper 构建产物和 `env` 配置不是历史垃圾，不在文档清理范围内。
@@ -89,6 +90,6 @@ try {
 }
 ```
 
-单测使用隔离锁、临时目录和模拟外部组件，覆盖 FFmpeg 分块序号映射、全景投影重叠规则、perspective 源校验、遮罩白名单与训练身份比对。文档维护不启动真实 Capture 重建、模型训练或 SDK 硬件验收。新增文档命令需核验 CLI 帮助、PowerShell 语法及模拟调用。
+单测使用隔离锁、临时目录和模拟外部组件，覆盖 FFmpeg 分块序号映射、全景投影重叠规则、perspective 源校验、遮罩白名单与训练身份比对。GUI 壳检查（`tests/test_gui_shell.py`）用 `QT_QPA_PLATFORM=offscreen` 离屏构造窗口，未装 PySide6 时自动跳过。文档维护不启动真实 Capture 重建、模型训练或 SDK 硬件验收。新增文档命令需核验 CLI 帮助、PowerShell 语法及模拟调用。
 
 真实素材验收另行执行：helper 对真实 INSV 的 probe/export_frames、`tests\manual\test-mediasdk-helper.ps1` 硬件验收、`gsdb reconstruct` 的 RealityScan 全流程，以及 gsplat 1.4.0 → 1.5.3 后的训练数值与画质，都需要在装好 SDK/RealityScan 的机器上用真实素材重新确认，不能以短训练或退出码代替。

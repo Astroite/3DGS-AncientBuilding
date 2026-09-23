@@ -51,7 +51,7 @@
 
 ### 后续影响
 
-`pyproject.toml` 的 `studio` extra、打包脚本、[维护说明](MAINTENANCE.md)入口表与 P5 发布证据需按本决定同步。本决定只定框架与部署形态，不构成任何画质、性能或兼容结论，也不解除运行验证暂停。
+已按本决定落地：`pyproject.toml` 的 `studio` extra 现含 Pillow 与 PySide6（6.x）；启动入口为 `gs-studio`（`gsdb.gui.app:main`）与 `scripts/gs-studio.ps1`（优先 `GSDB_GSPLAT_PYTHON` / `.venv-gsplat`，缺省回退 `.venv`）；旧的 `gsdb-studio` Tk 原型入口保留不动。P5 发布时补 PyInstaller onedir 打包脚本与 DPI 实测证据。本决定只定框架与部署形态，不构成任何画质、性能或兼容结论，也不解除运行验证暂停：界面的真机 DPI、字体与布局尚未目视验收。
 
 ## D-13 GUI/CLI 服务边界与错误分类
 
