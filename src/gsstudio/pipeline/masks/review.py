@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 import cv2
+from gsstudio.infrastructure.adapters.image_io import read_cv_image
 import numpy as np
 
 from gsstudio.pipeline.masks.masking import image_files, mask_path_for_image
@@ -158,8 +159,8 @@ class MaskReviewDataset:
         return items
 
     def _media_stats(self, image_path: Path, mask_path: Path) -> tuple[int, int, int]:
-        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-        mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        image = read_cv_image(str(image_path), cv2.IMREAD_COLOR)
+        mask = read_cv_image(str(mask_path), cv2.IMREAD_GRAYSCALE)
         if image is None or mask is None:
             raise RuntimeError(f"Missing or invalid image/mask pair: {image_path}, {mask_path}")
         if mask.shape != image.shape[:2]:
@@ -334,8 +335,8 @@ class MaskReviewDataset:
             if cached is not None:
                 self._thumbnail_cache[cache_key] = cached
                 return cached
-        image = cv2.imread(str(self.media_path(image_id, "image")), cv2.IMREAD_COLOR)
-        mask = cv2.imread(str(self.media_path(image_id, "mask")), cv2.IMREAD_GRAYSCALE)
+        image = read_cv_image(str(self.media_path(image_id, "image")), cv2.IMREAD_COLOR)
+        mask = read_cv_image(str(self.media_path(image_id, "mask")), cv2.IMREAD_GRAYSCALE)
         if image is None or mask is None or mask.shape != image.shape[:2]:
             raise RuntimeError(f"Cannot decode image/mask pair for image ID {image_id}")
         scale = min(1.0, 320.0 / max(image.shape[:2]))

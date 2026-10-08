@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 
 from gsstudio.domain.models import COCO_DYNAMIC_CLASS_IDS, MaskingConfig
+from gsstudio.infrastructure.adapters.image_io import atomic_imwrite, read_cv_image
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
@@ -120,33 +121,6 @@ def mask_path_for_image(
     except ValueError:
         relative = Path(image.name)
     return masks_dir / relative.parent / f"{relative.name}.png"
-
-
-def atomic_imwrite(
-    target: Path, image: np.ndarray, parameters: list[int] | None = None
-) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    encoded_ok, encoded = cv2.imencode(target.suffix, image, parameters or [])
-    if not encoded_ok:
-        raise RuntimeError(f"Failed to encode image for {target}")
-    temporary: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            "wb",
-            dir=target.parent,
-            prefix=f".{target.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as stream:
-            temporary = Path(stream.name)
-            stream.write(encoded.tobytes())
-            stream.flush()
-            os.fsync(stream.fileno())
-        temporary.replace(target)
-    except BaseException:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-        raise
 
 
 def postprocess_person_mask(mask: np.ndarray, config: MaskingConfig) -> np.ndarray:
@@ -271,7 +245,7 @@ class TorchvisionPersonSegmenter:
 
 
 def _read_existing_mask(mask_path: Path, shape: tuple[int, int]) -> np.ndarray:
-    stored = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+    stored = read_cv_image(str(mask_path), cv2.IMREAD_GRAYSCALE)
     if stored is None:
         raise RuntimeError(f"Cannot read existing mask: {mask_path}")
     if stored.shape != shape:
@@ -317,7 +291,7 @@ def generate_person_masks(
                 class_metrics = previous_records.get(image_name, {}).get("classes", {})
                 reused = True
             else:
-                image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+                image = read_cv_image(str(image_path), cv2.IMREAD_COLOR)
                 if image is None:
                     raise RuntimeError(f"Cannot decode planar image: {image_path}")
                 prediction = (
@@ -400,7 +374,7 @@ def validate_mask_set(
         name, image_path = item
         # The mask is decoded because its pixels drive the ratio; the image only has
         # to agree on shape, which the header already carries.
-        mask = cv2.imread(str(actual[name]), cv2.IMREAD_GRAYSCALE)
+        mask = read_cv_image(str(actual[name]), cv2.IMREAD_GRAYSCALE)
         if mask is None:
             raise RuntimeError(f"Cannot decode image/mask pair: {image_path.name}")
         if mask.shape != image_dimensions(image_path):
@@ -868,8 +842,8 @@ def create_mask_contact_sheets(
         canvas = np.zeros((2 * (tile_size + 34), 4 * tile_size, 3), dtype=np.uint8)
         for tile_index, record in enumerate(batch):
             image_path = images_dir / Path(str(record["image"]))
-            image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-            mask = cv2.imread(
+            image = read_cv_image(str(image_path), cv2.IMREAD_COLOR)
+            mask = read_cv_image(
                 str(mask_path_for_image(masks_dir, image_path, images_dir)),
                 cv2.IMREAD_GRAYSCALE,
             )

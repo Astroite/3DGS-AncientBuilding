@@ -16,6 +16,7 @@ import torch.nn.functional as F
 
 from gsstudio.infrastructure.persistence.manifests import canonical_hash
 from gsstudio.infrastructure.adapters.media import sha256_file
+from gsstudio.infrastructure.adapters.image_io import write_cv_image
 from gsstudio.infrastructure.adapters.gsplat import configure_windows_cuda
 from gsstudio.infrastructure.runtime.gpu_lock import gpu_session
 from gsstudio.pipeline.training.photometric import BilateralGrid
@@ -165,7 +166,8 @@ def exact_quantile(values,q):
 
 def evaluate(package, meta, params, output, antialiased=False):
     import lpips
-    metric = lpips.LPIPS(net='alex',spatial=True).to(params['means'].device).eval()
+    weights = Path(lpips.__file__).parent / 'weights' / 'v0.1' / 'alex.pth'
+    metric = lpips.LPIPS(net='alex',spatial=True,model_path=str(weights)).to(params['means'].device).eval()
     output.mkdir(parents=True,exist_ok=True)
     rows = []
     with torch.no_grad():
@@ -187,8 +189,8 @@ def evaluate(package, meta, params, output, antialiased=False):
             rows.append(dict(image=row['image'],frame=row['frame'],psnr=float(-10*torch.log10(mse.clamp_min(1e-12))),
                 ssim=float(1-ssim_loss),lpips=lpvalue,raw_max=float(raw.max()),raw_p999=exact_quantile(raw,0.999),
                 over_one_fraction=float((raw>1).float().mean()),target_saturated_fraction=float((target>=254/255).float().mean())))
-            cv2.imwrite(str(output/f'{index:05d}.png'),(pred.cpu().numpy()[...,::-1]*255).round().astype(np.uint8))
-            cv2.imwrite(str(output/f'{index:05d}-reference.png'),(target.cpu().numpy()[...,::-1]*255).round().astype(np.uint8))
+            write_cv_image(str(output/f'{index:05d}.png'),(pred.cpu().numpy()[...,::-1]*255).round().astype(np.uint8))
+            write_cv_image(str(output/f'{index:05d}-reference.png'),(target.cpu().numpy()[...,::-1]*255).round().astype(np.uint8))
         # Rotate each of the first three validation cameras: same centers and intrinsics.
         scan = []
         for camera_index,row in enumerate([r for r in meta['images'] if r['split']=='validation'][:3]):
@@ -202,7 +204,7 @@ def evaluate(package, meta, params, output, antialiased=False):
                     raw,_,_ = render(params,scan_row,degree,antialiased)
                     basename=f'angle-{camera_index:02d}-{degrees:+03d}-sh{degree}'
                     values=raw[0].cpu().numpy()
-                    cv2.imwrite(str(output/f'{basename}.png'),(values.clip(0,1)[...,::-1]*255).round().astype(np.uint8))
+                    write_cv_image(str(output/f'{basename}.png'),(values.clip(0,1)[...,::-1]*255).round().astype(np.uint8))
                     peaks=np.argsort(values.max(axis=2).reshape(-1))[-4096:]
                     np.savez_compressed(output/f'{basename}-raw-peaks.npz',pixel_indices=peaks,
                         rgb=values.reshape(-1,3)[peaks],shape=np.array(values.shape),world_to_camera=scan_row['world_to_camera'])

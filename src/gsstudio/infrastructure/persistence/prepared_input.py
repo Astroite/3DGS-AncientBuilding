@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import cv2
+from gsstudio.infrastructure.adapters.image_io import read_cv_image
 from gsstudio.domain.capture import SourceProbe
 from gsstudio.domain.prepared import CandidateFrameSet
 from gsstudio.infrastructure.persistence.manifests import canonical_hash
@@ -13,7 +14,7 @@ def _validate_frame(path: Path, width: int, height: int) -> str:
     with path.open("rb") as stream:
         if stream.read(3) != b"\xff\xd8\xff":
             raise RuntimeError(f"Prepared frame is not a JPEG file: {path}")
-    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    image = read_cv_image(str(path), cv2.IMREAD_COLOR)
     if image is None:
         raise RuntimeError(f"Cannot decode prepared frame: {path}")
     if image.shape[1] != width or image.shape[0] != height:

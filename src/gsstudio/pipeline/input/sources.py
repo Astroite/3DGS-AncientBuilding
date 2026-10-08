@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import cv2
+from gsstudio.infrastructure.adapters.image_io import read_cv_image, write_cv_image
 
 from gsstudio.infrastructure.persistence.manifests import canonical_hash
 from gsstudio.infrastructure.adapters.media import (
@@ -80,7 +81,7 @@ def probe_image_sequence(paths: Iterable[Path], fps: float | None = None) -> dic
     ordered = ordered_sequence_files(paths, fps=fps)
     dimensions: set[tuple[int, int]] = set()
     for path in ordered:
-        image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        image = read_cv_image(str(path), cv2.IMREAD_COLOR)
         if image is None:
             raise RuntimeError(f"Cannot decode image sequence member: {path}")
         dimensions.add((int(image.shape[1]), int(image.shape[0])))
@@ -466,7 +467,7 @@ def anchored_frame_indices(frame_count: int, source_fps: float, start: float,
 
 
 def _normalize_image(source: Path, destination: Path, width: int, height: int, quality: int) -> None:
-    image = cv2.imread(str(source), cv2.IMREAD_COLOR)
+    image = read_cv_image(str(source), cv2.IMREAD_COLOR)
     if image is None:
         raise RuntimeError(f"Cannot decode source image: {source}")
     source_height, source_width = image.shape[:2]
@@ -477,7 +478,7 @@ def _normalize_image(source: Path, destination: Path, width: int, height: int, q
     if (source_width, source_height) != (width, height):
         image = cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    if not cv2.imwrite(
+    if not write_cv_image(
         str(destination), image, [cv2.IMWRITE_JPEG_QUALITY, int(quality)]
     ):
         raise RuntimeError(f"Cannot write normalized image: {destination}")

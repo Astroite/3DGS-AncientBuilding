@@ -56,4 +56,4 @@ AC-17：创建和探测流程保持原片只读、不覆盖已有清单；输入
 
 ## 本轮边界
 
-本轮沿用隔离测试项目，只读引用 `Data/Test` 的 DJI 视频；短段 5 秒 Run 已完成预处理与真实遮罩，停在原配置要求的人工门禁。两环境固定 CUDA 诊断和合成训练通过，最终 101 项 CPU/Qt 检查通过；已生成四入口 Windows 候选包。具体身份、数值及尚未完成的验收见 [10 月记录](../development/VALIDATION-2026-10-08.md)。QA 判定规则与 CLI 默认后端（Postshot Splat ADC）未变；未自动启动全量训练。[旧基线](../archive/GS-Studio-Plan/status/BASELINE.md)仅是 2026-09-13 历史证据。
+本轮沿用隔离测试项目，只读引用 `Data/Test` 的 DJI 视频；短段 5 秒 Run 已完成预处理与真实遮罩，停在原配置要求的人工门禁。两环境固定 CUDA 诊断和合成训练通过，最终 105 项 CPU/Qt 检查通过；四入口 Windows 候选包正在核对中文路径、冻结资源和离线权重。具体身份、数值及尚未完成的验收见 [10 月记录](../development/VALIDATION-2026-10-08.md)。QA 判定规则与 CLI 默认后端（Postshot Splat ADC）未变；未自动启动全量训练。[旧基线](../archive/GS-Studio-Plan/status/BASELINE.md)仅是 2026-09-13 历史证据。

@@ -18,6 +18,7 @@ from typing import Any, Callable
 import numpy as np
 
 import cv2
+from gsstudio.infrastructure.adapters.image_io import read_cv_image
 
 from gsstudio.pipeline.masks.masking import (
     atomic_imwrite,
@@ -267,7 +268,7 @@ def project_equirectangular_frames(
         (target / f"view_{view_index:02d}").mkdir(parents=True, exist_ok=True)
 
     def decode(frame_path: Path) -> np.ndarray:
-        image = cv2.imread(str(frame_path), cv2.IMREAD_COLOR)
+        image = read_cv_image(str(frame_path), cv2.IMREAD_COLOR)
         if image is None:
             raise RuntimeError(f"Cannot decode equirectangular frame: {frame_path}")
         return image

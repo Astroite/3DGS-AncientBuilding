@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import cv2
+from gsstudio.infrastructure.adapters.image_io import read_cv_image
 import numpy as np
 
 from gsstudio.infrastructure.runtime.processes import run_logged
@@ -182,7 +183,7 @@ def extract_indexed_frames(
 
 
 def _frame_statistics(path: Path, timestamp: float) -> dict[str, Any]:
-    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    image = read_cv_image(str(path), cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError(f"OpenCV could not read {path}")
     height, width = image.shape[:2]

@@ -234,9 +234,10 @@ def run_realityscan_alignment(
                 from gsstudio.pipeline.masks.masking import mask_path_for_image, image_dimensions
                 from gsstudio.infrastructure.adapters.media import sha256_file
                 import cv2
+                from gsstudio.infrastructure.adapters.image_io import read_cv_image
                 import numpy as np
                 source_mask = mask_path_for_image(dataset / "masks", available[name])
-                pixels = cv2.imread(str(source_mask), cv2.IMREAD_GRAYSCALE)
+                pixels = read_cv_image(str(source_mask), cv2.IMREAD_GRAYSCALE)
                 if pixels is None or pixels.shape != image_dimensions(available[name]):
                     raise RuntimeError(f"Invalid alignment mask: {source_mask}")
                 if not np.all((pixels == 0) | (pixels == 255)):

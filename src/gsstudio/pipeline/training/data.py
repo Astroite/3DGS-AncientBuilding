@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 
 import cv2
+from gsstudio.infrastructure.adapters.image_io import read_cv_image, write_cv_image
 import numpy as np
 
 from gsstudio.infrastructure.persistence.manifests import canonical_hash
@@ -162,7 +163,7 @@ def _prepare_segment(dataset: Path, records: list[dict], attempt, settings: Segm
         if camera.model != 'PINHOLE':
             raise RuntimeError(f'Unsupported training camera: {camera.model}')
         output_name = f'image_{image_id:08d}{Path(name).suffix}'
-        mask = cv2.imread(str(dataset/'masks'/f'{name}.png'),cv2.IMREAD_GRAYSCALE)
+        mask = read_cv_image(str(dataset/'masks'/f'{name}.png'),cv2.IMREAD_GRAYSCALE)
         if mask is None or mask.shape != (camera.height,camera.width):
             raise RuntimeError(f'Mask/camera size mismatch: {name}')
         if reuse_files:
@@ -170,7 +171,7 @@ def _prepare_segment(dataset: Path, records: list[dict], attempt, settings: Segm
             storage.append(link_or_copy(dataset/'masks'/f'{name}.png',output/'masks'/f'{output_name}.png'))
         else:
             shutil.copy2(dataset/'images'/name,output/'images'/output_name)
-            if not cv2.imwrite(str(output/'masks'/f'{output_name}.png'),mask):
+            if not write_cv_image(str(output/'masks'/f'{output_name}.png'),mask):
                 raise RuntimeError('Mask write failed')
         world_to_camera = np.eye(4)
         world_to_camera[:3,:3] = qvec2rotmat(im.qvec)
@@ -233,7 +234,7 @@ def _prepare_segment(dataset: Path, records: list[dict], attempt, settings: Segm
     colors=np.zeros((len(reservoir),3),dtype=np.float64)
     color_counts=np.zeros(len(reservoir),dtype=np.int64)
     for im in train_images.values():
-        pixels=cv2.imread(str(output/'images'/im.name),cv2.IMREAD_COLOR)
+        pixels=read_cv_image(str(output/'images'/im.name),cv2.IMREAD_COLOR)
         positions=np.flatnonzero(im.point3D_ids>=0)
         indices=np.array([point_index[int(im.point3D_ids[j])] for j in positions],dtype=np.int64)
         xy=np.rint(im.xys[positions]).astype(np.int64)

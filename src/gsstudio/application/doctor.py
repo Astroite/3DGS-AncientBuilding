@@ -91,6 +91,7 @@ def _colmap_cuda_build() -> tuple[bool, str]:
 def _colmap_gpu_sift_smoke(data_root: Path, gpu_index: int = 0) -> tuple[bool, str]:
     try:
         import cv2
+        from gsstudio.infrastructure.adapters.image_io import write_cv_image
         import numpy as np
 
         with tempfile.TemporaryDirectory(dir=data_root, prefix=".gsstudio-colmap-gpu-") as name:
@@ -101,7 +102,7 @@ def _colmap_gpu_sift_smoke(data_root: Path, gpu_index: int = 0) -> tuple[bool, s
             texture = generator.integers(0, 256, (256, 256), dtype=np.uint8)
             image = cv2.cvtColor(texture, cv2.COLOR_GRAY2BGR)
             cv2.circle(image, (128, 128), 64, (255, 255, 255), 3)
-            if not cv2.imwrite(str(images / "frame_000001.jpg"), image):
+            if not write_cv_image(str(images / "frame_000001.jpg"), image):
                 raise RuntimeError("Failed to write COLMAP smoke image")
             database = root / "database.db"
             result = subprocess.run(
