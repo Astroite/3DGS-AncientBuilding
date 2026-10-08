@@ -3,6 +3,7 @@ param(
     [string]$MainPython,
     [string]$GpuPython,
     [string]$FfmpegDir,
+    [string]$TorchHome,
     [string]$OutputRoot
 )
 
@@ -102,6 +103,21 @@ assert record['extension_sha256'] == hashlib.sha256(extension.read_bytes()).hexd
 & $GpuPython -c $CheckGpu
 if ($LASTEXITCODE -ne 0) { throw 'GPU packaging environment is incomplete or unpinned' }
 
+if (-not $TorchHome) {
+    $TorchHome = (& $MainPython -c "import torch,pathlib; print(pathlib.Path(torch.hub.get_dir()).parent)").Trim()
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot locate pretrained model cache; pass -TorchHome.' }
+}
+$TorchHome = [IO.Path]::GetFullPath($TorchHome)
+$CheckModels = @'
+import sys
+from pathlib import Path
+from gsstudio.infrastructure.runtime.model_cache import require_model_cache
+for path in require_model_cache(Path(sys.argv[1]), verify_hashes=True):
+    print(path.name)
+'@
+$ModelNames = @(& $MainPython -c $CheckModels $TorchHome)
+if ($LASTEXITCODE -ne 0) { throw 'Pretrained model cache is incomplete or changed; build cannot download models.' }
+
 $BuildId = Get-Date -Format 'yyyyMMdd-HHmmss'
 $WorkRoot = Join-Path $OutputRoot ("build-$BuildId")
 $ReleaseRoot = Join-Path $OutputRoot ("GSStudio-$Version-win64-cuda13-$BuildId")
@@ -129,7 +145,7 @@ function Invoke-Freeze {
     foreach ($Package in $Metadata) { $Arguments += @('--copy-metadata', $Package) }
     foreach ($Datum in $ExtraData) { $Arguments += @('--add-data', $Datum) }
     $Arguments += $Entry
-    & $Python @Arguments
+    & $Python @Arguments | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed while building $Name" }
     $Result = Join-Path $DistDir $Name
     if (-not (Test-Path -LiteralPath (Join-Path $Result "$Name.exe") -PathType Leaf)) {
@@ -178,6 +194,11 @@ foreach ($Name in @('ffmpeg.exe', 'ffprobe.exe')) {
 Get-ChildItem -LiteralPath $FfmpegBinaryDir -File -Filter '*.dll' |
     Copy-Item -Destination $FfmpegDestination
 $Licenses | Copy-Item -Destination $FfmpegDestination
+$ModelDestination = Join-Path $ReleaseRoot 'model-cache\hub\checkpoints'
+New-Item -ItemType Directory -Path $ModelDestination -Force | Out-Null
+foreach ($Name in $ModelNames) {
+    Copy-Item -LiteralPath (Join-Path $TorchHome "hub\checkpoints\$Name") -Destination $ModelDestination
+}
 $RealityscanDestination = Join-Path $ReleaseRoot 'tools\realityscan-setup'
 New-Item -ItemType Directory -Path $RealityscanDestination -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $AppRoot 'tools\realityscan-setup\colmap-export-params.xml') `

@@ -1,6 +1,6 @@
 # GS-Studio 项目路线图
 
-更新：2026-09-24。状态：正式 Qt 工作台已有主要功能代码，项目运行验证已恢复但尚未完成，Windows 离线包未构建。本文件是阶段与验收状态的现行入口；工程拆分见 [工程路线图](GS-STUDIO-ENGINEERING-ROADMAP.md)。当前实际操作仍以 [Windows 工作手册](../user/CURRENT-WORKFLOW.md)为准。
+更新：2026-10-08。状态：固定 CUDA 环境、合成训练恢复、真实 DJI 遮罩及首个 Windows 目录包已获得分层证据；人工遮罩审核、真实重建/画质和完整产品验收尚未完成。本文件是阶段与验收状态的现行入口；工程拆分见 [工程路线图](GS-STUDIO-ENGINEERING-ROADMAP.md)。当前实际操作仍以 [Windows 工作手册](../user/CURRENT-WORKFLOW.md)为准。
 
 ## 已确认方向与现状
 
@@ -46,14 +46,14 @@ AC-17：创建和探测流程保持原片只读、不覆盖已有清单；输入
 | 阶段 | 实现状态 | 验收状态 |
 | --- | --- | --- |
 | P0 路线图整合 | 已完成（2026-09-22） | 仅静态核对，未做功能验收 |
-| P1 统一入口与项目浏览 | 共用写操作层、结构化 worker 和 Qt 菜单已有代码 | CPU 契约检查进行中；GUI 真机待验收 |
-| P2 上游流程 GUI | 创建、探测、重定位、Run、遮罩审核、QA 与清理入口已有代码 | 两段 DJI 的 CLI Capture/probe/ingest 已通过；Run、RealityScan、repair、QA 和 GUI 待验收 |
-| P3 训练与实时检查 | 分段与外部 COLMAP 独立导入、训练控制、同视角对照已有代码 | CPU 契约检查进行中；gsplat、Postshot 与真实 PLY 回读待验收 |
-| P4 编辑与交付 | Qt PLY 查看、独立快照、可见贡献拾取、裁剪与变换、撤销重做、PLY 导出已有代码 | CPU 交互检查进行中；GPU、界面与代表模型待验收 |
-| P5 正式验收与发布 | Windows onedir 构建和诊断脚本已开始 | 缺固定 GPU 发布环境及 EXE；离线、搬移、DPI、中文路径、画质均待验收 |
+| P1 统一入口与项目浏览 | 共用写操作层、结构化 worker 和 Qt 菜单已有代码 | CPU 契约通过；Windows Qt 只读状态渲染通过，完整操作待验收 |
+| P2 上游流程 GUI | 创建、探测、重定位、Run、遮罩审核、QA 与清理入口已有代码 | DJI CLI Capture/probe/ingest、短段预处理与真实遮罩通过；人工审核、RealityScan、repair、QA 和 Qt 操作待验收 |
+| P3 训练与实时检查 | 分段与外部 COLMAP 独立导入、训练控制、同视角对照已有代码 | 合成 gsplat 前后向、暂停/停止/恢复、预览与 PLY 回读通过；真实训练、Postshot 和正式 Qt 操作待验收 |
+| P4 编辑与交付 | Qt PLY 查看、独立快照、可见贡献拾取、裁剪与变换、撤销重做、PLY 导出已有代码 | CPU 契约及合成 Runtime 编辑/导出/重开通过；Qt GPU 拾取、手柄与代表模型待验收 |
+| P5 正式验收与发布 | 固定环境恢复，首个四入口目录包与权重缓存已生成 | 清单、冻结 CLI 和训练器前后向通过；完整离线、搬移、DPI、中文路径和画质待验收 |
 
 已定决策见[架构决策记录](GS-STUDIO-DECISIONS.md)（D-05 外部源引用、D-06 分组、D-07 拾取、D-12 UI、D-13 服务）。D-08/D-10 的最终质量阈值仍待真实训练和用户审看。
 
 ## 本轮边界
 
-本轮已在隔离测试项目中只读引用 `Data/Test` 两段 DJI 透视视频，完成 CLI 登记、探测和 ingest；没有生成 Run，也没有启动重建或训练。GPU 当前由其他会话高度占用，缺独立 gsplat/CUDA 发布环境，故不能宣称真实全流程或离线 EXE 已交付。QA 判定规则与 CLI 默认后端（Postshot Splat ADC）未变。[旧基线](../archive/GS-Studio-Plan/status/BASELINE.md)仅是 2026-09-13 历史证据。
+本轮沿用隔离测试项目，只读引用 `Data/Test` 的 DJI 视频；短段 5 秒 Run 已完成预处理与真实遮罩，停在原配置要求的人工门禁。两环境固定 CUDA 诊断和合成训练通过，最终 101 项 CPU/Qt 检查通过；已生成四入口 Windows 候选包。具体身份、数值及尚未完成的验收见 [10 月记录](../development/VALIDATION-2026-10-08.md)。QA 判定规则与 CLI 默认后端（Postshot Splat ADC）未变；未自动启动全量训练。[旧基线](../archive/GS-Studio-Plan/status/BASELINE.md)仅是 2026-09-13 历史证据。

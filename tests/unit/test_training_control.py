@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from gsstudio.application.experiments import control_training
-from gsstudio.pipeline.training.control import TrainingControl, submit_control
+from gsstudio.pipeline.training.control import TrainingControl, read_control_state, submit_control
 from gsstudio.pipeline.training.data import json_write
 
 
@@ -19,7 +19,7 @@ DIGEST = "a" * 64
 
 
 def _state(output):
-    return json.loads((output / "control-state.json").read_text(encoding="utf-8"))
+    return read_control_state(output)
 
 
 def _wait_for(output, status, request_id):
@@ -37,7 +37,7 @@ def test_pause_checkpoint_resume_and_stop_at_boundaries(tmp_path):
     saved = []
     pause = submit_control(tmp_path, DIGEST, "pause")
     result = []
-    thread = threading.Thread(target=lambda: result.append(control.observe(12, lambda: saved.append(12))))
+    thread = threading.Thread(target=lambda: result.append(control.observe(12, lambda: saved.append(12))), daemon=True)
     thread.start()
     _wait_for(tmp_path, "paused", pause["request_id"])
     checkpoint = submit_control(tmp_path, DIGEST, "checkpoint")
@@ -58,6 +58,39 @@ def test_pause_checkpoint_resume_and_stop_at_boundaries(tmp_path):
     assert _state(tmp_path)["status"] == "stopped"
     resumed = TrainingControl(tmp_path, DIGEST)
     assert resumed.observe(13, lambda: saved.append(13)) is None
+
+
+def test_control_state_retries_transient_windows_access_denial(tmp_path, monkeypatch):
+    from gsstudio.pipeline.training import control as control_module
+
+    TrainingControl(tmp_path, DIGEST)
+    original = Path.read_text
+    attempts = []
+
+    def interrupted_read(path, **kwargs):
+        attempts.append(path)
+        if len(attempts) == 1:
+            raise PermissionError("record is being replaced")
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", interrupted_read)
+    monkeypatch.setattr(control_module.time, "sleep", lambda _: None)
+    assert read_control_state(tmp_path)["status"] == "running"
+    assert len(attempts) == 2
+
+
+def test_control_state_does_not_hide_persistent_access_denial(tmp_path, monkeypatch):
+    from gsstudio.pipeline.training import control as control_module
+
+    TrainingControl(tmp_path, DIGEST)
+
+    def denied_read(path, **kwargs):
+        raise PermissionError("permanent denial")
+
+    monkeypatch.setattr(Path, "read_text", denied_read)
+    monkeypatch.setattr(control_module.time, "sleep", lambda _: None)
+    with pytest.raises(PermissionError, match="permanent denial"):
+        read_control_state(tmp_path)
 
 
 def test_control_service_rejects_wrong_backend_and_escaped_output(tmp_path):

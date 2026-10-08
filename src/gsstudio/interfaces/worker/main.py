@@ -142,6 +142,12 @@ def execute(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def main() -> int:
+    # QProcess sends UTF-8 bytes. Frozen Python ignores PYTHONIOENCODING,
+    # so the protocol must choose its encoding explicitly on Windows.
+    for stream in (sys.stdin, sys.stdout, sys.stderr, _PROTOCOL_STREAM):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="strict")
     try:
         payload = json.loads(sys.stdin.readline())
         if not isinstance(payload, dict):

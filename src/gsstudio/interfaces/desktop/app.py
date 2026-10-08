@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QVBoxLayout,
@@ -90,6 +91,8 @@ class MainWindow(QMainWindow):
         self.model_panel = ModelWorkbench()
         self.empty = self._empty_state()
         self.center = QStackedWidget()
+        # Hidden workbenches must not force the active page's minimum dimensions.
+        self.center.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         for widget in (self.empty, self.location_panel, self.scene_panel, self.run_panel, self.model_panel):
             self.center.addWidget(widget)
         self.inspector = InspectorPanel()
@@ -168,6 +171,8 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(refresh)
 
         left = QFrame(objectName="panel")
+        left.setMinimumWidth(220)
+        self.inspector.setMinimumWidth(260)
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(theme.SPACE_GROUP, theme.SPACE_GROUP, theme.SPACE_GROUP, theme.SPACE_GROUP)
         left_layout.setSpacing(theme.SPACE_GROUP)
@@ -649,11 +654,13 @@ class MainWindow(QMainWindow):
     def _poll_live_log(self) -> None:
         output = self._live_preview_output
         if output is not None and self._training_backend == "gsplat":
+            from gsstudio.pipeline.training.control import read_control_state
+
             state_path = output / "control-state.json"
             if state_path.is_file():
                 try:
-                    state = json.loads(state_path.read_text(encoding="utf-8"))
-                    if state.get("package_sha256") == self._training_package_sha256:
+                    state = read_control_state(output)
+                    if state and state.get("package_sha256") == self._training_package_sha256:
                         status = state.get("status")
                         acknowledged = self._training_pending_id == state.get("request_id")
                         changed = status != self._training_control_status

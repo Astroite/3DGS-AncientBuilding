@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -70,3 +71,47 @@ def test_release_command_missing_component_fails_explicitly(tmp_path: Path, monk
     monkeypatch.setattr(layout, "find_app_root", lambda: tmp_path)
     with pytest.raises(RuntimeError, match="worker is missing"):
         layout.worker_command()
+
+
+def test_frozen_release_uses_bundled_models_and_tools(tmp_path: Path, monkeypatch):
+    from gsstudio.infrastructure.runtime.model_cache import MODEL_SHA256
+
+    models = tmp_path / "model-cache"
+    checkpoints = models / "hub" / "checkpoints"
+    checkpoints.mkdir(parents=True)
+    for filename in MODEL_SHA256:
+        (checkpoints / filename).touch()
+    tools = tmp_path / "tools" / "ffmpeg"
+    tools.mkdir(parents=True)
+    monkeypatch.setattr(layout, "is_frozen", lambda: True)
+    monkeypatch.setattr(layout, "find_app_root", lambda: tmp_path)
+    monkeypatch.setenv("TORCH_HOME", "C:/external-cache")
+    monkeypatch.setenv("PATH", "C:/system")
+    layout.configure_release_path()
+    assert os.environ["TORCH_HOME"] == str(models)
+    assert os.environ["PATH"] == str(tools) + os.pathsep + "C:/system"
+
+
+def test_source_environment_keeps_its_model_cache(monkeypatch):
+    monkeypatch.setattr(layout, "is_frozen", lambda: False)
+    monkeypatch.setenv("TORCH_HOME", "C:/source-cache")
+    monkeypatch.setenv("PATH", "C:/system")
+    layout.configure_release_path()
+    assert os.environ["TORCH_HOME"] == "C:/source-cache"
+    assert os.environ["PATH"] == "C:/system"
+
+
+def test_offline_model_cache_rejects_missing_and_changed_files(tmp_path: Path, monkeypatch):
+    import hashlib
+    from gsstudio.infrastructure.runtime import model_cache
+
+    monkeypatch.setattr(model_cache, "MODEL_SHA256", {"model.pth": hashlib.sha256(b"original").hexdigest()})
+    with pytest.raises(FileNotFoundError, match="offline model is missing"):
+        model_cache.require_model_cache(tmp_path, verify_hashes=True)
+    path = tmp_path / "hub" / "checkpoints" / "model.pth"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"original")
+    assert model_cache.require_model_cache(tmp_path, verify_hashes=True) == [path]
+    path.write_bytes(b"changed")
+    with pytest.raises(RuntimeError, match="SHA-256 does not match"):
+        model_cache.require_model_cache(tmp_path, verify_hashes=True)

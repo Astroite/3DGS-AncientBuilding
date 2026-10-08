@@ -9,6 +9,8 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from gsstudio.infrastructure.runtime.model_cache import require_model_cache
+
 
 def digest(path: Path) -> str:
     sha = hashlib.sha256()
@@ -37,6 +39,7 @@ def main() -> None:
     for relative in required:
         if not (root / relative).is_file():
             raise FileNotFoundError(f"Required release component is missing: {relative}")
+    require_model_cache(root / "model-cache", verify_hashes=True)
     for package in (root / "_internal" / "gsplat",
                     root / "gpu-runtime" / "_internal" / "gsplat"):
         record = json.loads((package / "csrc-build.json").read_text(encoding="utf-8"))

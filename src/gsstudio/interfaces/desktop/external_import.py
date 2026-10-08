@@ -409,11 +409,13 @@ class ExternalImportDialog(QDialog):
 
     def _poll(self) -> None:
         if self._training_output is not None and self._training_backend == 'gsplat':
+            from gsstudio.pipeline.training.control import read_control_state
+
             state_path = self._training_output / 'control-state.json'
             if state_path.is_file():
                 try:
-                    state = json.loads(state_path.read_text(encoding='utf-8'))
-                    if state.get('package_sha256') == self._training_package_sha256:
+                    state = read_control_state(self._training_output)
+                    if state and state.get('package_sha256') == self._training_package_sha256:
                         if state.get('request_id') == self._training_pending_id:
                             self._training_pending_id = None
                             self._training_pending_action = None

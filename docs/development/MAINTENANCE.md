@@ -10,9 +10,9 @@
 | `gs-studio` | 安装后的 PySide6 工作台命令 | 取决于所选操作 |
 | `scripts/session.ps1` | 初始化主解释器、Data、helper 和 SDK，支持 `-DataRoot` | 不启动 GPU，不写 Data |
 | `scripts/bootstrap-windows.ps1` | 首次安装主环境 | 写 .venv，下载依赖；不自动运行 doctor |
-| `scripts/bootstrap-gsplat-windows.ps1` | 安装独立训练/评估环境并编译 CUDA 扩展，支持 `-SkipPackages` | 写 .venv-gsplat 与 wheels/，下载依赖、跑 nvcc |
+| `scripts/bootstrap-gsplat-windows.ps1` | 安装独立训练/评估环境并编译 CUDA 扩展，支持 `-SkipPackages`；`-MsvcVersion` 可选择已安装的 v143 工具集 | 写 .venv-gsplat 与 wheels/，下载依赖、跑 nvcc |
 | `scripts/build_gsplat_csrc.py` | 把已安装 gsplat 的 CUDA 源编译成 `gsplat/csrc.pyd` | 写环境内包与 wheels/ 缓存；幂等 |
-| `scripts/build-windows-release.ps1` | 检查主/GPU 环境和显卡架构，生成 PyInstaller onedir 离线目录与文件哈希清单 | 写 `dist/`；不访问原片，需准备可再分发 FFmpeg 目录 |
+| `scripts/build-windows-release.ps1` | 检查主/GPU 环境、显卡架构及模型 SHA-256，生成 PyInstaller onedir 离线目录与文件哈希清单；`-TorchHome` 指定权重缓存 | 写 `dist/`；不访问原片，需准备可再分发 FFmpeg 目录与固定权重 |
 | `scripts/apply_nerfstudio_patch.py` | 安装时核验并应用投影 clamp 和嵌套路径补丁 | 修改环境内依赖代码，不处理素材 |
 | `tests/manual/test-mediasdk-helper.ps1` | 指定 LocationId、SceneId、CaptureId，独立 helper 按 5 fps 验收（不代表新 Run 默认）；可用 RunId 恢复 | GPU、解码和 Run 候选缓存；不是轻量单测 |
 | `tests/manual/smoke-native-gsplat.py` | 独立环境，`--output` 指定新的合成测试目录 | GPU、少量合成训练与检查点；不访问 Capture |
@@ -30,7 +30,7 @@
 
 GUI 与 CLI 共用 `src/gsstudio/application/` 的状态读取、操作层及错误分类，边界见 [D-13](../architecture/GS-STUDIO-DECISIONS.md)。Qt 通过 `gsstudio.interfaces.worker.main` 的 JSON 行事件调用操作层；CLI 输出仍只用于人工和脚本阅读，不作为 GUI 状态源。写入操作继续调用同一 pipeline、Run 锁与 retention 逻辑。新 GUI Run 默认启用人工遮罩审核；CLI 的默认 Run 参数仍由自身选项明确传入。`capture relink` 仅在文件数、顺序、大小和哈希完全匹配时更新外部路径。
 
-包名与控制台入口已改为 `gsstudio`。已有 `.venv` 和 `.venv-gsplat` 的 editable 安装元数据仍可能指向旧包；恢复运行验证并准备启动工作台时，应分别重装本项目到所用解释器，生成新的 `gsstudio` 和 `gs-studio` 入口。本轮受 D-02 约束未执行安装或启动。
+包名与控制台入口已改为 `gsstudio`。2026-10-08 已在 `.venv` 和 `.venv-gsplat` 重新安装当前项目，恢复固定 CUDA 环境并通过两环境前后向诊断；旧 D-02 暂停已由运行授权撤销。合成训练、真实 DJI 遮罩和 Qt 只读渲染的覆盖范围见[本轮验证记录](VALIDATION-2026-10-08.md)，不能据此宣称完整产品验收。
 
 测试脚本单独存放在 `tests/`：`tests/unit/*.py` 是 pytest 单元测试，`tests/contract/*.py` 是接口契约测试，`tests/manual/` 是需要真机或独立环境的检查脚本，均入库。测试中间产物一律不入库：运行输出写到 `tests/output/<名称>/` 或仓库外，`.gitignore` 忽略 `tests/output/`、`tests/.tmp/`、`__pycache__/`、`.pytest_cache/`、`.coverage` 与 `htmlcov/`。
 
@@ -43,11 +43,11 @@ GUI 与 CLI 共用 `src/gsstudio/application/` 的状态读取、操作层及错
 | 项 | 版本 |
 | --- | --- |
 | PyTorch / torchvision | 2.9.1+cu130 / 0.24.1+cu130 |
-| CUDA 工具链 | 13.x（nvcc 13.4 实测；可用 `GSSTUDIO_CUDA_HOME` 指定） |
-| gsplat | 1.5.3，源码编译，`TORCH_CUDA_ARCH_LIST=12.0` |
+| CUDA 工具链 | 当前 NVIDIA redistrib 13.0.2，nvcc 13.0.88 实测；可用 `GSSTUDIO_CUDA_HOME` 指定 |
+| gsplat | 1.5.3，源码按当前 GPU compute capability 编译；RTX 4060 Ti 为 `8.9` |
 | nerfstudio | 固定提交 `758ea19…` + `--no-deps` + 最小依赖子集 |
 
-nerfstudio 的 `--no-deps` 只跳过它自己固定的 CUDA 扩展（gsplat 1.4.0、nerfacc 0.5.2）。GS Studio 只导入其 COLMAP/equirect 辅助模块，未使用的重型依赖（jupyterlab、nuscenes-devkit 等）不安装。主环境与 `.venv-gsplat` 都装这套 torch；发布预检检查两处 ABI 与扩展身份，`trainer_diagnostic.py` 在 GPU 锁内验证 CUDA 前向和反向。
+nerfstudio 用 `--no-deps` 安装，再补齐 GS Studio 实际使用的 COLMAP/equirect 辅助模块依赖；不安装它固定的 CUDA 扩展（gsplat 1.4.0、nerfacc 0.5.2）或未使用的重型依赖（jupyterlab、nuscenes-devkit 等）。主环境与 `.venv-gsplat` 都装这套 torch；发布预检检查两处 ABI 与扩展身份，`trainer_diagnostic.py` 在 GPU 锁内验证 CUDA 前向和反向。
 
 gsplat 没有 cu130 轮子，因此 `bootstrap-gsplat-windows.ps1` 安装纯 Python 包后调用 `scripts/build_gsplat_csrc.py`，把随包分发的 CUDA 源编译成 `gsplat/csrc.pyd`。脚本通过 `nvidia-smi` 选取当前 compute capability，也可显式设置 `GSSTUDIO_CUDA_ARCH_LIST`；缓存名同时包含 Python、torch 和 GPU 架构。`gsplat/csrc-build.json` 记录架构和扩展 SHA-256，Windows 发布预检必须与当前 GPU 匹配。CUDA 查找顺序：`GSSTUDIO_CUDA_HOME`、`CUDA_HOME`、`C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.*`、`GSStudio\..\tools\cuda-13.4`；MSVC 环境由 vswhere 定位后经 vcvars64 注入。
 
@@ -56,6 +56,8 @@ gsplat 没有 cu130 轮子，因此 `bootstrap-gsplat-windows.ps1` 安装纯 Pyt
 gsplat 1.5.3 的 `RasterizeToPixels2DGSBwd.cu` 与 `RasterizeToPixelsFromWorld3DGSFwd.cu` 在 `__INS__` 显式实例化宏里把非 const 输出参数（`v_means2d`、`renders` 等）写成了 `const at::Tensor`，与 `Rasterization.h` 的声明不一致。MSVC 会把按值参数的顶层 const 编进修饰名（gcc/clang 不会），因此 Windows 链接报 LNK2019（仅这两个 kernel、共 38 个实例）。`build_gsplat_csrc.py` 编译前幂等地改写这两处宏，使实例化与头文件逐参数一致。升级 gsplat 后若 LNK2019 复现且 demangle 签名相同，优先核对这里。
 
 ### 回退阶梯
+
+若 Visual Studio 同时安装多个 MSVC 工具集，优先显式选择 CUDA 支持的已安装版本。例如 `scripts/bootstrap-gsplat-windows.ps1 -MsvcVersion 14.44` 使用 v143，而不因 Visual Studio 更新自动改用更新的编译器。初始化失败时脚本停止，不沿用残留构建环境。
 
 1. nvcc 拒绝当前 MSVC 时，设置 `NVCC_PREPEND_FLAGS=-allow-unsupported-compiler`。
 2. 仍失败则安装 VS 2022 Build Tools（v143 工具集）供 nvcc 使用。

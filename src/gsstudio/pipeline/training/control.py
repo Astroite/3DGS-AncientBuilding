@@ -19,10 +19,23 @@ STATE_NAME = "control-state.json"
 def _read_object(path: Path) -> dict | None:
     if not path.is_file():
         return None
-    value = json.loads(path.read_text(encoding="utf-8"))
+    # Windows can briefly deny an open while the writer replaces its record.
+    for attempt in range(5):
+        try:
+            content = path.read_text(encoding="utf-8")
+            break
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.02)
+    value = json.loads(content)
     if not isinstance(value, dict):
         raise ValueError(f"Invalid training control record: {path}")
     return value
+
+
+def read_control_state(output: Path) -> dict | None:
+    return _read_object(output / STATE_NAME)
 
 
 def submit_control(output: Path, package_sha256: str, action: str) -> dict:

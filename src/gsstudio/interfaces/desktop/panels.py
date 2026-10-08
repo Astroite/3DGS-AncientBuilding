@@ -248,6 +248,8 @@ class RunDetailPanel(QWidget):
         self._current_run: str | None = None
         self.title = QLabel("尚未选择 Run", objectName="panelTitle")
         self.subtitle = QLabel("", objectName="caption")
+        self.subtitle.setWordWrap(True)
+        self.subtitle.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.stages = make_table(["阶段", "状态", "耗时", "说明", "日志"])
         self.config = make_table(["配置项", "值"])
         self.evidence = make_table(["证据", "存在", "路径"])
@@ -261,6 +263,8 @@ class RunDetailPanel(QWidget):
         self.training_compare = TrainingCompare()
 
         tabs = QTabWidget()
+        # The training-preview tab's size hint must not squeeze the stage table.
+        tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         tabs.addTab(self.config, "配置")
         tabs.addTab(self.evidence, "证据")
         tabs.addTab(self.logs, "日志")
@@ -325,6 +329,12 @@ class RunDetailPanel(QWidget):
             )
             tooltips.append(["", "", "", stage.message or "", stage.log_path or ""])
         fill_table(self.stages, rows, tooltips)
+        self.stages.setMinimumHeight(
+            self.stages.horizontalHeader().height()
+            + sum(self.stages.rowHeight(row) for row in range(self.stages.rowCount()))
+            + self.stages.horizontalScrollBar().sizeHint().height()
+            + 2 * self.stages.frameWidth()
+        )
 
         fill_table(
             self.config,

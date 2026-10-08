@@ -1,4 +1,8 @@
-param([switch]$SkipPackages)
+param(
+    [switch]$SkipPackages,
+    [ValidatePattern('^14\.\d+(\.\d+)?$')]
+    [string]$MsvcVersion
+)
 $ErrorActionPreference = 'Stop'
 $AppRoot = Split-Path $PSScriptRoot -Parent
 $Python = Join-Path $AppRoot '.venv-gsplat\Scripts\python.exe'
@@ -71,9 +75,12 @@ if (-not $SkipPackages) {
     $Vcvars = Get-GsstudioVcvars
     if (-not $Vcvars) { throw 'MSVC build environment was not found.' }
     $EnvBat = Join-Path ([System.IO.Path]::GetTempPath()) ('gsstudio-vcvars-' + [guid]::NewGuid().ToString('N') + '.bat')
-    Set-Content -LiteralPath $EnvBat -Encoding ascii -Value ("@echo off`r`ncall `"$Vcvars`" >nul`r`nset`r`n")
+    $VcvarsArgument = if ($MsvcVersion) { " -vcvars_ver=$MsvcVersion" } else { '' }
+    Set-Content -LiteralPath $EnvBat -Encoding ascii -Value ("@echo off`r`ncall `"$Vcvars`"$VcvarsArgument >nul`r`nif errorlevel 1 exit /b 1`r`nset`r`n")
     $BuildEnv = & cmd.exe /c $EnvBat
+    $BuildEnvExit = $LASTEXITCODE
     Remove-Item -LiteralPath $EnvBat -Force
+    if ($BuildEnvExit -ne 0) { throw 'Cannot initialize the selected MSVC build environment.' }
     foreach ($Line in $BuildEnv) {
         if ($Line -match '^([^=]+)=(.*)$') { Set-Item -Path ('env:' + $matches[1]) -Value $matches[2] -ErrorAction SilentlyContinue }
     }

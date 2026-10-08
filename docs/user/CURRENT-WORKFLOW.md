@@ -2,7 +2,7 @@
 
 本文件是 GSStudio 唯一的日常操作手册。现行流程为 INSV / 标准全景 / 透视视频输入 → 候选抽帧 → RealityScan → 分段 QA → Postshot Splat ADC 或 Windows gsplat。脚本清单、环境偏离记录和不支持的历史形态见 [维护说明](../development/MAINTENANCE.md)。产品方向是以 GUI 为日常入口的 GS-Studio，见[项目路线图](../architecture/GS-STUDIO-PROJECT-ROADMAP.md)和[工程路线图](../architecture/GS-STUDIO-ENGINEERING-ROADMAP.md)；路线图是规划，不取代本手册的实际命令。
 
-PySide6 工作台现已有全流程操作代码入口，见 [Studio 说明](STUDIO.md)。用户已于 2026-09-24 恢复本项目分层运行验证；CLI 仍是当前已记录的日常流程，直至 Qt、真实素材和离线包验收齐备。两段 DJI 透视视频只完成 Capture 登记、probe 与 ingest；不能因 GUI 按钮或 PLY 文件出现而认为对应阶段已验收。原片迁移后可通过 `Invoke-Gsstudio capture relink <location> <scene> <capture> --source <新路径>` 按记录顺序重新定位，并核对字节数与 SHA256。
+PySide6 工作台现已有全流程操作代码入口，见 [Studio 说明](STUDIO.md)。用户已于 2026-09-24 恢复本项目分层运行验证；CLI 仍是当前已记录的日常流程，直至 Qt、真实素材和离线包验收齐备。两段 DJI 透视视频已登记、probe 与 ingest，短段 5 秒 Run 已完成预处理及遮罩、等待人工审核；环境、合成训练和目录包的分层证据见[10 月验证记录](../development/VALIDATION-2026-10-08.md)。不能因 GUI 按钮或 PLY 文件出现而认为对应阶段已验收。原片迁移后可通过 `Invoke-Gsstudio capture relink <location> <scene> <capture> --source <新路径>` 按记录顺序重新定位，并核对字节数与 SHA256。
 
 新 Run 使用下列默认，已有 Run 按原清单恢复。代码接入、短测试通过和最终画质验收分别记录，不互相替代。
 

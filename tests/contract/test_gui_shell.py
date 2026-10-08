@@ -128,3 +128,23 @@ def test_scene_selection_lists_captures_and_runs(tmp_path, qapp):
     assert window.scene_panel.captures.item(0, 0).text() == "capture"
     assert window.scene_panel.runs.rowCount() == 1
     assert window.scene_panel.runs.item(0, 0).text() == RUN_ID
+
+
+def test_narrow_run_page_keeps_navigation_and_all_stages_visible(tmp_path, qapp):
+    built = build_tree(tmp_path)
+    previous_style = qapp.styleSheet()
+    qapp.setStyleSheet(theme.build_stylesheet())
+    window = MainWindow(built["root"])
+    try:
+        window.resize(1280, 800)
+        window.show()
+        window.tree.select_context("loc", "scene", None, RUN_ID)
+        qapp.processEvents()
+        assert window.center.currentWidget() is window.run_panel
+        assert window._splitter.widget(0).width() >= 220
+        assert window.inspector.width() >= 260
+        stages = window.run_panel.stages
+        assert stages.viewport().height() >= sum(stages.rowHeight(row) for row in range(4))
+    finally:
+        window.close()
+        qapp.setStyleSheet(previous_style)

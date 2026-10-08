@@ -28,11 +28,17 @@ def trainer_executable() -> Path:
 
 
 def configure_release_path() -> None:
-    """Put only bundled command-line helpers ahead of system PATH."""
+    """Use the release's command-line helpers and pretrained model cache."""
     if not is_frozen():
         return
     import os
 
-    tools = find_app_root() / "tools" / "ffmpeg"
+    from gsstudio.infrastructure.runtime.model_cache import require_model_cache
+
+    root = find_app_root()
+    models = root / "model-cache"
+    require_model_cache(models)
+    os.environ["TORCH_HOME"] = str(models)
+    tools = root / "tools" / "ffmpeg"
     if tools.is_dir():
         os.environ["PATH"] = str(tools) + os.pathsep + os.environ.get("PATH", "")

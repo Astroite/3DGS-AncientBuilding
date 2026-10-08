@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import io
 import json
+import sys
+from pathlib import Path
 
 import pytest
 from PySide6.QtWidgets import QApplication
@@ -64,3 +66,26 @@ def test_missing_frozen_worker_does_not_leave_operation_busy(monkeypatch):
     assert not client.busy
     assert client._control is None
     assert client._stop_path is None
+
+
+def test_worker_protocol_uses_utf8_even_with_non_utf8_stdio(monkeypatch):
+    payload = {"action": "create_location", "root": "C:/中文 Data", "location_id": "loc", "name": "古建筑"}
+    incoming = io.TextIOWrapper(io.BytesIO((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")),
+                                encoding="cp1252", errors="surrogateescape")
+    outgoing_bytes = io.BytesIO()
+    outgoing = io.TextIOWrapper(outgoing_bytes, encoding="cp1252")
+    monkeypatch.setattr(sys, "stdin", incoming)
+    monkeypatch.setattr(sys, "stdout", outgoing)
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    monkeypatch.setattr(worker, "_PROTOCOL_STREAM", outgoing)
+
+    def execute(request):
+        assert Path(request["root"]) == Path(payload["root"])
+        assert request["name"] == payload["name"]
+        return {"location_id": "loc"}
+
+    monkeypatch.setattr(worker, "execute", execute)
+    assert worker.main() == 0
+    outgoing.flush()
+    result = json.loads(outgoing_bytes.getvalue().decode("utf-8"))
+    assert result["kind"] == "result" and result["message"] == "操作完成"
