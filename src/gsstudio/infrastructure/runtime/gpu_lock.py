@@ -9,8 +9,23 @@ import time
 
 _mutex=threading.RLock()
 _local=threading.local()
-from gsstudio.infrastructure.paths import find_app_root
-GPU_LOCK_PATH=find_app_root()/'.runtime-locks'/'gpu.lock'
+from gsstudio.infrastructure.paths import user_settings_dir
+
+GPU_LOCK_ENV = 'GSSTUDIO_GPU_LOCK_PATH'
+
+
+def gpu_lock_path() -> Path:
+    """One writable lock for source CLI, desktop worker and packaged trainer."""
+    override = os.environ.get(GPU_LOCK_ENV, '').strip()
+    if override:
+        selected = Path(override).expanduser()
+        if not selected.is_absolute():
+            raise ValueError(f'{GPU_LOCK_ENV} must be an absolute path')
+        return selected
+    return user_settings_dir() / 'gpu.lock'
+
+
+GPU_LOCK_PATH = gpu_lock_path()
 
 
 @contextmanager
@@ -19,7 +34,7 @@ def gpu_session(path: Path | None = None, *, cancel=None, timeout: float | None 
         if getattr(_local,'active',False):
             yield
             return
-        path=path or GPU_LOCK_PATH
+        path=path or gpu_lock_path()
         path.parent.mkdir(parents=True,exist_ok=True)
         with path.open('a+b') as stream:
             if path.stat().st_size==0:

@@ -1,8 +1,8 @@
 # GS-Studio 架构决策记录
 
-更新：2026-09-22。本文记录 GS-Studio 实施前必须定下的技术决策及其状态，格式沿用[决策模板](../archive/GS-Studio-Plan/templates/DECISION.md)。阶段、需求与验收见[项目路线图](GS-STUDIO-PROJECT-ROADMAP.md)，工程顺序与关口见[工程路线图](GS-STUDIO-ENGINEERING-ROADMAP.md)；现行命令仍以[工作手册](../user/CURRENT-WORKFLOW.md)为准。历史决策（D-01～D-04、D-09、D-11）保留在 [GS-Studio-Plan 决策表](../archive/GS-Studio-Plan/planning/DECISIONS-AND-RISKS.md)。
+更新：2026-09-24。本文记录 GS-Studio 实施前必须定下的技术决策及其状态，格式沿用[决策模板](../archive/GS-Studio-Plan/templates/DECISION.md)。阶段、需求与验收见[项目路线图](GS-STUDIO-PROJECT-ROADMAP.md)，工程顺序与关口见[工程路线图](GS-STUDIO-ENGINEERING-ROADMAP.md)；现行命令仍以[工作手册](../user/CURRENT-WORKFLOW.md)为准。历史决策（D-01～D-04、D-09、D-11）保留在 [GS-Studio-Plan 决策表](../archive/GS-Studio-Plan/planning/DECISIONS-AND-RISKS.md)。
 
-技术或设计决定不解除 [D-02 暂停运行验证](../archive/GS-Studio-Plan/planning/DECISIONS-AND-RISKS.md)：本轮没有启动 CPU/GPU 测试以外的训练、重建或应用验收。
+用户于 2026-09-24 明确授权使用 `Data/Test` 推进本项目运行验证，故历史 [D-02 暂停运行验证](../archive/GS-Studio-Plan/planning/DECISIONS-AND-RISKS.md) 对本项目本轮不再阻止测试。授权不等于验收通过；GPU 被其他会话占用时仍遵守共享锁并等待。
 
 ## 状态一览
 
@@ -12,8 +12,8 @@
 | D-13 | GUI/CLI 服务边界与错误分类 | 已接受（2026-09-22） | P1 |
 | D-05 | 项目存储与源文件定位 | 已接受（2026-09-23） | P1 写入项目前 |
 | D-14 | 工程目录与命名统一 | 已接受（2026-09-23） | 工程重组 |
-| D-06 | 分组来源与兼容 | 待决策 | P3 导入/训练前 |
-| D-07 | 拾取与可见性规则（交互已定） | 算法待决策 | P4 编辑前 |
+| D-06 | 外部 COLMAP 分组来源 | 已接受（2026-09-24），实现待验收 | P3 导入/训练前 |
+| D-07 | 拾取与可见性规则 | 已接受（2026-09-24），实现待验收 | P4 编辑前 |
 | D-08/D-10 | 质量目标、代表素材与训练预设 | 待决策 | P3/P5 前 |
 
 ## D-12 UI 技术选型、部署与资源协作
@@ -52,7 +52,7 @@
 
 ### 后续影响
 
-已按本决定落地：`pyproject.toml` 的 `studio` extra 现含 Pillow 与 PySide6（6.x）；启动入口为 `gs-studio`（`gsstudio.interfaces.desktop.app:main`）与 `scripts/gs-studio.ps1`（优先 `GSSTUDIO_GSPLAT_PYTHON` / `.venv-gsplat`，缺省回退 `.venv`）。Tk 原型现位于 `prototypes/tk_studio/`，不参与安装。P5 发布时补 PyInstaller onedir 打包脚本与 DPI 实测证据。本决定只定框架与部署形态，不构成任何画质、性能或兼容结论，也不解除运行验证暂停：界面的真机 DPI、字体与布局尚未目视验收。
+已按本决定落地：`pyproject.toml` 的 `studio` extra 现含 Pillow 与 PySide6（6.x）；启动入口为 `gs-studio`（`gsstudio.interfaces.desktop.app:main`）与 `scripts/gs-studio.ps1`。Tk 原型位于 `prototypes/tk_studio/`，不参与安装。PyInstaller onedir 构建脚本已加入；只有主 GUI、worker、CLI、训练运行时及编辑视口的 GPU 依赖均通过冻结预检与目标机验证后才能标记发布。DPI、字体、布局和画质尚未目视验收。
 
 ## D-13 GUI/CLI 服务边界与错误分类
 
@@ -106,7 +106,7 @@ P1 的 GUI 项目浏览、依赖与日志视图直接调用上述模块。2026-0
 
 正式包与 CLI 为 `gsstudio`，GUI 命令为 `gs-studio`，环境变量使用 `GSSTUDIO_*`。旧 `gsdb` 导入、命令和环境变量不保留兼容别名。源码分为 `domain`、`application`、`pipeline`、`infrastructure`、`interfaces`、`resources`；测试、脚本、工具、文档和原型分目录管理，完整边界见[工程结构](../development/STRUCTURE.md)。
 
-独立 Data 的 Location/Scene/Capture/Run 清单、Run schema、实验身份和磁盘布局保持现状。结构重组只做静态核对，D-02 暂停运行验证仍然生效。
+独立 Data 的 Location/Scene/Capture/Run 清单、Run schema、实验身份和磁盘布局保持现状。2026-09-24 起按本轮明确授权执行分层验证；结构重组本身不改变磁盘格式。
 
 ## D-05 项目存储与源文件定位
 
@@ -117,4 +117,26 @@ P1 的 GUI 项目浏览、依赖与日志视图直接调用上述模块。2026-0
 
 Capture 清单保留原始视频或图片序列的绝对路径、字节数和 SHA256；Run 自有内容寻址的候选帧及后续派生数据。创建 Run、探测与 ingest 前核验源身份。原片移动后，通过 GUI「重新定位原片」或 `gsstudio capture relink` 按原顺序提交新路径，只有文件数、大小和 SHA256 全部匹配才更新 Capture 清单。训练模型、检查点和编辑状态保持各自身份；编辑导出不可覆盖原始 PLY。当前不提供隐式全量归档或旧项目迁移。
 
-代码已按此方向实现，尚未执行真实素材、搬移、恢复与磁盘占用验收；D-02 的验证暂停继续生效。
+代码已按此方向实现。两段真实 DJI 视频已经分别登记、探测与 ingest，并确认原片大小及修改时间未变化；搬移、重定位、恢复与完整磁盘占用仍待验收。证据见 `Data/validation-dji-20260924/validation-report.md`。
+
+## D-07 非穿透拾取与编辑手柄
+
+- 日期：2026-09-24
+- 状态：已接受，代码实现待运行验收
+- 依据：用户确认“中心落框且可见”，并要求完成 Qt 拖拽手柄与数值预览
+
+穿透选择取投影中心落在屏幕矩形内的 Gaussian。关闭穿透时，在同一候选集合中，只取对矩形内当前渲染像素有至少 `1/255` 的透明度合成权重贡献者；不可用时明确报错，不回退为“每像素最近中心”。实现按 [gsplat 1.5.3 光栅化元数据](https://docs.gsplat.studio/versions/1.5.3/apis/rasterization.html)和[交点接口](https://docs.gsplat.studio/versions/1.5.3/apis/utils.html)分块计算；阈值与性能仍待真实模型验收。
+
+裁剪框面及角点、平移轴及平面、旋转环和统一缩放手柄与数值字段使用同一临时预览。确认操作仅记录一条模型撤销，Esc 取消临时状态；原始训练 PLY 和活动训练状态保持独立。CPU 契约测试已运行；真实模型 GPU 性能与界面操作仍待验收。
+
+## D-06 外部 COLMAP 分组来源与独立身份
+
+- 日期：2026-09-24
+- 状态：已接受，代码实现待端到端验收
+- 依据：用户批准外部 COLMAP 作为独立项目路径，并明确禁止凭文件名推断可信分组或冒充 Run QA
+
+已有共享训练包的可信 `group` 与训练/验证划分原样保留。普通 COLMAP 的图片名不证明它们来自同一全景或时间组；缺少分组时，界面要求逐图分组 JSON，或由用户明确确认“每图独立”。选择、源文件路径与哈希、训练包身份写入 `Data/.external-imports/<id>` 的独立记录，状态与 Run 清单严格分离。源文件移动只能逐文件校验身份后更新路径；不可变训练包不随重定位改写。多模型、缺图、遮罩和相机问题在准备前展示并阻断有问题的输入。
+
+## 2026-09-24 分层验证与 Windows 交付决定
+
+用户授权以两段 DJI 透视视频作为测试素材：较短一段先检查链路，较长一段用于后续完整流程；两次飞行分别建立 Capture，不假定空间连续。首轮训练基线为 SH3、原分辨率、`max(30000, 30 × 训练图数)` 步，快速档只验链路。Windows 交付为 PyInstaller onedir 的 GUI/CLI/worker 加随包固定版本 GPU 运行时；Data 首次选择后记住，RealityScan 外部安装，Postshot 可选。发布前须在目标机核对解包、搬移、离线、中文路径、DPI、GPU 协作和 PLY 回读，并完成 AC-01～20 逐项证据。DJI 仅覆盖透视视频；INSV、全景与室内画质缺素材时保持阻断。

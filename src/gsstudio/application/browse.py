@@ -146,6 +146,8 @@ def list_locations(root: Path) -> list[LocationEntry]:
     base = absolute_root(root)
     entries: list[LocationEntry] = []
     for manifest_path in sorted(base.glob("*/location.yaml")):
+        if manifest_path.parent.name == ".external-imports":
+            continue
         path = manifest_path.parent
         scenes = sorted(manifest_path.parent.glob("*/scene.yaml"))
         try:

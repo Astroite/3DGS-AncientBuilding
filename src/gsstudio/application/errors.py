@@ -103,7 +103,7 @@ def classify(error: BaseException) -> ServiceError:
         "hash mismatch", "identity changed", "does not match", "has changed",
         "incomplete", "corrupt",
     )):
-        result = IntegrityError(message)
+        result = IntegrityError(message, detail=type(error).__name__)
     elif isinstance(error, FileNotFoundError):
         result: ServiceError = NotFoundError(message, path=_path_of(error))
     elif isinstance(error, FileExistsError):

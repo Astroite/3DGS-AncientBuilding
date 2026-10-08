@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from gsstudio.infrastructure.runtime.gpu_lock import gpu_locked
-
 import json
 import math
 import os
@@ -27,6 +25,7 @@ from gsstudio.infrastructure.adapters.media import (
 )
 from gsstudio.domain.models import IMAGE_SUFFIXES, CaptureManifest, SourceProbe
 from gsstudio.infrastructure.paths import host_path
+from gsstudio.infrastructure.runtime.gpu_lock import gpu_session
 from gsstudio.domain.prepared import CandidateFrameSet
 from gsstudio.infrastructure.persistence.prepared_input import _validate_frame, load_prepared_input
 from gsstudio.infrastructure.adapters.mediasdk import (
@@ -392,6 +391,13 @@ def source_adapter(capture: CaptureManifest) -> SourceAdapter:
 
 
 def probe_capture_source(capture: CaptureManifest, protocol_dir: Path) -> dict[str, Any]:
+    if capture.source.kind == "insta360_insv":
+        with gpu_session():
+            return _probe_capture_source(capture, protocol_dir)
+    return _probe_capture_source(capture, protocol_dir)
+
+
+def _probe_capture_source(capture: CaptureManifest, protocol_dir: Path) -> dict[str, Any]:
     paths = validate_source_fingerprints(capture)
     result = source_adapter(capture).probe(capture, paths, protocol_dir)
     validate_source_fingerprints(capture)
@@ -511,8 +517,24 @@ def _trusted_cached_frame_hashes(path: Path, preparation_hash: str) -> dict[str,
         return {}
 
 
-@gpu_locked
 def prepare_capture_input(
+    scene_path: Path,
+    capture: CaptureManifest,
+    target_root: Path,
+    candidate_fps: float,
+    selection_end_seconds: float | None = None,
+    resume: bool = False,
+) -> CandidateFrameSet:
+    """Prepare CPU media directly; serialize MediaSDK's GPU work with all GPU stages."""
+    if capture.source.kind == "insta360_insv":
+        with gpu_session():
+            return _prepare_capture_input(scene_path, capture, target_root, candidate_fps,
+                                          selection_end_seconds, resume)
+    return _prepare_capture_input(scene_path, capture, target_root, candidate_fps,
+                                  selection_end_seconds, resume)
+
+
+def _prepare_capture_input(
     scene_path: Path,
     capture: CaptureManifest,
     target_root: Path,

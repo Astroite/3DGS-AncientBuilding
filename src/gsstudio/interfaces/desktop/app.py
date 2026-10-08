@@ -28,8 +28,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gsstudio.infrastructure.paths import find_data_root
+from gsstudio.infrastructure.runtime.layout import configure_release_path
 from gsstudio.interfaces.desktop import theme
+from gsstudio.interfaces.desktop.settings import data_root_for_desktop
 from gsstudio.interfaces.desktop.panels import (
     InspectorPanel,
     LocationDetailPanel,
@@ -41,6 +42,7 @@ from gsstudio.interfaces.desktop.panels import (
 )
 from gsstudio.interfaces.desktop.workflow import CaptureDialog, MaskReviewDialog, OperationClient, RunDialog
 from gsstudio.interfaces.desktop.model import ModelWorkbench
+from gsstudio.interfaces.desktop.external_import import ExternalImportDialog
 
 MIN_WIDTH_FULL = 1600
 WIDTH_SIDEBAR = 284
@@ -69,6 +71,10 @@ class MainWindow(QMainWindow):
         self.operations.finished.connect(self._operation_finished)
         self._live_log_path: Path | None = None
         self._live_preview_output: Path | None = None
+        self._training_package_sha256: str | None = None
+        self._training_backend: str | None = None
+        self._training_control_status: str | None = None
+        self._training_pending_id: str | None = None
         self._live_log_position = 0
         self._live_log_timer = QTimer(self)
         self._live_log_timer.setInterval(1000)
@@ -103,6 +109,7 @@ class MainWindow(QMainWindow):
         self.actions_button.setMenu(menu)
         self._actions = {}
         for key, label, handler in (
+            ("external_import", "外部 COLMAP 导入", self._external_import),
             ("create_location", "新建地点", self._create_location),
             ("create_scene", "新建场景", self._create_scene),
             ("create_capture", "新建 Capture", self._create_capture),
@@ -126,6 +133,14 @@ class MainWindow(QMainWindow):
         self.stop_button = QPushButton("阶段后停止")
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self.operations.request_stop)
+        self.pause_training_button = QPushButton("暂停训练")
+        self.pause_training_button.clicked.connect(lambda: self._control_training("pause"))
+        self.resume_training_button = QPushButton("继续训练")
+        self.resume_training_button.clicked.connect(lambda: self._control_training("resume"))
+        self.checkpoint_button = QPushButton("保存检查点")
+        self.checkpoint_button.clicked.connect(lambda: self._control_training("checkpoint"))
+        self.end_training_button = QPushButton("结束并保留")
+        self.end_training_button.clicked.connect(lambda: self._control_training("stop"))
 
         top = QFrame()
         top.setFixedHeight(HEIGHT_TOP_BAR)
@@ -147,6 +162,9 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(self.inspector_button)
         top_layout.addWidget(self.actions_button)
         top_layout.addWidget(self.stop_button)
+        for button in (self.pause_training_button, self.resume_training_button,
+                       self.checkpoint_button, self.end_training_button):
+            top_layout.addWidget(button)
         top_layout.addWidget(refresh)
 
         left = QFrame(objectName="panel")
@@ -289,6 +307,7 @@ class MainWindow(QMainWindow):
         run_status_value = getattr(entry, "status", None)
         busy = self.operations.busy
         allowed = {
+            "external_import": True,
             "create_location": True,
             "create_scene": kind == "location",
             "create_capture": kind == "scene",
@@ -308,7 +327,23 @@ class MainWindow(QMainWindow):
         }
         for key, action in self._actions.items():
             action.setEnabled(not busy and allowed[key])
-        self.stop_button.setEnabled(busy)
+        run_busy = busy and (self._last_request or {}).get("action") in {"create_run", "resume_run"}
+        self.stop_button.setVisible(run_busy)
+        self.stop_button.setEnabled(run_busy)
+        native_training = bool(busy and self._live_preview_output is not None and
+                               self._training_backend == "gsplat")
+        for button in (self.pause_training_button, self.resume_training_button,
+                       self.checkpoint_button, self.end_training_button):
+            button.setVisible(native_training)
+        state = self._training_control_status
+        pending = self._training_pending_id is not None
+        self.pause_training_button.setEnabled(native_training and not pending and
+                                              state in {"running", "checkpoint_saved"})
+        self.resume_training_button.setEnabled(native_training and not pending and state == "paused")
+        self.checkpoint_button.setEnabled(native_training and not pending and
+                                          state in {"running", "paused", "checkpoint_saved"})
+        self.end_training_button.setEnabled(native_training and state in
+                                            {"waiting_gpu", "running", "paused", "checkpoint_saved"})
 
     def _start_operation(self, request: dict) -> None:
         request = {"root": str(self._data_root), **request}
@@ -345,6 +380,16 @@ class MainWindow(QMainWindow):
         if ok and name.strip():
             self._start_operation({"action": "create_location", "location_id": location_id.strip(),
                                    "name": name.strip()})
+
+    def _external_import(self) -> None:
+        dialog = ExternalImportDialog(self._data_root, self)
+
+        def open_verified_model(path: str, digest: str) -> None:
+            self.model_panel.open_model(Path(path), digest)
+            self.center.setCurrentWidget(self.model_panel)
+
+        dialog.model_requested.connect(open_verified_model)
+        dialog.exec()
 
     def _create_scene(self) -> None:
         scene_id, ok = QInputDialog.getText(self, "新建场景", "场景 ID（小写字母、数字、短横线）")
@@ -452,7 +497,7 @@ class MainWindow(QMainWindow):
             run = load_run(scene, payload["run"])
             candidates = [item for item in run.metrics.get("training_experiments", [])
                           if item.get("backend") == "gsplat" and
-                          item.get("status") in {"failed", "preparing"}]
+                           item.get("status") in {"failed", "preparing", "stopped"}]
         except Exception as error:
             QMessageBox.warning(self, "训练恢复", str(error))
             return
@@ -466,7 +511,24 @@ class MainWindow(QMainWindow):
         if ok:
             item = candidates[labels.index(chosen)]
             self._context_action("train_segment", segment=item["segment"],
-                                 backend="gsplat", output=item["output"], resume=True)
+                                  backend="gsplat", output=item["output"], resume=True)
+
+    def _control_training(self, action: str) -> None:
+        output = self._live_preview_output
+        if output is None or self._training_backend != "gsplat":
+            return
+        try:
+            from gsstudio.application.operations import control_training
+
+            request = control_training(self._data_root, output, action)
+        except Exception as error:
+            QMessageBox.warning(self, "训练控制未提交", str(error))
+            return
+        self._training_pending_id = request["request_id"]
+        labels = {"pause": "暂停", "resume": "继续", "checkpoint": "保存检查点", "stop": "结束"}
+        self.run_panel.append_event(f"[请求] 训练{labels[action]}，等待安全步边界")
+        self.statusBar().showMessage(f"训练{labels[action]}请求已提交；等待安全步边界")
+        self._update_actions()
 
     def _operation_event(self, event: dict) -> None:
         kind = event.get("kind", "event")
@@ -478,10 +540,22 @@ class MainWindow(QMainWindow):
         log_path = (event.get("detail") or {}).get("log_path")
         if log_path:
             self._live_log_path = Path(log_path)
-            output = (event.get("detail") or {}).get("output")
+            detail = event.get("detail") or {}
+            output = detail.get("output")
             self._live_preview_output = Path(output) if output else None
+            self._training_package_sha256 = detail.get("package_sha256")
+            self._training_backend = detail.get("backend")
+            self._training_control_status = None
+            self._training_pending_id = None
             self._live_log_position = 0
             self._live_log_timer.start()
+            if output:
+                package = detail.get("package")
+                self.run_panel.training_compare.configure(
+                    Path(output), Path(package) if package else None,
+                    detail.get("package_sha256"), detail.get("backend", ""),
+                )
+            self._update_actions()
         if kind == "result":
             self._last_result = (event.get("detail") or {}).get("result")
         elif kind == "error":
@@ -499,6 +573,10 @@ class MainWindow(QMainWindow):
         self._live_log_timer.stop()
         self._live_log_path = None
         self._live_preview_output = None
+        self._training_package_sha256 = None
+        self._training_backend = None
+        self._training_control_status = None
+        self._training_pending_id = None
         request = self._last_request or {}
         result = self._last_result or {}
         action = request.get("action")
@@ -569,6 +647,29 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, lambda: self._start_operation(followup))
 
     def _poll_live_log(self) -> None:
+        output = self._live_preview_output
+        if output is not None and self._training_backend == "gsplat":
+            state_path = output / "control-state.json"
+            if state_path.is_file():
+                try:
+                    state = json.loads(state_path.read_text(encoding="utf-8"))
+                    if state.get("package_sha256") == self._training_package_sha256:
+                        status = state.get("status")
+                        acknowledged = self._training_pending_id == state.get("request_id")
+                        changed = status != self._training_control_status
+                        if acknowledged:
+                            self._training_pending_id = None
+                            if state.get("message"):
+                                self.run_panel.append_event(f"[训练控制] {state['message']}")
+                        if changed:
+                            self._training_control_status = status
+                            self.run_panel.append_event(
+                                f"[训练控制] {status} · step {state.get('step', '—')}"
+                            )
+                        if acknowledged or changed:
+                            self._update_actions()
+                except (OSError, ValueError, TypeError):
+                    pass
         if self._live_preview_output is not None:
             self.run_panel.show_training_preview(self._live_preview_output)
         path = self._live_log_path
@@ -594,8 +695,17 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         if self.operations.busy:
-            QMessageBox.information(self, "任务仍在运行", "已请求在当前阶段结束后停止；完成前请保持窗口打开。")
-            self.operations.request_stop()
+            action = (self._last_request or {}).get("action")
+            if action in {"create_run", "resume_run"}:
+                self.operations.request_stop()
+                message = "已请求在当前阶段结束后停止；完成前请保持窗口打开。"
+            elif self._training_backend == "gsplat":
+                if self._training_control_status not in {"stopping", "stopped"}:
+                    self._control_training("stop")
+                message = "已请求在训练步边界保存并结束；完成前请保持窗口打开。"
+            else:
+                message = "当前任务仍在运行；请等待工作进程完成后再关闭。"
+            QMessageBox.information(self, "任务仍在运行", message)
             event.ignore()
             return
         self.model_panel.shutdown()
@@ -700,10 +810,13 @@ def main() -> int:
     application = QApplication(sys.argv)
     application.setApplicationName("GS-Studio")
     application.setStyleSheet(theme.build_stylesheet())
+    configure_release_path()
     try:
-        data_root = find_data_root()
+        data_root = data_root_for_desktop()
     except Exception as error:
         QMessageBox.critical(None, "GS-Studio", f"找不到数据根目录：\n{error}")
+        return 1
+    if data_root is None:
         return 1
     window = MainWindow(data_root)
     window.show()

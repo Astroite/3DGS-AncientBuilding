@@ -24,6 +24,7 @@ from gsstudio.domain.models import (
     RunStatus, SceneManifest, SourceFile, SourceProbe, TimeSelection, utc_now,
 )
 from gsstudio.infrastructure.paths import host_path, location_dir, scene_dir
+from gsstudio.infrastructure.paths import ensure_within
 from gsstudio.pipeline.editor.ply import FLOAT_PROPERTIES, read_ply_header
 from gsstudio.pipeline.stages import (
     ingest_capture, mask_run, preprocess_run, reconstruct_run, review_run,
@@ -33,8 +34,9 @@ from gsstudio.pipeline.retention import auto_cleanup, cleanup_run
 from gsstudio.infrastructure.runtime.run_lock import run_session
 from gsstudio.infrastructure.persistence.run_repository import create_run, load_run, save_run
 from gsstudio.pipeline.input.sources import load_prepared_input, prepare_capture_input, probe_capture_source
-from gsstudio.pipeline.training.runner import train_package
-from gsstudio.pipeline.training.data import prepare_segment
+from gsstudio.pipeline.training.runner import train_package, verify_evaluation
+from gsstudio.pipeline.training.data import prepare_segment, validate_package
+from gsstudio.pipeline.training.control import submit_control
 
 
 from gsstudio.application.contracts import EventSink, _emit
@@ -56,6 +58,24 @@ def segment_choices(root: Path, location_id: str, scene_id: str,
         "segments": [item for item in report["segments"] if item["status"] == "passed"],
         "report": str(dataset / "segments.json"),
     }
+
+
+def control_training(root: Path, output: Path, action: str) -> dict[str, Any]:
+    """Request a safe native-training step-boundary action for one experiment."""
+    output = ensure_within(output, root).resolve()
+    if not output.is_relative_to(root.resolve()):
+        raise ValueError("Experiment path resolves outside the Data root")
+    dispatch_path = output / "dispatch.json"
+    dispatch = json.loads(dispatch_path.read_text(encoding="utf-8"))
+    if dispatch.get("backend") != "gsplat":
+        raise ValueError("Live training controls are only available for gsplat")
+    if dispatch.get("status") != "prepared":
+        raise RuntimeError("Experiment is not currently accepting training controls")
+    digest = dispatch.get("package_sha256")
+    if not isinstance(digest, str):
+        raise RuntimeError("Experiment is missing its training package identity")
+    request = submit_control(output, digest, action)
+    return {"output": str(output), "action": action, "request_id": request["request_id"]}
 
 
 def train_segment(root: Path, location_id: str, scene_id: str, run_id: str,
@@ -93,7 +113,7 @@ def train_segment(root: Path, location_id: str, scene_id: str, run_id: str,
                          if item.get("segment") == segment and
                          item.get("backend") == backend and
                          (output is None or item.get("output") == str(output.resolve())) and
-                         item.get("status") in {"failed", "preparing"}), None)
+                         item.get("status") in {"failed", "preparing", "stopped"}), None)
         if resume and previous:
             experiment = previous
             output = Path(experiment["output"])
@@ -102,12 +122,33 @@ def train_segment(root: Path, location_id: str, scene_id: str, run_id: str,
             if dispatch.is_file():
                 recorded = json.loads(dispatch.read_text(encoding="utf-8"))
                 if recorded.get("status") == "succeeded":
+                    package_meta = validate_package(package)
+                    expected_steps = (max(30000, 30 * sum(
+                        row["split"] == "train" for row in package_meta["images"]))
+                        if steps is None else steps)
                     if (recorded.get("backend") != backend or
                             recorded.get("package_sha256") != sha256_file(package / "dataset.json") or
-                            (backend == "gsplat" and json.loads(
-                                (output / "training.json").read_text(encoding="utf-8")
-                            ).get("status") != "succeeded")):
+                            recorded.get("requested_steps") != expected_steps or
+                            recorded.get("photo_comp") != photo_comp or
+                            recorded.get("evaluation_sha256") != verify_evaluation(output, package_meta)):
                         raise RuntimeError("Completed training evidence differs from the experiment")
+                    if backend == "gsplat":
+                        training = json.loads((output / "training.json").read_text(encoding="utf-8"))
+                        config = json.loads((output / "config.json").read_text(encoding="utf-8"))
+                        if (recorded.get("use_bilateral_grid") != use_bilateral_grid or
+                                recorded.get("use_sparse_depth") != use_sparse_depth or
+                                training.get("status") != "succeeded" or
+                                training.get("steps") != expected_steps or
+                                training.get("evaluation_status") != "completed" or
+                                training.get("model_sha256") != recorded.get("model_sha256") or
+                                config.get("package_sha256") != recorded.get("package_sha256") or
+                                config.get("steps") != expected_steps or
+                                config.get("photo_comp") != photo_comp or
+                                config.get("use_bilateral_grid") != use_bilateral_grid or
+                                config.get("use_sparse_depth") != use_sparse_depth):
+                            raise RuntimeError("Completed gsplat training evidence differs from the experiment")
+                    elif not (output / "model.psht").is_file():
+                        raise RuntimeError("Completed Postshot training evidence is incomplete")
                     _verify_model(output / "model.ply", recorded["model_sha256"])
                     experiment.update(recorded)
                     save_run(scene, run)
@@ -125,7 +166,9 @@ def train_segment(root: Path, location_id: str, scene_id: str, run_id: str,
                           "status": "preparing"}
             experiments.append(experiment)
         _emit(sink, "progress", "train", "训练日志已就绪", run_id,
-              log_path=str(output / "train.log"), output=str(output))
+              log_path=str(output / "train.log"), output=str(output),
+              package=str(package), package_sha256=sha256_file(package / "dataset.json"),
+              backend=backend)
         save_run(scene, run)
         try:
             result = train_package(
@@ -137,6 +180,15 @@ def train_segment(root: Path, location_id: str, scene_id: str, run_id: str,
             experiment.update(result)
             if dry_run:
                 _emit(sink, "completed", "train", "训练输入已准备；尚未训练", run_id)
+                return {**result, "output": str(output)}
+            if result.get("status") == "stopped":
+                waiting_cancelled = result.get("stop_reason") == "gpu_wait_cancelled"
+                checkpoint_preserved = bool(result.get("checkpoint"))
+                _emit(sink, "stopped", "train",
+                      ("等待 GPU 时已取消；保留已有检查点" if checkpoint_preserved else
+                       "等待 GPU 时已取消；尚未开始训练") if waiting_cancelled else
+                      "已在训练步边界保存检查点并停止", run_id,
+                      output=str(output), checkpoint=result.get("checkpoint"))
                 return {**result, "output": str(output)}
             if result.get("status") != "succeeded" or not result.get("model_sha256"):
                 raise RuntimeError("Training did not publish a verified PLY")

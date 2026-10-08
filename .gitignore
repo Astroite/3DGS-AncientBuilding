@@ -7,6 +7,8 @@ __pycache__/
 htmlcov/
 .venv/
 .venv-gsplat/
+dist/
+build/
 .runtime-locks/
 studio-projects/
 env/

@@ -33,12 +33,45 @@ def _stop_requested(request: dict[str, Any]) -> bool:
     return bool(value and Path(value).is_file())
 
 
+def _external_options(request: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: Path(request[key]) if request.get(key) else None
+        for key in ("source", "images", "model", "masks", "group_file")
+    } | {
+        "independent_images": bool(request.get("independent_images", False)),
+        "white_ignore": bool(request.get("white_ignore", False)),
+    }
+
+
 def execute(request: dict[str, Any]) -> dict[str, Any]:
     action = request["action"]
     root = Path(request["root"])
     location = request.get("location_id")
     scene = request.get("scene_id")
     run_id = request.get("run_id")
+    if action == "inspect_external_import":
+        return ops.inspect_external_import(**_external_options(request))
+    if action == "prepare_external_import":
+        return ops.prepare_external_import(
+            root, request["import_id"], expected_input_identity=request.get("expected_input_identity"),
+            sink=_event, **_external_options(request),
+        )
+    if action == "train_external_import":
+        return ops.train_external_import(
+            root, request["import_id"], backend=request.get("backend", "gsplat"),
+            steps=request.get("steps"), resume=bool(request.get("resume", False)),
+            experiment_id=request.get("experiment_id"), sink=_event,
+        )
+    if action == "list_external_imports":
+        return ops.list_external_imports(root)
+    if action == "relink_external_import":
+        return ops.relink_external_import(
+            root, request["import_id"],
+            new_root=Path(request["new_root"]) if request.get("new_root") else None,
+            mapping_file=Path(request["mapping_file"]) if request.get("mapping_file") else None,
+        )
+    if action == "control_training":
+        return ops.control_training(root, Path(request["output"]), request["control_action"])
     if action == "create_location":
         result = ops.create_location(root, location, request["name"])
         return {"location_id": result.id}

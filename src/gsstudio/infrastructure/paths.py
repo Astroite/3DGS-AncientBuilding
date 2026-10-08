@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 import os
+import json
+import sys
+import tempfile
 from pathlib import Path
 
 
 def find_app_root(start: Path | None = None) -> Path:
+    if getattr(sys, "frozen", False):
+        executable_dir = Path(sys.executable).resolve().parent
+        for candidate in (executable_dir, *executable_dir.parents):
+            if (candidate / "release-manifest.json").is_file():
+                return candidate
+        return executable_dir
     current = (start or Path.cwd()).resolve()
     if current.is_file():
         current = current.parent
@@ -15,20 +24,60 @@ def find_app_root(start: Path | None = None) -> Path:
 
 
 DATA_ROOT_ENV = "GSSTUDIO_DATA_ROOT"
+SETTINGS_DIR_ENV = "GSSTUDIO_SETTINGS_DIR"
+
+
+def user_settings_dir() -> Path:
+    configured = os.environ.get(SETTINGS_DIR_ENV, "").strip()
+    if configured:
+        return host_path(configured)
+    if os.name == "nt":
+        return Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "GSStudio"
+    return Path(os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))) / "gsstudio"
+
+
+def saved_data_root() -> Path | None:
+    settings = user_settings_dir() / "settings.json"
+    if not settings.is_file():
+        return None
+    payload = json.loads(settings.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != 1 or not isinstance(payload.get("data_root"), str):
+        raise RuntimeError(f"Invalid GS Studio settings: {settings}")
+    return host_path(payload["data_root"])
+
+
+def save_data_root(path: Path) -> Path:
+    root = host_path(path).resolve(strict=True)
+    if not root.is_dir():
+        raise NotADirectoryError(root)
+    settings = user_settings_dir() / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".settings-", suffix=".tmp", dir=settings.parent)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump({"schema_version": 1, "data_root": str(root)}, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, settings)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    return root
 
 
 def find_data_root(start: Path | None = None) -> Path:
-    """Locate the Data tree: ``GSSTUDIO_DATA_ROOT`` or the repository's sibling Data."""
+    """Locate Data via explicit override, saved user choice, or a sibling folder."""
     configured = os.environ.get(DATA_ROOT_ENV, "").strip()
     if configured:
-        return host_path(configured)
-    candidate = find_app_root(start).parent / "Data"
-    if not candidate.is_dir():
-        raise RuntimeError(
-            f"GS Studio data root is missing: {candidate}. Set {DATA_ROOT_ENV}, or create a "
-            f"'Data' folder next to the APP directory ({find_app_root(start)})."
-        )
-    return candidate
+        candidate = host_path(configured)
+    else:
+        candidate = saved_data_root()
+        if candidate is None:
+            candidate = find_app_root(start).parent / "Data"
+    if candidate.is_dir():
+        return candidate
+    raise RuntimeError(f"GS Studio data root is missing: {candidate}. Select an existing Data folder in the desktop app or set {DATA_ROOT_ENV}.")
 
 
 def host_path(value: str | Path) -> Path:

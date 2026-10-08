@@ -2,13 +2,17 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
 from gsstudio.infrastructure.paths import find_app_root
+from gsstudio.infrastructure.runtime.layout import is_frozen, trainer_executable
 
 
 def trainer_python() -> Path:
+    if is_frozen():
+        raise RuntimeError("Frozen GS Studio uses its bundled GPU trainer executable")
     app = find_app_root()
     python = Path(os.environ.get(
         "GSSTUDIO_GSPLAT_PYTHON", str(app / ".venv-gsplat" / "Scripts" / "python.exe")
@@ -16,6 +20,19 @@ def trainer_python() -> Path:
     if not python.is_file():
         raise RuntimeError("Run scripts/bootstrap-gsplat-windows.ps1 first")
     return python
+
+
+def native_training_command(*args: str) -> list[str]:
+    """Launch the same trainer contract from source or from an offline release."""
+    if is_frozen():
+        return [str(trainer_executable()), *map(str, args)]
+    return [str(trainer_python()), "-m", "gsstudio.pipeline.training.native", *map(str, args)]
+
+
+def trainer_diagnostic_command() -> list[str]:
+    if is_frozen():
+        return [str(trainer_executable()), "--doctor"]
+    return [str(trainer_python()), "-m", "gsstudio.interfaces.trainer_diagnostic"]
 
 
 def _locate_cuda_home() -> Path | None:
@@ -74,4 +91,13 @@ def configure_windows_cuda() -> None:
     os.environ["CUDA_PATH"] = str(cuda)
     os.environ["PATH"] = str(cuda / "bin") + os.pathsep + os.environ["PATH"]
     os.environ["MAX_JOBS"] = "4"
-    os.environ["TORCH_CUDA_ARCH_LIST"] = "12.0"
+    arch = os.environ.get("GSSTUDIO_CUDA_ARCH_LIST", "").strip()
+    if not arch:
+        output = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            text=True, encoding="utf-8", errors="replace",
+        )
+        arch = output.splitlines()[0].strip()
+    if not re.fullmatch(r"\d+\.\d+", arch):
+        raise RuntimeError(f"Invalid GPU compute capability: {arch}")
+    os.environ["TORCH_CUDA_ARCH_LIST"] = arch

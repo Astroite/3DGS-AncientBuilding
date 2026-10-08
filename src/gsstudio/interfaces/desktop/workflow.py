@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import sys
 import tempfile
 from pathlib import Path
 
@@ -15,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from gsstudio.pipeline.masks.review import MaskReviewDataset
+from gsstudio.infrastructure.runtime.layout import worker_command
 
 
 class OperationClient(QObject):
@@ -38,6 +38,7 @@ class OperationClient(QObject):
     def start(self, request: dict) -> None:
         if self.busy:
             raise RuntimeError("Another GS-Studio operation is still running")
+        command = worker_command()
         self._control = tempfile.TemporaryDirectory(prefix="gs-studio-")
         self._stop_path = Path(self._control.name) / "stop"
         request = {**request, "stop_file": str(self._stop_path)}
@@ -50,8 +51,13 @@ class OperationClient(QObject):
         process.readyReadStandardOutput.connect(self._read_output)
         process.readyReadStandardError.connect(self._read_error)
         process.finished.connect(self._finished)
-        process.start(sys.executable, ["-m", "gsstudio.interfaces.worker.main"])
-        if not process.waitForStarted(3000):
+        try:
+            process.start(command[0], command[1:])
+            started = process.waitForStarted(3000)
+        except Exception:
+            self._cleanup()
+            raise
+        if not started:
             self._cleanup()
             raise RuntimeError("Could not start the GS-Studio operation worker")
         process.write((json.dumps(request, ensure_ascii=False) + "\n").encode("utf-8"))

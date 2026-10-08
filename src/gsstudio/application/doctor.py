@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
-from gsstudio.infrastructure.runtime.gpu_lock import gpu_locked
+from gsstudio.infrastructure.runtime.gpu_lock import gpu_session
 
 
 def _version(command: list[str]) -> tuple[bool, str]:
@@ -168,39 +168,21 @@ def _person_segmenter_check() -> tuple[bool, str]:
 
 def _training_python() -> Path:
     from gsstudio.infrastructure.paths import find_app_root
+    from gsstudio.infrastructure.runtime.layout import is_frozen
     app = find_app_root()
+    if is_frozen():
+        return app / "gpu-runtime" / "GSStudioTrainer.exe"
     return Path(os.environ.get("GSSTUDIO_GSPLAT_PYTHON", str(app / ".venv-gsplat" / "Scripts" / "python.exe")))
 
 
 def _gsplat_runtime_check(python: Path) -> tuple[bool, str]:
     """Check the separate environment without starting training or installing packages."""
     if not python.is_file():
-        return False, f"Missing native environment: {python}; run bootstrap-gsplat-windows.ps1"
-    code = '''import json
-from importlib.metadata import version
-import torch
-import gsplat
-from gsplat import csrc
-assert torch.__version__.split('+')[0] == '2.9.1', 'Expected PyTorch 2.9.1'
-assert torch.version.cuda == '13.0', 'Expected CUDA 13.0 PyTorch build'
-assert version('gsplat').split('+')[0] == '1.5.3', 'Expected gsplat 1.5.3'
-assert torch.cuda.is_available(), 'CUDA unavailable in native training environment'
-means = torch.tensor([[0., 0., 3.]], device='cuda', requires_grad=True)
-quats = torch.tensor([[1., 0., 0., 0.]], device='cuda', requires_grad=True)
-scales = torch.full((1, 3), .2, device='cuda', requires_grad=True)
-opacities = torch.full((1,), .5, device='cuda', requires_grad=True)
-colors = torch.full((1, 3), .5, device='cuda', requires_grad=True)
-rgb, alpha, _ = gsplat.rasterization(means, quats, scales, opacities, colors,
-    torch.eye(4, device='cuda')[None],
-    torch.tensor([[[8., 0., 4.], [0., 8., 4.], [0., 0., 1.]]], device='cuda'), 8, 8)
-(rgb.sum() + alpha.sum()).backward()
-assert torch.isfinite(rgb).all(), 'Nonfinite CUDA output'
-assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in [means, quats, scales, opacities, colors]), 'Invalid CUDA gradients'
-torch.cuda.synchronize()
-print(json.dumps(dict(torch=torch.__version__, gsplat=version('gsplat'), cuda=torch.version.cuda, forward_backward='passed')))
-'''
+        return False, f"Missing native training runtime: {python}"
     try:
-        result = subprocess.run([str(python), "-c", code], capture_output=True, text=True,
+        from gsstudio.infrastructure.adapters.gsplat import trainer_diagnostic_command
+
+        result = subprocess.run(trainer_diagnostic_command(), capture_output=True, text=True,
                                 encoding="utf-8", errors="replace", timeout=120)
         lines = (result.stdout if result.returncode == 0 else result.stderr or result.stdout).strip().splitlines()
         return result.returncode == 0, lines[-1] if lines else f"Native check exited {result.returncode}"
@@ -208,7 +190,6 @@ print(json.dumps(dict(torch=torch.__version__, gsplat=version('gsplat'), cuda=to
         return False, str(error)
 
 
-@gpu_locked
 def run_doctor(
     data_root: Path,
     minimum_free_gib: float = 20.0,
@@ -226,10 +207,11 @@ def run_doctor(
     checks["ffprobe"] = _version(["ffprobe", "-version"])
     if "colmap" in required:
         checks["colmap_cuda_build"] = _colmap_cuda_build()
-        checks["colmap_gpu_sift"] = (
-            _colmap_gpu_sift_smoke(data_root) if checks["colmap_cuda_build"][0]
-            else (False, "CUDA COLMAP unavailable for explicit legacy check")
-        )
+        if checks["colmap_cuda_build"][0]:
+            with gpu_session():
+                checks["colmap_gpu_sift"] = _colmap_gpu_sift_smoke(data_root)
+        else:
+            checks["colmap_gpu_sift"] = (False, "CUDA COLMAP unavailable for explicit legacy check")
     for name, resolver in _realityscan_resolvers().items():
         try:
             resolved = resolver()
@@ -246,7 +228,8 @@ def run_doctor(
             "DEEPSEEK_API_KEY is present; value was not inspected or logged",
         )
 
-    checks["torch_cuda"] = _torch_cuda_check()
+    with gpu_session():
+        checks["torch_cuda"] = _torch_cuda_check()
     checks["person_segmenter"] = _person_segmenter_check()
     python = _training_python()
     checks["training_python"] = (python.is_file(), f"{python}; also used for shared PLY evaluation")

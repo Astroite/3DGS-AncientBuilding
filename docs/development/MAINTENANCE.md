@@ -12,6 +12,7 @@
 | `scripts/bootstrap-windows.ps1` | 首次安装主环境 | 写 .venv，下载依赖；不自动运行 doctor |
 | `scripts/bootstrap-gsplat-windows.ps1` | 安装独立训练/评估环境并编译 CUDA 扩展，支持 `-SkipPackages` | 写 .venv-gsplat 与 wheels/，下载依赖、跑 nvcc |
 | `scripts/build_gsplat_csrc.py` | 把已安装 gsplat 的 CUDA 源编译成 `gsplat/csrc.pyd` | 写环境内包与 wheels/ 缓存；幂等 |
+| `scripts/build-windows-release.ps1` | 检查主/GPU 环境和显卡架构，生成 PyInstaller onedir 离线目录与文件哈希清单 | 写 `dist/`；不访问原片，需准备可再分发 FFmpeg 目录 |
 | `scripts/apply_nerfstudio_patch.py` | 安装时核验并应用投影 clamp 和嵌套路径补丁 | 修改环境内依赖代码，不处理素材 |
 | `tests/manual/test-mediasdk-helper.ps1` | 指定 LocationId、SceneId、CaptureId，独立 helper 按 5 fps 验收（不代表新 Run 默认）；可用 RunId 恢复 | GPU、解码和 Run 候选缓存；不是轻量单测 |
 | `tests/manual/smoke-native-gsplat.py` | 独立环境，`--output` 指定新的合成测试目录 | GPU、少量合成训练与检查点；不访问 Capture |
@@ -35,9 +36,9 @@ GUI 与 CLI 共用 `src/gsstudio/application/` 的状态读取、操作层及错
 
 后端对照直接输入 Run 目录。保持两后端、补偿开关、步数、时长及恢复选项；失败/阻断返回非零。复用成功结果时核验包身份、预算和 PLY 哈希。`--dry-run` 是准备动作，不是只读检查。
 
-## 环境版本（Blackwell / CUDA 13）
+## 环境版本（CUDA 13）
 
-sm_120（RTX 5090 D v2，compute capability 12.0）主机无法执行 CUDA 11.8 构建：CUDA 11.8 工具链不支持 sm_120，PyTorch 2.1.2 的 cu118 轮子在 Blackwell 上跑不了 CUDA 内核。仓库现固定下列组合，PyTorch 轮子源为官方索引 `https://download.pytorch.org/whl/cu130`：
+旧验证主机曾是 sm_120；当前主机查询到 RTX 4060 Ti、compute capability 8.9。不能沿用只为 sm_120 编译的扩展来声称当前主机可运行。仓库仍固定下列 CUDA 13 组合，PyTorch 轮子源为官方索引 `https://download.pytorch.org/whl/cu130`：
 
 | 项 | 版本 |
 | --- | --- |
@@ -46,9 +47,9 @@ sm_120（RTX 5090 D v2，compute capability 12.0）主机无法执行 CUDA 11.8 
 | gsplat | 1.5.3，源码编译，`TORCH_CUDA_ARCH_LIST=12.0` |
 | nerfstudio | 固定提交 `758ea19…` + `--no-deps` + 最小依赖子集 |
 
-nerfstudio 的 `--no-deps` 只跳过它自己固定的 CUDA 扩展（gsplat 1.4.0、nerfacc 0.5.2）。GS Studio 只导入其 COLMAP/equirect 辅助模块，未使用的重型依赖（jupyterlab、nuscenes-devkit 等）不安装。主环境与 `.venv-gsplat` 都装这套 torch，两处版本断言在 `src/gsstudio/application/doctor.py` 的 `_gsplat_runtime_check`。
+nerfstudio 的 `--no-deps` 只跳过它自己固定的 CUDA 扩展（gsplat 1.4.0、nerfacc 0.5.2）。GS Studio 只导入其 COLMAP/equirect 辅助模块，未使用的重型依赖（jupyterlab、nuscenes-devkit 等）不安装。主环境与 `.venv-gsplat` 都装这套 torch；发布预检检查两处 ABI 与扩展身份，`trainer_diagnostic.py` 在 GPU 锁内验证 CUDA 前向和反向。
 
-gsplat 没有 cu130 轮子，因此 `bootstrap-gsplat-windows.ps1` 安装纯 Python 包后调用 `scripts/build_gsplat_csrc.py`，把随包分发的 CUDA 源编译成 `gsplat/csrc.pyd`，产物缓存在 `wheels/`（按 Python/torch 版本命名，换版本不会误复用）。CUDA 查找顺序：`GSSTUDIO_CUDA_HOME`、`CUDA_HOME`、`C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.*`、`GSStudio\..\tools\cuda-13.4`；MSVC 环境由 vswhere 定位后经 vcvars64 注入。
+gsplat 没有 cu130 轮子，因此 `bootstrap-gsplat-windows.ps1` 安装纯 Python 包后调用 `scripts/build_gsplat_csrc.py`，把随包分发的 CUDA 源编译成 `gsplat/csrc.pyd`。脚本通过 `nvidia-smi` 选取当前 compute capability，也可显式设置 `GSSTUDIO_CUDA_ARCH_LIST`；缓存名同时包含 Python、torch 和 GPU 架构。`gsplat/csrc-build.json` 记录架构和扩展 SHA-256，Windows 发布预检必须与当前 GPU 匹配。CUDA 查找顺序：`GSSTUDIO_CUDA_HOME`、`CUDA_HOME`、`C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.*`、`GSStudio\..\tools\cuda-13.4`；MSVC 环境由 vswhere 定位后经 vcvars64 注入。
 
 ### 上游 bug：MSVC 顶层 const 修饰名
 

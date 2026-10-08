@@ -21,7 +21,7 @@ if ($LASTEXITCODE -ne 0) { throw 'pip upgrade failed' }
 # Torch/torchvision first, from the CUDA 13 wheel index.
 # Installing these before nerfstudio keeps pip's
 # resolver from silently swapping in a CPU-only or differently-CUDA'd build.
-# sm_120 (Blackwell) hosts cannot execute CUDA 11.8 builds.
+# Keep the CUDA 13 wheel family used by the independent native trainer.
 & $VenvPython -m pip install torch==2.9.1 torchvision==0.24.1 `
     --index-url https://download.pytorch.org/whl/cu130
 if ($LASTEXITCODE -ne 0) { throw 'torch/torchvision install failed' }

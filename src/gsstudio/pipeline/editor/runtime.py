@@ -32,6 +32,7 @@ class Runtime:
         self.active_task=threading.Event()
         self.dataset=None
         self.editor=None
+        self.model_identity=None
         self.project=None
         self.experiment=None
         self.settings=None
@@ -44,6 +45,9 @@ class Runtime:
         self.last_preview_time=0
         self.params=None
         self.params_revision=None
+        self.preview_matrix=None
+        self.preview_keep=None
+        self.edit_preview_revision=0
         self.thread=threading.Thread(target=self._loop,daemon=True,name='studio-worker')
         self.thread.start()
 
@@ -69,22 +73,28 @@ class Runtime:
                 if self.editor and self.camera and self.preview_revision!=self.last_preview:
                     try:
                         with gpu_session(cancel=self.quit,timeout=0.2):
-                            if self.params_revision!=(id(self.editor),self.editor.revision):
+                            identity=(id(self.editor),self.editor.revision,self.edit_preview_revision)
+                            t=None
+                            if self.params_revision!=identity:
                                 import torch
                                 from gsstudio.pipeline.training.native import configure_windows_cuda
                                 configure_windows_cuda()
-                                data=self.editor.materialize()
+                                matrix=(self.preview_matrix@self.editor.matrix
+                                        if self.preview_matrix is not None else None)
+                                data=self.editor.materialize(matrix_override=matrix,
+                                                             keep_override=self.preview_keep)
                                 t=torch.tensor(data,device='cuda')
                                 self.params=dict(means=t[:,:3],sh0=t[:,6:9,None].transpose(1,2),
                                     shN=t[:,9:54].reshape(-1,3,15).transpose(1,2).contiguous(),
                                     opacities=t[:,54],scales=t[:,55:58],quats=t[:,58:62])
-                                self.params_revision=(id(self.editor),self.editor.revision)
+                                self.params_revision=identity
                             self._preview(self.params)
                             # Idle viewing must release its GPU allocations before
                             # another pipeline stage acquires the workspace lock.
                             self.params=None
                             self.params_revision=None
-                            del t
+                            if t is not None:
+                                del t
                             torch.cuda.empty_cache()
                     except (TimeoutError,InterruptedError):
                         self.last_preview=self.preview_revision
@@ -110,6 +120,7 @@ class Runtime:
             dataset=Dataset(**kwargs)
             self.dataset=dataset
             self.editor=None
+            self.model_identity=None
             self.params=None
             self.params_revision=None
             self.project=None
@@ -130,7 +141,8 @@ class Runtime:
         with torch.no_grad():
             rgb,_,_=render(params,row)
             pixels=(rgb[0].clamp(0,1).cpu().numpy()*255).round().astype(np.uint8)
-        self.emit('preview',pixels=pixels,camera=row,revision=revision)
+        self.emit('preview',pixels=pixels,camera=row,revision=revision,
+                  model_identity=self.model_identity)
         self.last_preview=revision
         self.last_preview_time=time.monotonic()
 
@@ -248,6 +260,7 @@ class Runtime:
         if state is not None:
             editor.load_state(state)
         self.editor=editor
+        self.model_identity=str(Path(path).resolve())
         self.dataset=None
         self.project=None
         self.experiment=None
@@ -256,17 +269,52 @@ class Runtime:
         self.emit('clear_dataset')
         self.params=None
         self.params_revision=None
-        self.emit('editor',editor=self.editor)
+        self.preview_matrix=None
+        self.preview_keep=None
+        self.emit('editor',editor=self.editor,model_identity=self.model_identity)
         self.preview_revision+=1
         self.status('viewing')
 
     def edit(self,method,*args,**kwargs):
         if self.editor is None:
             raise ValueError('请先打开模型或完成训练')
-        result=getattr(self.editor,method)(*args,**kwargs)
-        self.emit('editor',editor=self.editor,fit=False)
+        if method=='select' and not args[2]:
+            from gsstudio.pipeline.editor.visibility import visible_centers
+            from gsstudio.infrastructure.adapters.gsplat import configure_windows_cuda
+            with gpu_session(cancel=self.quit,timeout=0.2):
+                configure_windows_cuda()
+                visible=visible_centers(self.editor,args[0],args[1])
+            args=(*args,visible)
+        self.preview_matrix=None
+        self.preview_keep=None
+        self.edit_preview_revision+=1
         self.preview_revision+=1
+        result=getattr(self.editor,method)(*args,**kwargs)
+        self.emit('editor',editor=self.editor,fit=False,model_identity=self.model_identity)
         return result
+
+    def set_edit_preview(self, *, transform=None, crop=None):
+        if self.editor is None:
+            return
+        self.preview_matrix=None
+        self.preview_keep=None
+        self.edit_preview_revision+=1
+        self.preview_revision+=1
+        if transform is not None:
+            self.preview_matrix=self.editor.transform_matrix(*transform)
+        if crop is not None:
+            low,high,keep_inside=crop
+            low,high=np.asarray(low,float),np.asarray(high,float)
+            if low.shape!=(3,) or high.shape!=(3,) or not np.isfinite([low,high]).all() or np.any(low>=high):
+                raise ValueError('裁剪预览范围无效')
+            xyz=self.editor.xyz()
+            inside=((xyz>=low)&(xyz<=high)).all(axis=1)
+            self.preview_keep=self.editor.keep & (inside if keep_inside else ~inside)
+            if not self.preview_keep.any():
+                raise ValueError('裁剪将删除全部高斯')
+
+    def clear_edit_preview(self):
+        self.set_edit_preview()
 
     def save_project(self,view=None):
         if self.project is None:

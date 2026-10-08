@@ -9,5 +9,9 @@ from gsstudio.application.runs import (
 )
 from gsstudio.application.advance import advance_run
 from gsstudio.application.reviews import finalize_masks, review_qa
-from gsstudio.application.experiments import segment_choices, train_segment
+from gsstudio.application.experiments import segment_choices, train_segment, control_training
 from gsstudio.application.delivery import verified_models
+from gsstudio.application.external_imports import (
+    inspect_external_import, prepare_external_import, train_external_import,
+    list_external_imports, verify_external_import, relink_external_import,
+)

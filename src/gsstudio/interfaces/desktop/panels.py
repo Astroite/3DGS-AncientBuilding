@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Callable
 
 from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal
-from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -34,6 +33,7 @@ from PySide6.QtWidgets import (
 from gsstudio.application import browse, run_status
 from gsstudio.application.deps import collect_checks
 from gsstudio.interfaces.desktop import theme
+from gsstudio.interfaces.desktop.compare import TrainingCompare
 
 ROLE_PAYLOAD = Qt.ItemDataRole.UserRole
 ROLE_PLACEHOLDER = "placeholder"
@@ -258,19 +258,7 @@ class RunDetailPanel(QWidget):
         self.qa_report.setReadOnly(True)
         self.activity = QPlainTextEdit()
         self.activity.setReadOnly(True)
-        self.preview_source = QLabel("源图待生成")
-        self.preview_render = QLabel("训练预览待生成")
-        self.preview_step = QLabel("预览尚未生成", objectName="caption")
-        for label in (self.preview_source, self.preview_render):
-            label.setMinimumSize(280, 240)
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        preview_row = QHBoxLayout()
-        preview_row.addWidget(self.preview_source, 1)
-        preview_row.addWidget(self.preview_render, 1)
-        preview_page = QWidget()
-        preview_layout = QVBoxLayout(preview_page)
-        preview_layout.addWidget(self.preview_step)
-        preview_layout.addLayout(preview_row, 1)
+        self.training_compare = TrainingCompare()
 
         tabs = QTabWidget()
         tabs.addTab(self.config, "配置")
@@ -278,7 +266,7 @@ class RunDetailPanel(QWidget):
         tabs.addTab(self.logs, "日志")
         tabs.addTab(self.experiments, "训练实验")
         tabs.addTab(self.qa_report, "QA 报告")
-        tabs.addTab(preview_page, "训练预览")
+        tabs.addTab(self.training_compare, "训练预览")
         tabs.addTab(self.activity, "活动")
 
         layout = QVBoxLayout(self)
@@ -300,38 +288,20 @@ class RunDetailPanel(QWidget):
         self.activity.clear()
         self.qa_report.clear()
         self.qa_summary.setText("分段可训练：— · 全路线覆盖：—")
+        self.training_compare.clear()
 
     def append_event(self, message: str) -> None:
         self.activity.appendPlainText(message)
 
     def show_training_preview(self, output: Path) -> None:
-        import json
-
-        report = output / "preview.json"
-        if not report.is_file():
-            return
-        try:
-            progress = json.loads(report.read_text(encoding="utf-8"))
-            for label, name in ((self.preview_source, "source-preview.png"),
-                                (self.preview_render, "preview-current.png")):
-                image = output / name
-                if image.is_file():
-                    pixmap = QPixmap(str(image))
-                    if not pixmap.isNull():
-                        label.setPixmap(pixmap.scaled(
-                            label.size(), Qt.AspectRatioMode.KeepAspectRatio,
-                            Qt.TransformationMode.SmoothTransformation,
-                        ))
-            self.preview_step.setText(
-                f"同视角源图 / 渲染 · step {progress.get('step', 0)} / {progress.get('target', '—')}"
-            )
-        except (OSError, ValueError, TypeError):
-            self.preview_step.setText("预览文件正在更新…")
+        if self.training_compare.output == output:
+            self.training_compare.refresh()
 
     def show_detail(self, detail: run_status.RunDetail) -> None:
         entry = detail.entry
         if self._current_run != entry.id:
             self.activity.clear()
+            self.training_compare.clear()
             self._current_run = entry.id
         self.title.setText(f"Run {entry.id}")
         selected = entry.selected_dataset or "—"

@@ -2,7 +2,7 @@
 
 本文件是 GSStudio 唯一的日常操作手册。现行流程为 INSV / 标准全景 / 透视视频输入 → 候选抽帧 → RealityScan → 分段 QA → Postshot Splat ADC 或 Windows gsplat。脚本清单、环境偏离记录和不支持的历史形态见 [维护说明](../development/MAINTENANCE.md)。产品方向是以 GUI 为日常入口的 GS-Studio，见[项目路线图](../architecture/GS-STUDIO-PROJECT-ROADMAP.md)和[工程路线图](../architecture/GS-STUDIO-ENGINEERING-ROADMAP.md)；路线图是规划，不取代本手册的实际命令。
 
-PySide6 工作台现已有全流程操作代码入口，见 [Studio 说明](STUDIO.md)。由于 D-02 仍暂停 CPU/GPU 测试及应用验收，本手册暂保留 CLI 作为已记录的日常流程；不能因 GUI 按钮或 PLY 文件出现而认为对应阶段已验收。原片迁移后可通过 `Invoke-Gsstudio capture relink <location> <scene> <capture> --source <新路径>` 按记录顺序重新定位，并核对字节数与 SHA256。
+PySide6 工作台现已有全流程操作代码入口，见 [Studio 说明](STUDIO.md)。用户已于 2026-09-24 恢复本项目分层运行验证；CLI 仍是当前已记录的日常流程，直至 Qt、真实素材和离线包验收齐备。两段 DJI 透视视频只完成 Capture 登记、probe 与 ingest；不能因 GUI 按钮或 PLY 文件出现而认为对应阶段已验收。原片迁移后可通过 `Invoke-Gsstudio capture relink <location> <scene> <capture> --source <新路径>` 按记录顺序重新定位，并核对字节数与 SHA256。
 
 新 Run 使用下列默认，已有 Run 按原清单恢复。代码接入、短测试通过和最终画质验收分别记录，不互相替代。
 
@@ -22,7 +22,7 @@ Invoke-Gsstudio --help
 Invoke-Gsstudio doctor --backend all --require mediasdk
 ```
 
-主环境是 `.venv`；独立训练与统一 PLY 评估环境是 `.venv-gsplat`，固定 PyTorch 2.9.1+cu130、gsplat 1.5.3（源码编译为 sm_120 扩展，缓存在 `wheels/`）。即使使用 Postshot，CLI 训练后的统一评估也需要独立环境。版本对照、构建方式与回退阶梯见 [维护说明](../development/MAINTENANCE.md)。
+主环境是 `.venv`；独立训练与统一 PLY 评估环境是 `.venv-gsplat`，固定 PyTorch 2.9.1+cu130、gsplat 1.5.3（源码按当前 GPU 架构编译并缓存于 `wheels/`）。即使使用 Postshot，CLI 训练后的统一评估也需要独立环境。版本对照、构建方式与回退阶梯见 [维护说明](../development/MAINTENANCE.md)。
 
 `session.ps1` 支持任意当前目录，初始化后使用 `Invoke-Gsstudio`。绝对路径调用 `gsstudio.ps1` 也会复用相同初始化。Data 路径优先级为显式 `-DataRoot`、已有 `GSSTUDIO_DATA_ROOT`、GSStudio 同级 Data。已有 SDK/helper/trainer 环境变量保留；不读取或打印密钥值。
 

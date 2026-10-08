@@ -119,7 +119,7 @@ def test_classification_preserves_message_and_keeps_the_cause():
     assert invalid.detail == "ValueError"
 
     generic = errors.classify(RuntimeError("Experiment identity changed: backend"))
-    assert generic.code == "error"
+    assert generic.code == "integrity"
     assert generic.detail == "RuntimeError"
     assert generic.message == "Experiment identity changed: backend"
 

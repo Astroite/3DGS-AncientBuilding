@@ -17,10 +17,13 @@ import torch.nn.functional as F
 from gsstudio.infrastructure.persistence.manifests import canonical_hash
 from gsstudio.infrastructure.adapters.media import sha256_file
 from gsstudio.infrastructure.adapters.gsplat import configure_windows_cuda
+from gsstudio.infrastructure.runtime.gpu_lock import gpu_session
 from gsstudio.pipeline.training.photometric import BilateralGrid
 from gsstudio.pipeline.editor.ply import FLOAT_PROPERTIES, read_ply_header
 from gsstudio.pipeline.training.sparse_depth import load_sparse_depth
 from gsstudio.pipeline.training.data import json_write, validate_package
+from gsstudio.pipeline.training.control import TrainingControl
+from gsstudio.pipeline.training.preview import publish, read_request, scaled_camera
 
 
 def masked_losses(prediction, target, keep):
@@ -229,7 +232,7 @@ def sparse_depth_loss(rendered_depth, anchors, row_index):
 
 def train(package, output, steps=None, photo_comp=True, resume=False, antialiased=False, checkpoint_every=1000,
           observer=None, run_evaluation=True, sh_degree=3, use_bilateral_grid=True, use_sparse_depth=True,
-          sparse_depth_weight=0.1):
+          sparse_depth_weight=0.1, restart_from_step_zero=False):
     from gsplat import DefaultStrategy
     if not torch.cuda.is_available():
         raise RuntimeError('Native CUDA is unavailable')
@@ -250,7 +253,19 @@ def train(package, output, steps=None, photo_comp=True, resume=False, antialiase
         sparse_depth_status=sparse_depth_status)
     output.mkdir(parents=True,exist_ok=True)
     checkpoint = output/'checkpoint.pt'
-    if (output/'config.json').exists() and not resume:
+    if restart_from_step_zero and (resume or checkpoint.exists()):
+        raise RuntimeError('Step-zero restart requires no recoverable checkpoint')
+    if restart_from_step_zero:
+        previous_summary_path = output/'training.json'
+        previous_summary = (json.loads(previous_summary_path.read_text(encoding='utf-8'))
+                            if previous_summary_path.is_file() else {})
+        if not isinstance(previous_summary, dict):
+            raise RuntimeError('Training evidence is invalid')
+        if ((output/'model.ply').exists() or previous_summary.get('status') == 'succeeded' or
+                (previous_summary.get('status') == 'stopped' and
+                 isinstance(previous_summary.get('steps'), int) and previous_summary['steps'] > 0)):
+            raise RuntimeError('Step-zero restart would overwrite completed training evidence')
+    if (output/'config.json').exists() and not (resume or restart_from_step_zero):
         raise FileExistsError('Training output already exists; use --resume')
     if (output/'config.json').exists() and not _configs_match(json.loads((output/'config.json').read_text()), config):
         raise RuntimeError('Checkpoint training configuration changed')
@@ -280,7 +295,8 @@ def train(package, output, steps=None, photo_comp=True, resume=False, antialiase
     strategy = DefaultStrategy(refine_start_iter=500,refine_stop_iter=min(int(15000*scale),int(steps*0.75)),
         reset_every=max(3000,len(observations)+100),pause_refine_after_reset=len(observations))
     versions=dict(torch=torch.__version__,gsplat=version('gsplat'),cuda=torch.version.cuda,numpy=np.__version__,opencv=cv2.__version__)
-    runtime=output/(f'runtime-resume-{time.time_ns()}.json' if resume else 'runtime.json')
+    runtime=output/(f'runtime-resume-{time.time_ns()}.json' if resume else
+                    f'runtime-restart-{time.time_ns()}.json' if restart_from_step_zero else 'runtime.json')
     json_write(runtime,dict(versions=versions,device=torch.cuda.get_device_name(),strategy=asdict(strategy),
         initial_learning_rates=rates,training_images=len(observations),scene_scale=max(extent,1e-6)))
     strategy.check_sanity(params,optimizers)
@@ -437,7 +453,6 @@ def train(package, output, steps=None, photo_comp=True, resume=False, antialiase
 
 
 def main():
-    configure_windows_cuda()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dataset',required=True,type=Path)
     parser.add_argument('--output',required=True,type=Path)
@@ -447,6 +462,8 @@ def main():
     parser.add_argument('--use-sparse-depth',action=argparse.BooleanOptionalAction,default=True)
     parser.add_argument('--sparse-depth-weight',type=float,default=0.1)
     parser.add_argument('--resume',action='store_true')
+    parser.add_argument('--restart-from-step-zero',action='store_true',
+                        help='Retry the same verified experiment when no checkpoint was ever committed')
     parser.add_argument('--preview-every',type=int,default=0,
                         help='Write a same-camera source/render preview every N steps; 0 disables it')
     parser.add_argument('--preview-size',type=int,default=640)
@@ -459,59 +476,109 @@ def main():
     if args.preview_every < 0 or args.preview_size < 128:
         parser.error('Preview interval must be non-negative and size at least 128')
     if args.evaluate_ply:
-        evaluate(args.dataset,validate_package(args.dataset),load_ply(args.evaluate_ply),args.output)
+        with gpu_session():
+            configure_windows_cuda()
+            evaluate(args.dataset,validate_package(args.dataset),load_ply(args.evaluate_ply),args.output)
     else:
+        control = None
         try:
-            observer = None
+            args.output.mkdir(parents=True, exist_ok=True)
+            meta = validate_package(args.dataset)
+            package_sha256 = sha256_file(args.dataset / 'dataset.json')
+            control = TrainingControl(args.output, package_sha256, waiting_for_gpu=True)
+            last_step = 0
             if args.preview_every:
                 from gsstudio.pipeline.editor.data import read_image
 
-                args.output.mkdir(parents=True, exist_ok=True)
-                meta = validate_package(args.dataset)
-                preview_row = next((row for row in meta['images'] if row['split']=='validation'), meta['images'][0])
-                factor = min(1.0, args.preview_size / max(preview_row['width'], preview_row['height']))
-                width = max(1, round(preview_row['width'] * factor))
-                height = max(1, round(preview_row['height'] * factor))
-                K = np.asarray(preview_row['K'], dtype=float).copy()
-                K[0] *= width / preview_row['width']
-                K[1] *= height / preview_row['height']
-                preview_camera = dict(preview_row, width=width, height=height, K=K.tolist())
-                source = read_image(args.dataset / preview_row['image'])
-                source = cv2.resize(source, (width, height), interpolation=cv2.INTER_AREA)
-                ok, source_encoded = cv2.imencode('.png', source)
-                if not ok:
-                    raise RuntimeError('Could not encode source preview')
-                (args.output / 'source-preview.png').write_bytes(source_encoded.tobytes())
+                default_row = next((row for row in meta['images'] if row['split']=='validation'), meta['images'][0])
+                last_request_id = None
+                last_request_error = None
 
-                def observer(params, progress, _save):
-                    step = int(progress['step'])
-                    if step and step % args.preview_every and step != progress['target']:
-                        return None
-                    try:
-                        with torch.no_grad():
-                            rgb, _, _ = render(params, preview_camera, degree=min(3, step // 1000))
-                            pixels = (rgb[0].clamp(0, 1).cpu().numpy() * 255).round().astype(np.uint8)
-                        ok, encoded = cv2.imencode('.png', pixels[:, :, ::-1])
-                        if not ok:
-                            raise RuntimeError('Could not encode training preview')
-                        temporary = args.output / 'preview-next.png'
-                        temporary.write_bytes(encoded.tobytes())
-                        temporary.replace(args.output / 'preview-current.png')
-                        json_write(args.output / 'preview.json', dict(
-                            step=step, target=int(progress['target']),
-                            source_image=preview_row['image'],
-                            split=preview_row['split'],
-                            camera=preview_camera,
-                        ))
-                    except Exception as error:
-                        print(f'Preview unavailable at step {step}: {error}', flush=True)
+            def observer(params, progress, save):
+                nonlocal last_step
+                step = last_step = int(progress['step'])
+                action = control.observe(step, save, target=int(progress['target']))
+                if action == 'stop' or not args.preview_every:
+                    return action
+                nonlocal last_request_id, last_request_error
+                try:
+                    request = read_request(args.output, package_sha256, meta['images'])
+                except (OSError, ValueError, TypeError) as error:
+                    if str(error) != last_request_error:
+                        print(f'Preview request rejected: {error}', flush=True)
+                        last_request_error = str(error)
+                    request = None
+                else:
+                    last_request_error = None
+                request_id = request['request_id'] if request else 'default'
+                if (step and step % args.preview_every and step != progress['target']
+                        and request_id == last_request_id):
                     return None
+                try:
+                    row = request['row'] if request else default_row
+                    camera = scaled_camera(row, args.preview_size)
+                    source = read_image(args.dataset / row['image'])
+                    source = cv2.resize(source, (camera['width'], camera['height']),
+                                        interpolation=cv2.INTER_AREA)
+                    with torch.no_grad():
+                        rgb, _, _ = render(params, camera, degree=min(3, step // 1000))
+                        pixels = (rgb[0].clamp(0, 1).cpu().numpy() * 255).round().astype(np.uint8)
+                    publish(args.output, request_id=request_id, row=row, step=step,
+                            target=int(progress['target']), source_bgr=source, render_rgb=pixels)
+                    last_request_id = request_id
+                except Exception as error:
+                    print(f'Preview unavailable at step {step}: {error}', flush=True)
+                return None
 
-            train(args.dataset,args.output,args.steps,not args.no_photo_comp,args.resume,
-                  observer=observer,
-                  use_bilateral_grid=args.use_bilateral_grid,use_sparse_depth=args.use_sparse_depth,
-                  sparse_depth_weight=args.sparse_depth_weight)
+            with gpu_session(cancel=control):
+                control.start_running()
+                if args.resume or args.restart_from_step_zero:
+                    previous_failure = args.output/'failure.json'
+                    if previous_failure.is_file():
+                        previous_failure.rename(args.output/f'failure-before-retry-{time.time_ns()}.json')
+                configure_windows_cuda()
+                result = train(args.dataset,args.output,args.steps,not args.no_photo_comp,args.resume,
+                      observer=observer,
+                      use_bilateral_grid=args.use_bilateral_grid,use_sparse_depth=args.use_sparse_depth,
+                      sparse_depth_weight=args.sparse_depth_weight,
+                      restart_from_step_zero=args.restart_from_step_zero)
+            control.complete(result['status'], int(result['steps']))
         except Exception as error:
+            if isinstance(error, InterruptedError) and control is not None and control.status == 'stopping':
+                checkpoint = args.output/'checkpoint.pt'
+                prior_record = args.output/'training.json'
+                prior = None
+                prior_step = None
+                archive = None
+                if prior_record.is_file():
+                    prior_bytes = prior_record.read_bytes()
+                    try:
+                        prior = json.loads(prior_bytes)
+                    except (ValueError, UnicodeError):
+                        prior = None
+                    if isinstance(prior, dict) and isinstance(prior.get('steps'), int) and prior['steps'] >= 0:
+                        prior_step = prior['steps']
+                    archive = f'training-before-wait-cancel-{time.time_ns()}.json'
+                    (args.output/archive).write_bytes(prior_bytes)
+                previous_failure = args.output/'failure.json'
+                if previous_failure.is_file():
+                    previous_failure.rename(args.output/f'failure-before-wait-cancel-{time.time_ns()}.json')
+                summary = dict(status='stopped', steps=(prior_step if checkpoint.is_file() else 0),
+                               target=args.steps, reason='gpu_wait_cancelled',
+                               checkpoint=str(checkpoint) if checkpoint.is_file() else None)
+                prior_model_digest = prior.get('model_sha256') if isinstance(prior, dict) else None
+                if (checkpoint.is_file() and isinstance(prior_model_digest, str) and
+                        (args.output/'model.ply').is_file() and
+                        sha256_file(args.output/'model.ply') == prior_model_digest):
+                    summary['model_sha256'] = prior_model_digest
+                if archive:
+                    summary['previous_training_record'] = dict(
+                        path=archive, sha256=sha256_file(args.output/archive))
+                json_write(args.output/'training.json', summary)
+                control.complete('stopped', prior_step or 0)
+                return
+            if control is not None:
+                control.complete('failed', last_step)
             # Initialization can fail before the first checkpoint (notably OOM).
             # Preserve the immutable input/config as the explicit restart point.
             if (args.output/'config.json').is_file() and not (args.output/'failure.json').exists():
@@ -519,7 +586,7 @@ def main():
                 json_write(args.output/'failure.json',dict(status='failed',error=str(error),
                     recoverable_checkpoint=str(checkpoint) if checkpoint.is_file() else None,
                     recoverable_dataset=str(args.dataset.resolve()),
-                    note='Free GPU memory, then resume a completed checkpoint or use a new output directory with the same input/config. No quality reduction applied.'))
+                    note='Free GPU memory, then resume a completed checkpoint or retry this verified experiment from step zero when no checkpoint exists. No quality reduction applied.'))
             raise
 
 

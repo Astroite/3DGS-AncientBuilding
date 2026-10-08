@@ -277,9 +277,13 @@ def postshot_adapter(package: Path, output: Path) -> Path:
             continue
         name = Path(row['image']).name
         storage.append(link_or_copy(package/row['image'],output/'images'/name))
-        mask = cv2.imread(str(package/row['mask']),cv2.IMREAD_GRAYSCALE)
-        if not cv2.imwrite(str(output/'masks'/f'{Path(name).stem}.png'),255-mask):
+        mask = cv2.imdecode(np.fromfile(package/row['mask'],dtype=np.uint8),cv2.IMREAD_GRAYSCALE)
+        if mask is None:
+            raise RuntimeError(f'Postshot source mask cannot be decoded: {row["mask"]}')
+        ok, encoded = cv2.imencode('.png',255-mask)
+        if not ok:
             raise RuntimeError('Postshot mask conversion failed')
+        encoded.tofile(output/'masks'/f'{Path(name).stem}.png')
     json_write(output/'storage.json',dict(files=storage,duplicate_bytes=sum(r['duplicate_bytes'] for r in storage)))
     json_write(output/'adapter.json',{'package_sha256':sha256_file(package/'dataset.json'),'mask_polarity':'white_ignore','split':'train'})
     validate_postshot_adapter(package,output,meta)
@@ -310,8 +314,8 @@ def validate_postshot_adapter(package: Path, output: Path, meta: dict | None = N
         expected.update((image,mask))
         if sha256_file(output/image) != meta['files'][row['image']]:
             raise RuntimeError(f'Postshot image changed: {image}')
-        original = cv2.imread(str(package/row['mask']),cv2.IMREAD_GRAYSCALE)
-        converted = cv2.imread(str(output/mask),cv2.IMREAD_GRAYSCALE)
+        original = cv2.imdecode(np.fromfile(package/row['mask'],dtype=np.uint8),cv2.IMREAD_GRAYSCALE)
+        converted = cv2.imdecode(np.fromfile(output/mask,dtype=np.uint8),cv2.IMREAD_GRAYSCALE)
         if original is None or converted is None or not np.array_equal(converted,255-original):
             raise RuntimeError(f'Postshot mask changed or has wrong polarity: {mask}')
     actual = {p.relative_to(output).as_posix() for p in output.rglob('*') if p.is_file()}

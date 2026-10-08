@@ -60,19 +60,15 @@ class Editor:
     def xyz(self):
         return self.data[:,:3]@self.matrix[:3,:3].T+self.matrix[:3,3]
 
-    def select(self, camera, rectangle, through=False):
+    def select(self, camera, rectangle, through=False, visible=None):
         xy,z = project_points(self.xyz(),camera)
         x0,y0,x1,y1 = rectangle
         candidate = self.keep & (z>0) & (xy[:,0]>=min(x0,x1)) & (xy[:,0]<=max(x0,x1)) & (xy[:,1]>=min(y0,y1)) & (xy[:,1]<=max(y0,y1))
         candidate &= (xy[:,0]>=0)&(xy[:,0]<camera['width'])&(xy[:,1]>=0)&(xy[:,1]<camera['height'])
         if not through:
-            visible = np.flatnonzero(self.keep & (z>0)&(xy[:,0]>=0)&(xy[:,0]<camera['width'])&(xy[:,1]>=0)&(xy[:,1]<camera['height']))
-            ordered = visible[np.argsort(z[visible],kind='stable')]
-            bins = np.floor(xy[ordered]).astype(np.int64)
-            _,first = np.unique(bins[:,1]*camera['width']+bins[:,0],return_index=True)
-            front = np.zeros(len(z),bool)
-            front[ordered[first]]=True
-            candidate &= front
+            if visible is None or np.shape(visible) != (len(self.data),):
+                raise ValueError('非穿透选择需要当前渲染的可见贡献结果')
+            candidate &= visible
         self.selected = candidate
 
     def invert(self):
@@ -104,8 +100,14 @@ class Editor:
             self.selected = self.keep & ~retained
         return int(retained.sum())
 
-    def transform(self, translation=(0,0,0), rotation=(0,0,0), scale=1):
-        if not np.isfinite([*translation,*rotation,scale]).all() or scale<=0:
+    def transform(self, translation=(0,0,0), rotation=(0,0,0), scale=1, pivot=(0,0,0)):
+        m=self.transform_matrix(translation,rotation,scale,pivot)
+        self._remember()
+        self.matrix=m@self.matrix
+
+    @staticmethod
+    def transform_matrix(translation=(0,0,0), rotation=(0,0,0), scale=1, pivot=(0,0,0)):
+        if not np.isfinite([*translation,*rotation,scale,*pivot]).all() or scale<=0:
             raise ValueError('变换必须有限，缩放必须大于零')
         x,y,z = np.radians(rotation)
         rx=np.array([[1,0,0],[0,np.cos(x),-np.sin(x)],[0,np.sin(x),np.cos(x)]])
@@ -113,15 +115,17 @@ class Editor:
         rz=np.array([[np.cos(z),-np.sin(z),0],[np.sin(z),np.cos(z),0],[0,0,1]])
         m=np.eye(4)
         m[:3,:3]=scale*(rz@ry@rx)
-        m[:3,3]=translation
-        self._remember()
-        self.matrix=m@self.matrix
+        pivot=np.asarray(pivot,float)
+        m[:3,3]=np.asarray(translation,float)+pivot-m[:3,:3]@pivot
+        return m
 
-    def materialize(self):
-        data=self.data[self.keep].copy()
-        scale=np.cbrt(np.linalg.det(self.matrix[:3,:3]))
-        rotation=self.matrix[:3,:3]/scale
-        data[:,:3]=data[:,:3]@self.matrix[:3,:3].T+self.matrix[:3,3]
+    def materialize(self, matrix_override=None, keep_override=None):
+        matrix=self.matrix if matrix_override is None else np.asarray(matrix_override)
+        keep=self.keep if keep_override is None else np.asarray(keep_override, dtype=bool)
+        data=self.data[keep].copy()
+        scale=np.cbrt(np.linalg.det(matrix[:3,:3]))
+        rotation=matrix[:3,:3]/scale
+        data[:,:3]=data[:,:3]@matrix[:3,:3].T+matrix[:3,3]
         data[:,3:6]=data[:,3:6]@rotation.T
         offset=FLOAT_PROPERTIES.index('scale_0')
         data[:,offset:offset+3]+=np.log(scale)

@@ -5,9 +5,9 @@ $global:GsstudioPython = Join-Path $global:GsstudioAppRoot '.venv\Scripts\python
 if (-not (Test-Path -LiteralPath $global:GsstudioPython -PathType Leaf)) {
     throw 'Native venv missing. Run GSStudio/scripts/bootstrap-windows.ps1 first.'
 }
-if (-not $DataRoot) { $DataRoot = $env:GSSTUDIO_DATA_ROOT }
-if (-not $DataRoot) { $DataRoot = Join-Path (Split-Path $global:GsstudioAppRoot -Parent) 'Data' }
-$env:GSSTUDIO_DATA_ROOT = (Resolve-Path -LiteralPath $DataRoot).Path
+if ($DataRoot) {
+    $env:GSSTUDIO_DATA_ROOT = (Resolve-Path -LiteralPath $DataRoot).Path
+}
 $env:PYTHONUNBUFFERED = '1'
 # Force UTF-8 for child processes so Windows console code pages cannot
 # corrupt tool output capture (GBK vs UTF-8 decode failures).
@@ -29,10 +29,17 @@ if (-not $env:INSTA360_MEDIA_SDK_ROOT -and (Test-Path -LiteralPath (Join-Path $s
 }
 function global:Invoke-Gsstudio {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$GsstudioArguments)
+    $gsPreviousPythonPath = $env:PYTHONPATH
+    $env:PYTHONPATH = (Join-Path $global:GsstudioAppRoot 'src') + $(
+        if ($gsPreviousPythonPath) { [IO.Path]::PathSeparator + $gsPreviousPythonPath } else { '' }
+    )
     Push-Location -LiteralPath $global:GsstudioAppRoot
     try {
         & $global:GsstudioPython -m gsstudio @GsstudioArguments
         if ($LASTEXITCODE -ne 0) { throw "gsstudio exited with code $LASTEXITCODE" }
     }
-    finally { Pop-Location }
+    finally {
+        Pop-Location
+        $env:PYTHONPATH = $gsPreviousPythonPath
+    }
 }

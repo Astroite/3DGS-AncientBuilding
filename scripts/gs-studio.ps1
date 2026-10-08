@@ -2,9 +2,8 @@
 param([string]$DataRoot)
 $gsAppRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $candidates = @()
-if ($env:GSSTUDIO_GSPLAT_PYTHON) { $candidates += $env:GSSTUDIO_GSPLAT_PYTHON }
-$candidates += (Join-Path $gsAppRoot '.venv-gsplat\Scripts\python.exe')
 $candidates += (Join-Path $gsAppRoot '.venv\Scripts\python.exe')
+$candidates += (Join-Path $gsAppRoot '.venv-gsplat\Scripts\python.exe')
 $gsPython = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
 if (-not $gsPython) {
     throw 'Python environment missing. Run scripts/bootstrap-windows.ps1 first (or bootstrap-gsplat-windows.ps1 for the training environment).'
@@ -18,9 +17,16 @@ if ($DataRoot) {
 }
 $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
+$gsPreviousPythonPath = $env:PYTHONPATH
+$env:PYTHONPATH = (Join-Path $gsAppRoot 'src') + $(
+    if ($gsPreviousPythonPath) { [IO.Path]::PathSeparator + $gsPreviousPythonPath } else { '' }
+)
 Push-Location -LiteralPath $gsAppRoot
 try {
     & $gsPython -m gsstudio.interfaces.desktop
     if ($LASTEXITCODE -ne 0) { throw "GS-Studio exited with code $LASTEXITCODE" }
 }
-finally { Pop-Location }
+finally {
+    Pop-Location
+    $env:PYTHONPATH = $gsPreviousPythonPath
+}

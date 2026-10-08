@@ -21,6 +21,7 @@ from gsstudio.application import operations as ops
 from gsstudio.infrastructure.paths import host_path
 from gsstudio.infrastructure.persistence.run_repository import load_run
 from gsstudio.pipeline.input.sharp_select import run_select_sharp
+from gsstudio.interfaces.cli.external_import import app as external_import_app
 
 
 app = typer.Typer(
@@ -43,6 +44,7 @@ app.add_typer(catalog_app, name="catalog")
 app.add_typer(qa_app, name="qa")
 app.add_typer(capture_app, name="capture")
 app.add_typer(media_app, name="media")
+app.add_typer(external_import_app, name="external")
 console = Console()
 
 def _fatal(error: Exception) -> None:
@@ -749,6 +751,19 @@ def train_segment(
             duration_seconds=duration_seconds,
         )
         console.print(json.dumps(result, ensure_ascii=False, indent=2))
+    except Exception as error:
+        _fatal(error)
+
+
+@app.command("train-control")
+def train_control(
+    output: Annotated[Path, typer.Argument(help="Existing gsplat experiment directory")],
+    action: Annotated[str, typer.Argument(help="pause, resume, checkpoint, or stop")],
+) -> None:
+    """Request a safe step-boundary action in an active gsplat experiment."""
+    try:
+        result = ops.control_training(_data_root(), output, action)
+        console.print_json(json.dumps(result, ensure_ascii=False))
     except Exception as error:
         _fatal(error)
 

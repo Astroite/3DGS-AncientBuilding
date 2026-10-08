@@ -9,7 +9,6 @@ image/model binaries stay binary. Chinese paths are supported end-to-end.
 from __future__ import annotations
 
 import json
-import re
 import struct
 from pathlib import Path
 
@@ -55,6 +54,8 @@ def inside(root, name):
 def discover_models(root):
     root = Path(root)
     candidates = [root, root/'colmap', root/'sparse']
+    if root.is_dir():
+        candidates += sorted(p for p in root.iterdir() if p.is_dir())
     if (root/'sparse').is_dir():
         candidates += sorted(p for p in (root/'sparse').iterdir() if p.is_dir())
     if (root/'colmap').is_dir():
@@ -165,12 +166,47 @@ def pose(q, t):
     return m.tolist()
 
 
+def _write_training_colmap(output, records, source_points, colors, counts, ids):
+    """Publish a PINHOLE model matching the normalized training image names."""
+    folder = output/'colmap'
+    folder.mkdir()
+    tracks = {pid: [] for pid in ids}
+    with (folder/'cameras.bin').open('wb') as cameras, (folder/'images.bin').open('wb') as images:
+        cameras.write(struct.pack('<Q',len(records)))
+        images.write(struct.pack('<Q',len(records)))
+        for record in records:
+            iid, row, source, observations = record
+            k = row['K']
+            cameras.write(struct.pack('<iiQQ4d',iid,1,row['width'],row['height'],
+                k[0][0],k[1][1],k[0][2],k[1][2]))
+            images.write(struct.pack('<i7di',iid,*source['q'],*source['t'],iid))
+            images.write(Path(row['image']).name.encode('utf-8')+b'\0')
+            images.write(struct.pack('<Q',len(observations)))
+            for index,(x,y,pid) in enumerate(observations):
+                accepted = pid if pid in tracks else -1
+                images.write(struct.pack('<ddq',x,y,accepted))
+                if accepted != -1:
+                    tracks[accepted].append((iid,index))
+    with (folder/'points3D.bin').open('wb') as points:
+        points.write(struct.pack('<Q',len(ids)))
+        for pid in ids:
+            xyz = source_points[pid][0]
+            rgb = np.rint(colors[pid]/counts[pid]).astype(np.uint8)
+            track = tracks[pid]
+            points.write(struct.pack('<Q3d3BdQ',pid,*xyz,*rgb,0.,len(track)))
+            for image_id,index in track:
+                points.write(struct.pack('<ii',image_id,index))
+
+
 class Dataset:
-    def __init__(self, root, images=None, model=None, masks=None, white_ignore=False):
+    def __init__(self, root, images=None, model=None, masks=None, white_ignore=False,
+                 groups=None, independent_images=False):
         self.root = Path(root).resolve()
         self.image_root = Path(images).resolve() if images else self.root/'images'
         self.mask_root = Path(masks).resolve() if masks else None
         self.white_ignore = white_ignore
+        self.group_source = 'shared_package' if (self.root/'dataset.json').is_file() else 'required'
+        self.group_labels = {}
         self.errors, self.warnings, self.rows, self.files = [], [], [], {}
         self.model = None
         self.package = (self.root/'dataset.json').is_file()
@@ -185,6 +221,7 @@ class Dataset:
             self.files[str(self.root/'dataset.json')] = sha256_file(self.root/'dataset.json')
             self.white_ignore = False
             self.inventory = len(self.rows)
+            self.group_labels = {r['source_image']: str(r['frame']) for r in self.rows}
             self.warnings.append('已保留共享包的训练/验证分组、遮罩与初始化点；忽略外部遮罩选项。')
             for row in self.rows:
                 pixels=read_image(row['source_path'])
@@ -207,17 +244,42 @@ class Dataset:
                 raise ValueError('请选择一个 COLMAP 模型: '+', '.join(models))
             self.model = Path(model or models[0]).resolve()
             cameras, images_by_id, self.points = read_model(self.model)
+            self.cameras = cameras
             self.image_records = images_by_id
             inventory = sorted(p for p in self.image_root.rglob('*') if p.suffix.lower() in ('.jpg','.jpeg','.png'))
             self.inventory = len(inventory)
             used, names = set(), set()
-            frames = {int(m[1]) for im in images_by_id.values() if (m:=re.search(r'frame_(\d+)',im['name']))}
-            all_grouped = len([im for im in images_by_id.values() if re.search(r'frame_(\d+)',im['name'])]) == len(images_by_id)
-            groups = sorted(frames) if all_grouped else sorted(images_by_id)
-            if not all_grouped and frames:
-                self.errors.append('部分图片缺少 frame_ 分组，无法可靠划分全景训练/验证组。')
-            splits = {g: ('validation' if (i%8==7 or (len(groups)<8 and i==len(groups)-1)) else 'train') for i,g in enumerate(groups)}
-            self.warnings.append('未提供共享包：按 frame_ 全景分组划分验证集；无分组名称时按独立图片划分，时间仅为序号。')
+            names_in_model = {im['name'] for im in images_by_id.values()}
+            if groups is not None and independent_images:
+                self.errors.append('显式分组与每图独立确认不能同时使用。')
+            if groups is not None:
+                if not isinstance(groups, dict):
+                    self.errors.append('分组表须为图片名到分组 ID 的映射。')
+                else:
+                    missing = names_in_model - set(groups)
+                    extra_groups = set(groups) - names_in_model
+                    if missing or extra_groups or any(not str(value).strip() for value in groups.values()):
+                        self.errors.append('分组表必须精确覆盖 COLMAP 图片：缺少 '
+                            + ', '.join(sorted(missing)) + '；多余 ' + ', '.join(sorted(extra_groups)))
+                    else:
+                        self.group_source = 'explicit_mapping'
+                        self.group_labels = {name: str(groups[name]).strip() for name in names_in_model}
+            elif independent_images:
+                self.group_source = 'independent_images_confirmed'
+                self.group_labels = {im['name']: f'{iid:012d}' for iid, im in images_by_id.items()}
+            else:
+                self.errors.append('普通 COLMAP 缺少可信分组；请提供完整分组表，或明确确认每图独立。')
+            labels = set(self.group_labels.values())
+            ordered_labels = sorted(labels, key=int) if labels and all(label.isdecimal() for label in labels) else sorted(labels)
+            group_ids = {label: index + 1 for index, label in enumerate(ordered_labels)}
+            group_order = {label: index for index, label in enumerate(ordered_labels)}
+            splits = {label: ('validation' if (index % 8 == 7 or
+                (len(group_ids) < 8 and index == len(group_ids) - 1)) else 'train')
+                for label, index in group_order.items()}
+            if self.group_source == 'independent_images_confirmed':
+                self.warnings.append('已明确确认每图独立；时间仅为图片序号，不能据此推断全景采样组。')
+            elif self.group_source == 'explicit_mapping':
+                self.warnings.append('使用用户提供的完整分组表；时间仅为分组序号。')
             for iid, im in sorted(images_by_id.items()):
                 try:
                     name = im['name']
@@ -255,9 +317,11 @@ class Dataset:
                         if not (mask == (0 if white_ignore else 255)).any():
                             raise ValueError(f'{name}: 整张图片被遮罩排除')
                         self.files[str(mask_path)] = sha256_file(mask_path)
-                    group = int(re.search(r'frame_(\d+)',name)[1]) if all_grouped else iid
+                    label = self.group_labels.get(name)
+                    group = group_ids.get(label, iid)
                     self.rows.append(dict(source_image=name,source_path=str(source),mask_path=str(mask_path) if mask_path else None,
-                        image_id=iid,frame=group,timestamp_seconds=float(groups.index(group)),split=splits[group],
+                        image_id=iid,frame=group,timestamp_seconds=float(group_order.get(label, iid)),
+                        split=splits.get(label, 'unassigned'),
                         width=w,height=h,K=[[fx,0,cx],[0,fy,cy],[0,0,1]],world_to_camera=pose(im['q'],im['t'])))
                     self.files[str(source)] = sha256_file(source)
                     used.add(source)
@@ -295,16 +359,24 @@ class Dataset:
         output.mkdir(parents=True, exist_ok=False)
         rows = []
         colors, counts = {}, {}
+        track_images = {}
+        colmap_records = []
         for i,row in enumerate(self.rows):
             pixels, keep = read_image(row['source_path']), self.keep(row)
+            source_observations = []
             if not self.package and row['split']=='train':
                 for x,y,pid in self.image_records[row['image_id']]['obs']:
                     if not np.isfinite([x,y]).all():
+                        source_observations.append((0.,0.,-1))
                         continue
-                    x,y = int(round(x)),int(round(y))
-                    if pid in self.points and 0<=x<row['width'] and 0<=y<row['height'] and keep[y,x]:
-                        colors[pid] = colors.get(pid,np.zeros(3))+pixels[y,x,::-1]
+                    px,py = int(round(x)),int(round(y))
+                    valid = (pid in self.points and 0<=px<row['width'] and
+                             0<=py<row['height'] and keep[py,px])
+                    source_observations.append((float(x),float(y),pid if valid else -1))
+                    if valid:
+                        colors[pid] = colors.get(pid,np.zeros(3))+pixels[py,px,::-1]
                         counts[pid] = counts.get(pid,0)+1
+                        track_images.setdefault(pid,set()).add(row['image_id'])
             factor = min(1,max_size/max(row['width'],row['height'])) if max_size else 1
             w,h = max(1,round(row['width']*factor)),max(1,round(row['height']*factor))
             if factor!=1:
@@ -318,18 +390,26 @@ class Dataset:
             write_image(output/mask,keep.astype(np.uint8)*255)
             rows.append({k:v for k,v in dict(row,image=image,mask=mask,width=w,height=h,K=K.tolist()).items()
                          if k not in ('source_path','mask_path')})
+            if not self.package and row['split']=='train':
+                scaled = [(x*w/row['width'],y*h/row['height'],pid)
+                          for x,y,pid in source_observations]
+                colmap_records.append((row['image_id'],rows[-1],
+                                       self.image_records[row['image_id']],scaled))
         if self.package:
             xyz,rgb = self.xyz,self.rgb
         else:
-            ids = [p for p,n in counts.items() if n>=2]
+            ids = [p for p,n in counts.items() if n>=2 and len(track_images[p])>=2]
             if len(ids)<3:
                 raise ValueError('至少需要 3 个有两次未遮罩训练观测的初始化点')
             xyz = np.asarray([self.points[p][0] for p in ids],np.float32)
             rgb = np.asarray([np.rint(colors[p]/counts[p]) for p in ids],np.uint8)
+            _write_training_colmap(output,colmap_records,self.points,colors,counts,ids)
         np.savez(output/'points.npz',xyz=xyz,rgb=rgb)
-        json_write(output/'source.json',dict(root=str(self.root),files=self.files,white_ignore=self.white_ignore,max_size=max_size))
+        json_write(output/'source.json',dict(root=str(self.root),files=self.files,white_ignore=self.white_ignore,
+            max_size=max_size,group_source=self.group_source,group_labels=self.group_labels))
         json_write(output/'dataset.json',dict(schema_version=1,validation='passed',images=rows,
             coordinates='COLMAP',mask_polarity='white_keep',initial_points=len(xyz),
+            group_source=self.group_source,
             initialization_colors='unmasked_training_observations_only',
             files={p.relative_to(output).as_posix():sha256_file(p) for p in output.rglob('*') if p.is_file()}))
         validate_package(output)
